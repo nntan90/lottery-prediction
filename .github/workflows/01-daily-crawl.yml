@@ -1,0 +1,163 @@
+name: 01 - Daily Lottery Crawl
+
+# Chạy hàng ngày lúc 19:00 GMT+7 (12:00 UTC)
+on:
+  schedule:
+    - cron: '0 12 * * *'  # 19:00 GMT+7
+  workflow_dispatch:  # Cho phép chạy thủ công
+
+jobs:
+  crawl-xsmb:
+    name: Crawl XSMB
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Crawl XSMB Results
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.crawler.xsmb_crawler import XSMBCrawler
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('🚀 Starting XSMB crawler...')
+          
+          crawler = XSMBCrawler()
+          db = LotteryDB()
+          
+          # Crawl hôm qua (kết quả thường có sau 19h)
+          yesterday = datetime.now() - timedelta(days=1)
+          
+          results = crawler.fetch_results(yesterday.date())
+          
+          if results:
+              try:
+                  db.insert_draw(results)
+                  
+                  # Log success
+                  db.log_crawler_status({
+                      'crawl_date': yesterday.date(),
+                      'region': 'XSMB',
+                      'status': 'success',
+                      'records_inserted': 1
+                  })
+                  
+                  print('✅ XSMB crawl successful!')
+                  print(f'   Date: {yesterday.date()}')
+                  print(f'   Special Prize: {results[\"special_prize\"]}')
+                  
+              except Exception as e:
+                  # Log error
+                  db.log_crawler_status({
+                      'crawl_date': yesterday.date(),
+                      'region': 'XSMB',
+                      'status': 'failed',
+                      'error_message': str(e),
+                      'records_inserted': 0
+                  })
+                  print(f'❌ Error saving to database: {e}')
+                  exit(1)
+          else:
+              # Log failure
+              db.log_crawler_status({
+                  'crawl_date': yesterday.date(),
+                  'region': 'XSMB',
+                  'status': 'failed',
+                  'error_message': 'Crawler returned no results',
+                  'records_inserted': 0
+              })
+              print('❌ XSMB crawl failed - no results')
+              exit(1)
+          "
+  
+  crawl-xsmn:
+    name: Crawl XSMN
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Crawl XSMN Results
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.crawler.xsmn_crawler import XSMNCrawler
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('🚀 Starting XSMN crawler...')
+          
+          crawler = XSMNCrawler()
+          db = LotteryDB()
+          
+          yesterday = datetime.now() - timedelta(days=1)
+          
+          # Crawl TP.HCM (quay hàng ngày)
+          results = crawler.fetch_results(yesterday.date(), province='tp-hcm')
+          
+          if results:
+              try:
+                  db.insert_draw(results)
+                  
+                  db.log_crawler_status({
+                      'crawl_date': yesterday.date(),
+                      'region': 'XSMN',
+                      'status': 'success',
+                      'records_inserted': 1
+                  })
+                  
+                  print('✅ XSMN crawl successful!')
+                  print(f'   Date: {yesterday.date()}')
+                  print(f'   Special Prize: {results[\"special_prize\"]}')
+                  
+              except Exception as e:
+                  db.log_crawler_status({
+                      'crawl_date': yesterday.date(),
+                      'region': 'XSMN',
+                      'status': 'failed',
+                      'error_message': str(e),
+                      'records_inserted': 0
+                  })
+                  print(f'❌ Error saving to database: {e}')
+                  exit(1)
+          else:
+              db.log_crawler_status({
+                  'crawl_date': yesterday.date(),
+                  'region': 'XSMN',
+                  'status': 'failed',
+                  'error_message': 'Crawler returned no results',
+                  'records_inserted': 0
+              })
+              print('❌ XSMN crawl failed - no results')
+              exit(1)
+          "

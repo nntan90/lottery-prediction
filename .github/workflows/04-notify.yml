@@ -1,0 +1,108 @@
+name: 04 - Send Telegram Notifications
+
+# Trigger sau khi prediction workflow hoàn thành
+on:
+  workflow_run:
+    workflows: ["02 - Generate Predictions"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  notify:
+    name: Send Predictions to Telegram
+    runs-on: ubuntu-latest
+    # Chỉ chạy nếu prediction workflow thành công
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Send XSMB Prediction
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import asyncio
+          from src.bot.telegram_bot import LotteryNotifier
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          async def main():
+              print('📱 Sending XSMB prediction to Telegram...')
+              
+              db = LotteryDB()
+              bot = LotteryNotifier()
+              
+              # Lấy dự đoán cho ngày mai
+              tomorrow = (datetime.now() + timedelta(days=1)).date()
+              prediction = db.get_prediction_by_date(tomorrow, 'XSMB')
+              
+              if prediction:
+                  success = await bot.send_prediction(prediction)
+                  
+                  if success:
+                      print('✅ XSMB notification sent successfully!')
+                  else:
+                      print('❌ Failed to send XSMB notification')
+                      exit(1)
+              else:
+                  print('⚠️ No XSMB prediction found for tomorrow')
+                  exit(1)
+          
+          asyncio.run(main())
+          "
+      
+      - name: Wait before next message
+        run: sleep 3
+      
+      - name: Send XSMN Prediction
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import asyncio
+          from src.bot.telegram_bot import LotteryNotifier
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          async def main():
+              print('📱 Sending XSMN prediction to Telegram...')
+              
+              db = LotteryDB()
+              bot = LotteryNotifier()
+              
+              tomorrow = (datetime.now() + timedelta(days=1)).date()
+              prediction = db.get_prediction_by_date(tomorrow, 'XSMN')
+              
+              if prediction:
+                  success = await bot.send_prediction(prediction)
+                  
+                  if success:
+                      print('✅ XSMN notification sent successfully!')
+                  else:
+                      print('❌ Failed to send XSMN notification')
+                      exit(1)
+              else:
+                  print('⚠️ No XSMN prediction found for tomorrow')
+                  exit(1)
+          
+          asyncio.run(main())
+          "

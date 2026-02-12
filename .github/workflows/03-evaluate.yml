@@ -1,0 +1,157 @@
+name: 03 - Evaluate Predictions
+
+# Chạy lúc 19:30 GMT+7 (12:30 UTC)
+# Sau khi crawl xong, đánh giá predictions hôm qua
+on:
+  schedule:
+    - cron: '30 12 * * *'  # 19:30 GMT+7
+  workflow_dispatch:
+
+jobs:
+  evaluate-xsmb:
+    name: Evaluate XSMB Predictions
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Evaluate Yesterday's Predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('📊 Evaluating XSMB predictions...')
+          
+          db = LotteryDB()
+          yesterday = (datetime.now() - timedelta(days=1)).date()
+          
+          # Lấy dự đoán hôm qua
+          prediction = db.get_prediction_by_date(yesterday, 'XSMB')
+          
+          if not prediction:
+              print(f'⚠️ No prediction found for {yesterday}')
+              exit(0)  # Không fail workflow
+          
+          # Lấy kết quả thực tế
+          actual = db.get_draw_by_date(yesterday, 'XSMB')
+          
+          if not actual:
+              print(f'⚠️ No actual results found for {yesterday}')
+              print(f'   Results might not be available yet')
+              exit(0)
+          
+          # So sánh
+          pred_num = prediction['predicted_numbers']['predicted_number']
+          actual_num = actual['special_prize']
+          
+          print(f'🔍 Comparison:')
+          print(f'   Predicted: {pred_num}')
+          print(f'   Actual:    {actual_num}')
+          
+          # Tính số chữ số trùng
+          correct_digits = 0
+          for i, (p, a) in enumerate(zip(pred_num, actual_num)):
+              if p == a:
+                  correct_digits += 1
+                  print(f'   Position {i}: ✅ {p} = {a}')
+              else:
+                  print(f'   Position {i}: ❌ {p} ≠ {a}')
+          
+          accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
+          
+          # Lưu metrics
+          db.save_evaluation({
+              'evaluation_date': yesterday,
+              'region': 'XSMB',
+              'total_predictions': len(actual_num),
+              'correct_predictions': correct_digits,
+              'accuracy_rate': accuracy,
+              'model_version': 'frequency_v1'
+          })
+          
+          print(f'✅ Evaluation saved!')
+          print(f'   Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)} digits)')
+          "
+  
+  evaluate-xsmn:
+    name: Evaluate XSMN Predictions
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Evaluate Yesterday's Predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('📊 Evaluating XSMN predictions...')
+          
+          db = LotteryDB()
+          yesterday = (datetime.now() - timedelta(days=1)).date()
+          
+          prediction = db.get_prediction_by_date(yesterday, 'XSMN')
+          
+          if not prediction:
+              print(f'⚠️ No prediction found for {yesterday}')
+              exit(0)
+          
+          actual = db.get_draw_by_date(yesterday, 'XSMN')
+          
+          if not actual:
+              print(f'⚠️ No actual results found for {yesterday}')
+              exit(0)
+          
+          pred_num = prediction['predicted_numbers']['predicted_number']
+          actual_num = actual['special_prize']
+          
+          print(f'🔍 Comparison:')
+          print(f'   Predicted: {pred_num}')
+          print(f'   Actual:    {actual_num}')
+          
+          correct_digits = sum(1 for p, a in zip(pred_num, actual_num) if p == a)
+          accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
+          
+          db.save_evaluation({
+              'evaluation_date': yesterday,
+              'region': 'XSMN',
+              'total_predictions': len(actual_num),
+              'correct_predictions': correct_digits,
+              'accuracy_rate': accuracy,
+              'model_version': 'frequency_v1'
+          })
+          
+          print(f'✅ Evaluation saved! Accuracy: {accuracy*100:.1f}%')
+          "

@@ -1,0 +1,131 @@
+name: 02 - Generate Predictions
+
+# Chạy hàng ngày lúc 20:00 GMT+7 (13:00 UTC)
+# Sau khi crawl xong
+on:
+  schedule:
+    - cron: '0 13 * * *'  # 20:00 GMT+7
+  workflow_dispatch:
+
+jobs:
+  predict-xsmb:
+    name: Generate XSMB Prediction
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Generate Prediction
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.models.frequency_analyzer import FrequencyAnalyzer
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('🎯 Generating XSMB prediction...')
+          
+          db = LotteryDB()
+          
+          # Lấy 90 ngày dữ liệu lịch sử
+          historical = db.get_historical_data('XSMB', days=90)
+          
+          if not historical or len(historical) < 30:
+              print('⚠️ Not enough historical data (need at least 30 days)')
+              print(f'   Current: {len(historical) if historical else 0} days')
+              exit(1)
+          
+          print(f'📊 Loaded {len(historical)} historical records')
+          
+          # Train model
+          analyzer = FrequencyAnalyzer(historical)
+          prediction = analyzer.predict_next(n_digits=5)
+          
+          # Lưu dự đoán cho ngày mai
+          tomorrow = datetime.now() + timedelta(days=1)
+          
+          db.save_prediction({
+              'prediction_date': tomorrow.date(),
+              'region': 'XSMB',
+              'model_version': 'frequency_v1',
+              'predicted_numbers': prediction,
+              'confidence_score': prediction['confidence']
+          })
+          
+          print(f'✅ Prediction saved for {tomorrow.date()}')
+          print(f'   Predicted number: {prediction[\"predicted_number\"]}')
+          print(f'   Confidence: {prediction[\"confidence\"]*100:.0f}%')
+          print(f'   Hot numbers: {prediction[\"hot_numbers\"]}')
+          "
+  
+  predict-xsmn:
+    name: Generate XSMN Prediction
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Generate Prediction
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python -c "
+          from src.models.frequency_analyzer import FrequencyAnalyzer
+          from src.database.supabase_client import LotteryDB
+          from datetime import datetime, timedelta
+          
+          print('🎯 Generating XSMN prediction...')
+          
+          db = LotteryDB()
+          
+          historical = db.get_historical_data('XSMN', days=90)
+          
+          if not historical or len(historical) < 30:
+              print('⚠️ Not enough historical data')
+              exit(1)
+          
+          print(f'📊 Loaded {len(historical)} historical records')
+          
+          analyzer = FrequencyAnalyzer(historical)
+          prediction = analyzer.predict_next(n_digits=5)
+          
+          tomorrow = datetime.now() + timedelta(days=1)
+          
+          db.save_prediction({
+              'prediction_date': tomorrow.date(),
+              'region': 'XSMN',
+              'model_version': 'frequency_v1',
+              'predicted_numbers': prediction,
+              'confidence_score': prediction['confidence']
+          })
+          
+          print(f'✅ Prediction saved for {tomorrow.date()}')
+          print(f'   Predicted number: {prediction[\"predicted_number\"]}')
+          "
