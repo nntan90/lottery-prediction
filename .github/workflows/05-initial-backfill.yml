@@ -91,7 +91,7 @@ jobs:
                   print(f'  💤 Sleeping 3s...')
                   time.sleep(3)
           
-          print(f'\n{'='*60}')
+          print('\n' + '='*60)
           print(f'📊 XSMB Backfill Summary:')
           print(f'  ✅ Success: {success_count}/{days}')
           print(f'  ❌ Failed: {failed_count}/{days}')
@@ -162,7 +162,7 @@ jobs:
                   print(f'  💤 Sleeping 3s...')
                   time.sleep(3)
           
-          print(f'\n{'='*60}')
+          print('\n' + '='*60)
           print(f'📊 XSMN Backfill Summary:')
           print(f'  ✅ Success: {success_count}/{days}')
           print(f'  ❌ Failed: {failed_count}/{days}')
