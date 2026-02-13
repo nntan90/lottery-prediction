@@ -1,234 +1,162 @@
 """
-XSMB Crawler - Crawl kết quả xổ số miền Bắc
-Nguồn: xskt.com.vn (có thể thay đổi)
+XSMB Crawler - FIXED VERSION
+Crawl lottery results from xskt.com.vn with CORRECT selectors
 """
 
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, date
-from typing import Optional, Dict, List
+from datetime import date
+from typing import Optional, Dict
 import time
 
-
 class XSMBCrawler:
-    """Crawler cho xổ số miền Bắc"""
-    
-    # Nguồn chính - có thể thay đổi nếu website thay đổi cấu trúc
-    BASE_URL = "https://xskt.com.vn/xsmb"
-    
-    # Nguồn dự phòng
-    BACKUP_URL = "https://www.minhngoc.net.vn/xo-so-mien-bac"
+    """Crawler for XSMB (Northern Vietnam Lottery) results"""
     
     def __init__(self):
-        """Initialize crawler với headers"""
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                          'AppleWebKit/537.36 (KHTML, like Gecko) '
-                         'Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+                         'Chrome/120.0.0.0 Safari/537.36'
         }
     
     def fetch_results(self, target_date: date) -> Optional[Dict]:
         """
-        Crawl kết quả XSMB cho ngày cụ thể
+        Fetch XSMB results for a specific date
         
         Args:
-            target_date: Ngày cần crawl (date object)
-        
+            target_date: Date to fetch results for
+            
         Returns:
-            Dictionary chứa kết quả hoặc None nếu failed
-            {
-                'draw_date': date,
-                'region': 'XSMB',
-                'special_prize': '12345',
-                'first_prize': '67890',
-                'second_prize': ['11111', '22222'],
-                ...
-            }
+            Dictionary with lottery results or None if failed
         """
-        print(f"🔍 Crawling XSMB for {target_date}...")
-        
         try:
-            # Thử nguồn chính trước
             results = self._crawl_from_xskt(target_date)
-            
             if results:
-                print(f"✅ Successfully crawled from xskt.com.vn")
+                print(f"✅ Successfully crawled XSMB for {target_date}")
                 return results
-            
-            # Nếu fail, thử nguồn dự phòng
-            print(f"⚠️ Primary source failed, trying backup...")
-            results = self._crawl_from_minhngoc(target_date)
-            
-            if results:
-                print(f"✅ Successfully crawled from minhngoc.net.vn")
-                return results
-            
-            print(f"❌ All sources failed for {target_date}")
-            return None
-            
+            else:
+                print(f"❌ No data found for {target_date}")
+                return None
         except Exception as e:
-            print(f"❌ Error crawling XSMB: {e}")
+            print(f"❌ Error crawling XSMB for {target_date}: {e}")
             return None
     
     def _crawl_from_xskt(self, target_date: date) -> Optional[Dict]:
-        """
-        Crawl từ xskt.com.vn
+        """Crawl from xskt.com.vn"""
         
-        LƯU Ý: Cấu trúc HTML có thể thay đổi!
-        Nếu crawler không hoạt động, cần update selectors
-        """
+        # Format: dd-mm-yyyy
+        date_str = target_date.strftime("%d-%m-%Y")
+        url = f"https://xskt.com.vn/xsmb/{date_str}.html"
+        
+        print(f"🔍 Crawling: {url}")
+        
         try:
-            # Format URL: https://xskt.com.vn/xsmb/dd-mm-yyyy.html
-            date_str = target_date.strftime("%d-%m-%Y")
-            url = f"{self.BASE_URL}/{date_str}.html"
-            
-            print(f"  → Fetching: {url}")
-            
             response = requests.get(url, headers=self.headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Parse kết quả
-            # LƯU Ý: Selectors này là ví dụ, cần kiểm tra cấu trúc thực tế
-            results = {
+            # Find the XSMB result table
+            table = soup.find('table', class_='result', id='MB0')
+            
+            if not table:
+                print(f"  ⚠️ Table not found")
+                return None
+            
+            # Extract special prize (Giải ĐB) - in <em> tag
+            special_prize_em = table.find('em')
+            if not special_prize_em:
+                print(f"  ⚠️ Special prize not found")
+                return None
+            
+            special_prize = special_prize_em.text.strip()
+            
+            # Extract all <p> tags for other prizes
+            prize_ps = table.find_all('p')
+            
+            if len(prize_ps) < 7:
+                print(f"  ⚠️ Expected 7 prize rows, found {len(prize_ps)}")
+                return None
+            
+            # Parse prizes
+            # G1: 1 number (5 digits)
+            first_prize = prize_ps[0].text.strip()
+            
+            # G2: 2 numbers (5 digits each)
+            second_prize = [n.strip() for n in prize_ps[1].text.split()]
+            
+            # G3: 6 numbers (5 digits each)
+            third_prize = [n.strip() for n in prize_ps[2].text.split()]
+            
+            # G4: 4 numbers (5 digits each)
+            fourth_prize = [n.strip() for n in prize_ps[3].text.split()]
+            
+            # G5: 6 numbers (4 digits each)
+            fifth_prize = [n.strip() for n in prize_ps[4].text.split()]
+            
+            # G6: 3 numbers (3 digits each)
+            sixth_prize = [n.strip() for n in prize_ps[5].text.split()]
+            
+            # G7: 4 numbers (2 digits each)
+            seventh_prize = [n.strip() for n in prize_ps[6].text.split()]
+            
+            # Validate counts
+            if len(second_prize) != 2:
+                print(f"  ⚠️ G2: expected 2, got {len(second_prize)}")
+            if len(third_prize) != 6:
+                print(f"  ⚠️ G3: expected 6, got {len(third_prize)}")
+            if len(fourth_prize) != 4:
+                print(f"  ⚠️ G4: expected 4, got {len(fourth_prize)}")
+            if len(fifth_prize) != 6:
+                print(f"  ⚠️ G5: expected 6, got {len(fifth_prize)}")
+            if len(sixth_prize) != 3:
+                print(f"  ⚠️ G6: expected 3, got {len(sixth_prize)}")
+            if len(seventh_prize) != 4:
+                print(f"  ⚠️ G7: expected 4, got {len(seventh_prize)}")
+            
+            result = {
                 'draw_date': target_date,
                 'region': 'XSMB',
-                'special_prize': self._extract_prize(soup, 'special'),
-                'first_prize': self._extract_prize(soup, 'first'),
-                'second_prize': self._extract_prize_array(soup, 'second', 2),
-                'third_prize': self._extract_prize_array(soup, 'third', 6),
-                'fourth_prize': self._extract_prize_array(soup, 'fourth', 4),
-                'fifth_prize': self._extract_prize_array(soup, 'fifth', 6),
-                'sixth_prize': self._extract_prize_array(soup, 'sixth', 3),
-                'seventh_prize': self._extract_prize_array(soup, 'seventh', 4),
+                'special_prize': special_prize,
+                'first_prize': first_prize,
+                'second_prize': ','.join(second_prize),
+                'third_prize': ','.join(third_prize),
+                'fourth_prize': ','.join(fourth_prize),
+                'fifth_prize': ','.join(fifth_prize),
+                'sixth_prize': ','.join(sixth_prize),
+                'seventh_prize': ','.join(seventh_prize)
             }
             
-            # Validate: ít nhất phải có giải đặc biệt
-            if results['special_prize']:
-                return results
-            else:
-                print(f"  ⚠️ No special prize found - might be wrong selectors")
-                return None
-                
+            print(f"  ✅ Special Prize: {special_prize}")
+            print(f"  ✅ First Prize: {first_prize}")
+            
+            return result
+            
         except requests.RequestException as e:
             print(f"  ❌ Request error: {e}")
             return None
         except Exception as e:
             print(f"  ❌ Parse error: {e}")
             return None
-    
-    def _crawl_from_minhngoc(self, target_date: date) -> Optional[Dict]:
-        """
-        Crawl từ minhngoc.net.vn (backup source)
-        
-        TODO: Implement parser cho minhngoc.net.vn
-        Hiện tại return None, cần update khi có thời gian
-        """
-        # Placeholder - cần implement
-        print(f"  ⚠️ Backup source not implemented yet")
-        return None
-    
-    def _extract_prize(self, soup: BeautifulSoup, prize_type: str) -> Optional[str]:
-        """
-        Extract một giải thưởng đơn (ĐB, Nhất)
-        
-        LƯU Ý: Cần update selectors theo cấu trúc thực tế của website
-        """
-        try:
-            # Ví dụ selector - CẦN KIỂM TRA LẠI
-            if prize_type == 'special':
-                elem = soup.select_one('.special-prize .number')
-            elif prize_type == 'first':
-                elem = soup.select_one('.first-prize .number')
-            else:
-                return None
-            
-            if elem:
-                return elem.text.strip()
-            return None
-            
-        except Exception as e:
-            print(f"  ⚠️ Error extracting {prize_type}: {e}")
-            return None
-    
-    def _extract_prize_array(
-        self, 
-        soup: BeautifulSoup, 
-        prize_type: str, 
-        expected_count: int
-    ) -> List[str]:
-        """
-        Extract các giải có nhiều số (Nhì, Ba, Tư, ...)
-        
-        Args:
-            soup: BeautifulSoup object
-            prize_type: Loại giải ('second', 'third', ...)
-            expected_count: Số lượng số dự kiến
-        
-        Returns:
-            List of strings
-        """
-        try:
-            # Ví dụ selector - CẦN KIỂM TRA LẠI
-            selector_map = {
-                'second': '.second-prize .number',
-                'third': '.third-prize .number',
-                'fourth': '.fourth-prize .number',
-                'fifth': '.fifth-prize .number',
-                'sixth': '.sixth-prize .number',
-                'seventh': '.seventh-prize .number',
-            }
-            
-            selector = selector_map.get(prize_type)
-            if not selector:
-                return []
-            
-            elements = soup.select(selector)
-            numbers = [elem.text.strip() for elem in elements]
-            
-            # Validate count
-            if len(numbers) != expected_count:
-                print(f"  ⚠️ Expected {expected_count} numbers for {prize_type}, got {len(numbers)}")
-            
-            return numbers
-            
-        except Exception as e:
-            print(f"  ⚠️ Error extracting {prize_type} array: {e}")
-            return []
 
 
-def test_crawler():
-    """Test crawler với ngày hôm qua"""
-    from datetime import timedelta
+# Test function
+if __name__ == "__main__":
+    from datetime import datetime, timedelta
+    
+    print("=" * 60)
+    print("🧪 TESTING XSMB CRAWLER (FIXED VERSION)")
+    print("=" * 60)
     
     crawler = XSMBCrawler()
-    yesterday = date.today() - timedelta(days=1)
     
-    print(f"\n{'='*60}")
-    print(f"Testing XSMB Crawler")
-    print(f"{'='*60}\n")
-    
-    results = crawler.fetch_results(yesterday)
+    # Test with yesterday
+    yesterday = datetime.now() - timedelta(days=1)
+    results = crawler.fetch_results(yesterday.date())
     
     if results:
-        print(f"\n✅ Crawl successful!")
-        print(f"\nResults:")
-        print(f"  Date: {results['draw_date']}")
-        print(f"  Region: {results['region']}")
-        print(f"  Special Prize: {results['special_prize']}")
-        print(f"  First Prize: {results['first_prize']}")
-        print(f"  Second Prize: {results['second_prize']}")
+        print("\n✅ SUCCESS! Results:")
+        for key, value in results.items():
+            print(f"  {key}: {value}")
     else:
-        print(f"\n❌ Crawl failed!")
-        print(f"\n⚠️ LƯU Ý:")
-        print(f"  1. Kiểm tra website nguồn có hoạt động không")
-        print(f"  2. Cần update CSS selectors nếu website thay đổi cấu trúc")
-        print(f"  3. Thử chạy với ngày khác (có thể chưa có kết quả)")
-
-
-if __name__ == "__main__":
-    # Test khi chạy file này trực tiếp
-    test_crawler()
+        print("\n❌ FAILED")
