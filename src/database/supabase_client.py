@@ -71,9 +71,10 @@ class LotteryDB:
         
         try:
             # Upsert: insert nếu chưa có, update nếu đã có
+            # Use the new constraint with province column
             response = self.supabase.table("lottery_draws").upsert(
                 draw_data,
-                on_conflict='draw_date,region'  # Unique constraint columns
+                on_conflict='draw_date,region,province'  # Updated constraint
             ).execute()
             return response
         except Exception as e:
