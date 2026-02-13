@@ -78,27 +78,34 @@ class XSMBCrawler:
                 print(f"  ⚠️ Expected 7 prize rows, found {len(prize_ps)}")
                 return None
             
-            # Parse prizes
+            # Parse prizes - use regex to split numbers properly
+            import re
+            
+            def parse_numbers(text):
+                """Extract all numbers from text, handling <br/> and spaces"""
+                # .split() handles whitespace and newlines from <br/> tags perfectly
+                return [n for n in text.split() if n.isdigit()]
+            
             # G1: 1 number (5 digits)
             first_prize = prize_ps[0].text.strip()
             
             # G2: 2 numbers (5 digits each)
-            second_prize = [n.strip() for n in prize_ps[1].text.split()]
+            second_prize = parse_numbers(prize_ps[1].text)
             
             # G3: 6 numbers (5 digits each)
-            third_prize = [n.strip() for n in prize_ps[2].text.split()]
+            third_prize = parse_numbers(prize_ps[2].text)
             
             # G4: 4 numbers (5 digits each)
-            fourth_prize = [n.strip() for n in prize_ps[3].text.split()]
+            fourth_prize = parse_numbers(prize_ps[3].text)
             
             # G5: 6 numbers (4 digits each)
-            fifth_prize = [n.strip() for n in prize_ps[4].text.split()]
+            fifth_prize = parse_numbers(prize_ps[4].text)
             
             # G6: 3 numbers (3 digits each)
-            sixth_prize = [n.strip() for n in prize_ps[5].text.split()]
+            sixth_prize = parse_numbers(prize_ps[5].text)
             
             # G7: 4 numbers (2 digits each)
-            seventh_prize = [n.strip() for n in prize_ps[6].text.split()]
+            seventh_prize = parse_numbers(prize_ps[6].text)
             
             # Validate counts
             if len(second_prize) != 2:
@@ -119,12 +126,12 @@ class XSMBCrawler:
                 'region': 'XSMB',
                 'special_prize': special_prize,
                 'first_prize': first_prize,
-                'second_prize': ','.join(second_prize),
-                'third_prize': ','.join(third_prize),
-                'fourth_prize': ','.join(fourth_prize),
-                'fifth_prize': ','.join(fifth_prize),
-                'sixth_prize': ','.join(sixth_prize),
-                'seventh_prize': ','.join(seventh_prize)
+                'second_prize': second_prize,  # PostgreSQL array
+                'third_prize': third_prize,
+                'fourth_prize': fourth_prize,
+                'fifth_prize': fifth_prize,
+                'sixth_prize': sixth_prize,
+                'seventh_prize': seventh_prize
             }
             
             print(f"  ✅ Special Prize: {special_prize}")
