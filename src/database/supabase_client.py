@@ -55,6 +55,31 @@ class LotteryDB:
             print(f"❌ Error inserting draw: {e}")
             raise
     
+    def upsert_draw(self, draw_data: Dict) -> Dict:
+        """
+        Insert hoặc update kết quả (upsert - không báo lỗi nếu trùng)
+        
+        Args:
+            draw_data: Dictionary chứa thông tin kết quả
+        
+        Returns:
+            Response từ Supabase
+        """
+        # Convert date object sang string nếu cần
+        if isinstance(draw_data.get('draw_date'), date):
+            draw_data['draw_date'] = draw_data['draw_date'].isoformat()
+        
+        try:
+            # Upsert: insert nếu chưa có, update nếu đã có
+            response = self.supabase.table("lottery_draws").upsert(
+                draw_data,
+                on_conflict='draw_date,region'  # Unique constraint columns
+            ).execute()
+            return response
+        except Exception as e:
+            print(f"❌ Error upserting draw: {e}")
+            raise
+    
     def get_historical_data(
         self, 
         region: str, 
