@@ -1,157 +1,190 @@
 """
-XSMN Crawler - Crawl kết quả xổ số miền Nam
-Nguồn: xskt.com.vn (có thể thay đổi)
+XSMN Crawler - FIXED VERSION
+Crawl lottery results from xskt.com.vn with CORRECT selectors
 """
 
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, date
-from typing import Optional, Dict, List
+from datetime import date
+from typing import Optional, Dict
 import time
 
-
 class XSMNCrawler:
-    """Crawler cho xổ số miền Nam"""
+    """Crawler for XSMN (Southern Vietnam Lottery) results"""
     
-    BASE_URL = "https://xskt.com.vn/xsmn"
-    BACKUP_URL = "https://www.minhngoc.net.vn/xo-so-mien-nam"
+    # Province mapping
+    PROVINCE_MAP = {
+        'tp-hcm': 'TP.HCM',
+        'dong-thap': 'Đồng Tháp',
+        'ca-mau': 'Cà Mau',
+        'ben-tre': 'Bến Tre',
+        'vung-tau': 'Vũng Tàu',
+        'bac-lieu': 'Bạc Liêu',
+        'dong-nai': 'Đồng Nai',
+        'can-tho': 'Cần Thơ',
+        'soc-trang': 'Sóc Trăng',
+        'tay-ninh': 'Tây Ninh',
+        'an-giang': 'An Giang',
+        'binh-thuan': 'Bình Thuận',
+        'vinh-long': 'Vĩnh Long',
+        'binh-duong': 'Bình Dương',
+        'tra-vinh': 'Trà Vinh',
+        'long-an': 'Long An',
+        'binh-phuoc': 'Bình Phước',
+        'hau-giang': 'Hậu Giang',
+        'tien-giang': 'Tiền Giang',
+        'kien-giang': 'Kiên Giang',
+        'da-lat': 'Đà Lạt'
+    }
     
     def __init__(self):
-        """Initialize crawler với headers"""
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                          'AppleWebKit/537.36 (KHTML, like Gecko) '
-                         'Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+                         'Chrome/120.0.0.0 Safari/537.36'
         }
     
-    def fetch_results(self, target_date: date, province: str = "tp-hcm") -> Optional[Dict]:
+    def fetch_results(self, target_date: date, province: str = 'tp-hcm') -> Optional[Dict]:
         """
-        Crawl kết quả XSMN cho ngày cụ thể
+        Fetch XSMN results for a specific date and province
         
         Args:
-            target_date: Ngày cần crawl
-            province: Tỉnh/thành (mặc định TP.HCM vì quay hàng ngày)
-        
+            target_date: Date to fetch results for
+            province: Province slug (e.g., 'tp-hcm', 'dong-thap')
+            
         Returns:
-            Dictionary chứa kết quả hoặc None
+            Dictionary with lottery results or None if failed
         """
-        print(f"🔍 Crawling XSMN ({province}) for {target_date}...")
-        
         try:
             results = self._crawl_from_xskt(target_date, province)
-            
             if results:
-                print(f"✅ Successfully crawled XSMN")
+                print(f"✅ Successfully crawled XSMN ({province}) for {target_date}")
                 return results
-            
-            print(f"❌ Failed to crawl XSMN")
-            return None
-            
+            else:
+                print(f"❌ No data found for XSMN ({province}) on {target_date}")
+                return None
         except Exception as e:
-            print(f"❌ Error crawling XSMN: {e}")
+            print(f"❌ Error crawling XSMN ({province}) for {target_date}: {e}")
             return None
     
     def _crawl_from_xskt(self, target_date: date, province: str) -> Optional[Dict]:
-        """
-        Crawl từ xskt.com.vn
+        """Crawl from xskt.com.vn"""
         
-        LƯU Ý: Cấu trúc tương tự XSMB nhưng có thể khác selectors
-        """
+        # Format: dd-mm-yyyy
+        date_str = target_date.strftime("%d-%m-%Y")
+        # Use XSMN general page which has all provinces
+        url = f"https://xskt.com.vn/xsmn/{date_str}.html"
+        
+        print(f"🔍 Crawling XSMN ({province}): {url}")
+        
         try:
-            date_str = target_date.strftime("%d-%m-%Y")
-            url = f"{self.BASE_URL}/{province}/{date_str}.html"
-            
-            print(f"  → Fetching: {url}")
-            
             response = requests.get(url, headers=self.headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Parse kết quả (tương tự XSMB)
-            results = {
-                'draw_date': target_date,
-                'region': 'XSMN',
-                'special_prize': self._extract_prize(soup, 'special'),
-                'first_prize': self._extract_prize(soup, 'first'),
-                'second_prize': self._extract_prize_array(soup, 'second', 1),
-                'third_prize': self._extract_prize_array(soup, 'third', 2),
-                'fourth_prize': self._extract_prize_array(soup, 'fourth', 7),
-                'fifth_prize': self._extract_prize_array(soup, 'fifth', 1),
-                'sixth_prize': self._extract_prize_array(soup, 'sixth', 3),
-                'seventh_prize': self._extract_prize_array(soup, 'seventh', 1),
-            }
+            # Find the XSMN table (id="MN0" or similar)
+            table = soup.find('table', class_='tbl-xsmn')
             
-            if results['special_prize']:
-                return results
-            else:
+            if not table:
+                print(f"  ⚠️ XSMN table not found")
+                return None
+            
+            # Find the column for the specific province
+            province_name = self.PROVINCE_MAP.get(province, province.title())
+            
+            # Find all header cells
+            headers = table.find_all('th')
+            province_col_index = None
+            
+            for idx, th in enumerate(headers):
+                if province_name.lower() in th.text.lower():
+                    province_col_index = idx
+                    print(f"  ✅ Found {province_name} in column {idx}")
+                    break
+            
+            if province_col_index is None:
+                print(f"  ⚠️ Province {province_name} not found in table")
+                return None
+            
+            # Extract data from the province column
+            rows = table.find_all('tr')
+            prizes = {}
+            
+            for row in rows[1:]:  # Skip header row
+                cells = row.find_all('td')
+                if len(cells) <= province_col_index:
+                    continue
+                
+                prize_name_cell = cells[0]
+                prize_value_cell = cells[province_col_index]
+                
+                prize_name = prize_name_cell.text.strip()
+                prize_value = prize_value_cell.text.strip().replace('\n', ',').replace(' ', '')
+                
+                # Map prize names
+                if 'ĐB' in prize_name or 'Đặc biệt' in prize_name:
+                    prizes['special_prize'] = prize_value
+                elif 'G.1' in prize_name or 'Giải nhất' in prize_name:
+                    prizes['first_prize'] = prize_value
+                elif 'G.2' in prize_name or 'Giải nhì' in prize_name:
+                    prizes['second_prize'] = prize_value
+                elif 'G.3' in prize_name or 'Giải ba' in prize_name:
+                    prizes['third_prize'] = prize_value
+                elif 'G.4' in prize_name or 'Giải tư' in prize_name:
+                    prizes['fourth_prize'] = prize_value
+                elif 'G.5' in prize_name or 'Giải năm' in prize_name:
+                    prizes['fifth_prize'] = prize_value
+                elif 'G.6' in prize_name or 'Giải sáu' in prize_name:
+                    prizes['sixth_prize'] = prize_value
+                elif 'G.7' in prize_name or 'Giải bảy' in prize_name:
+                    prizes['seventh_prize'] = prize_value
+                elif 'G.8' in prize_name or 'Giải tám' in prize_name:
+                    prizes['eighth_prize'] = prize_value
+            
+            if 'special_prize' not in prizes:
                 print(f"  ⚠️ No special prize found")
                 return None
-                
-        except Exception as e:
-            print(f"  ❌ Error: {e}")
-            return None
-    
-    def _extract_prize(self, soup: BeautifulSoup, prize_type: str) -> Optional[str]:
-        """Extract một giải thưởng đơn"""
-        try:
-            if prize_type == 'special':
-                elem = soup.select_one('.special-prize .number')
-            elif prize_type == 'first':
-                elem = soup.select_one('.first-prize .number')
-            else:
-                return None
             
-            if elem:
-                return elem.text.strip()
-            return None
-            
-        except Exception as e:
-            return None
-    
-    def _extract_prize_array(
-        self, 
-        soup: BeautifulSoup, 
-        prize_type: str, 
-        expected_count: int
-    ) -> List[str]:
-        """Extract các giải có nhiều số"""
-        try:
-            selector_map = {
-                'second': '.second-prize .number',
-                'third': '.third-prize .number',
-                'fourth': '.fourth-prize .number',
-                'fifth': '.fifth-prize .number',
-                'sixth': '.sixth-prize .number',
-                'seventh': '.seventh-prize .number',
+            result = {
+                'draw_date': target_date,
+                'region': 'XSMN',
+                'province': province,
+                **prizes
             }
             
-            selector = selector_map.get(prize_type)
-            if not selector:
-                return []
+            print(f"  ✅ Special Prize: {prizes.get('special_prize')}")
+            print(f"  ✅ First Prize: {prizes.get('first_prize')}")
             
-            elements = soup.select(selector)
-            numbers = [elem.text.strip() for elem in elements]
+            return result
             
-            return numbers
-            
+        except requests.RequestException as e:
+            print(f"  ❌ Request error: {e}")
+            return None
         except Exception as e:
-            return []
+            print(f"  ❌ Parse error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
 
+# Test function
 if __name__ == "__main__":
-    from datetime import timedelta
+    from datetime import datetime, timedelta
+    
+    print("=" * 60)
+    print("🧪 TESTING XSMN CRAWLER (FIXED VERSION)")
+    print("=" * 60)
     
     crawler = XSMNCrawler()
-    yesterday = date.today() - timedelta(days=1)
     
-    print(f"\nTesting XSMN Crawler\n{'='*60}\n")
-    
-    results = crawler.fetch_results(yesterday)
+    # Test with yesterday
+    yesterday = datetime.now() - timedelta(days=1)
+    results = crawler.fetch_results(yesterday.date(), province='tp-hcm')
     
     if results:
-        print(f"\n✅ Success! Special Prize: {results['special_prize']}")
+        print("\n✅ SUCCESS! Results:")
+        for key, value in results.items():
+            print(f"  {key}: {value}")
     else:
-        print(f"\n❌ Failed - need to update selectors")
+        print("\n❌ FAILED")
