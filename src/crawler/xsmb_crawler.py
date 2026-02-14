@@ -63,6 +63,29 @@ class XSMBCrawler:
                 print(f"  ⚠️ Table not found")
                 return None
             
+            # Extract province from table header
+            # Format: "XSMB> Thứ 6 (Hải Phòng)" or "XSMB> Chủ nhật (Hà Nội)"
+            province = None
+            header = table.find('th')
+            if header:
+                header_text = header.text.strip()
+                if '(' in header_text and ')' in header_text:
+                    province_name = header_text.split('(')[1].split(')')[0]
+                    # Map to province code
+                    province_map = {
+                        'Hà Nội': 'ha-noi',
+                        'Hải Phòng': 'hai-phong',
+                        'Bắc Ninh': 'bac-ninh',
+                        'Nam Định': 'nam-dinh',
+                        'Thái Bình': 'thai-binh',
+                        'Quảng Ninh': 'quang-ninh'
+                    }
+                    province = province_map.get(province_name, 'ha-noi')  # Default to ha-noi
+                    print(f"  📍 Province: {province_name} ({province})")
+            
+            if not province:
+                province = 'ha-noi'  # Default fallback
+            
             # Extract special prize (Giải ĐB) - in <em> tag
             special_prize_em = table.find('em')
             if not special_prize_em:
@@ -124,6 +147,7 @@ class XSMBCrawler:
             result = {
                 'draw_date': target_date,
                 'region': 'XSMB',
+                'province': province,  # Add province
                 'special_prize': special_prize,
                 'first_prize': first_prize,
                 'second_prize': second_prize,  # PostgreSQL array
