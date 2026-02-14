@@ -73,8 +73,8 @@ class XSMBMinhNgocCrawler:
                 print(f"  ❌ Result table not found")
                 return None
             
-            # Extract province from table
-            province = self._extract_province(result_table)
+            # Extract province from day of week
+            province = self._extract_province(target_date)
             print(f"  📍 Province: {province}")
             
             # Extract prizes
@@ -102,16 +102,31 @@ class XSMBMinhNgocCrawler:
             print(f"  ❌ Error: {e}")
             return None
     
-    def _extract_province(self, table) -> str:
-        """Extract province from table"""
-        text = table.get_text()
+    def _extract_province(self, target_date: date) -> str:
+        """
+        Extract province based on day of week
+        XSMB has fixed schedule:
+        - Monday: Hà Nội
+        - Tuesday: Quảng Ninh
+        - Wednesday: Bắc Ninh
+        - Thursday: Hà Nội
+        - Friday: Hải Phòng
+        - Saturday: Nam Định
+        - Sunday: Thái Bình
+        """
+        day_of_week = target_date.weekday()  # 0=Monday, 6=Sunday
         
-        for province_name, province_code in self.province_map.items():
-            if province_name in text:
-                return province_code
+        province_schedule = {
+            0: 'ha-noi',      # Monday
+            1: 'quang-ninh',  # Tuesday
+            2: 'bac-ninh',    # Wednesday
+            3: 'ha-noi',      # Thursday
+            4: 'hai-phong',   # Friday
+            5: 'nam-dinh',    # Saturday
+            6: 'thai-binh'    # Sunday
+        }
         
-        # Default to ha-noi
-        return 'ha-noi'
+        return province_schedule.get(day_of_week, 'ha-noi')
     
     def _extract_prizes(self, table) -> Optional[Dict]:
         """Extract all prizes from table"""
