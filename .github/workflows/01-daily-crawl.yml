@@ -54,20 +54,20 @@ jobs:
                   
                   # Log success
                   db.log_crawler_status({
-                      'crawl_date': today.date(),
+                      'crawl_date': today,
                       'region': 'XSMB',
                       'status': 'success',
                       'records_inserted': 1
                   })
                   
                   print('✅ XSMB crawl successful!')
-                  print(f'   Date: {today.date()}')
+                  print(f'   Date: {today}')
                   print(f'   Special Prize: {results[\"special_prize\"]}')
                   
               except Exception as e:
                   # Log error
                   db.log_crawler_status({
-                      'crawl_date': today.date(),
+                      'crawl_date': today,
                       'region': 'XSMB',
                       'status': 'failed',
                       'error_message': str(e),
@@ -78,7 +78,7 @@ jobs:
           else:
               # Log failure
               db.log_crawler_status({
-                  'crawl_date': today.date(),
+                  'crawl_date': today,
                   'region': 'XSMB',
                   'status': 'failed',
                   'error_message': 'Crawler returned no results',
@@ -137,7 +137,7 @@ jobs:
           for province in provinces:
               try:
                   print(f'   Crawling {province}...')
-                  results = crawler.fetch_results(today.date(), province=province)
+                  results = crawler.fetch_results(today, province=province)
                   
                   if results:
                       # Dùng upsert để tránh lỗi duplicate nếu chạy lại
@@ -153,7 +153,7 @@ jobs:
           if success_count > 0:
               # Log overall success if at least one province succeeded
               db.log_crawler_status({
-                  'crawl_date': today.date(),
+                  'crawl_date': today,
                   'region': 'XSMN',
                   'status': 'success',
                   'records_inserted': success_count,
@@ -163,7 +163,7 @@ jobs:
           else:
               # Log failure if ALL failed
               db.log_crawler_status({
-                  'crawl_date': today.date(),
+                  'crawl_date': today,
                   'region': 'XSMN',
                   'status': 'failed',
                   'error_message': 'No data found for any province',
