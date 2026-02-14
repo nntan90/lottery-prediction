@@ -44,9 +44,12 @@ class XSMBCrawler:
     def _crawl_from_xskt(self, target_date: date) -> Optional[Dict]:
         """Crawl from xskt.com.vn"""
         
-        # Format: dd-mm-yyyy
-        date_str = target_date.strftime("%d-%m-%Y")
-        url = f"https://xskt.com.vn/xsmb/{date_str}.html"
+        # Format: ngay-d-m-yyyy (e.g., ngay-13-2-2026)
+        # Note: xskt.com.vn uses no leading zeros for day/month in URL
+        day = target_date.day
+        month = target_date.month
+        year = target_date.year
+        url = f"https://xskt.com.vn/xsmb/ngay-{day}-{month}-{year}"
         
         print(f"🔍 Crawling: {url}")
         
@@ -112,23 +115,27 @@ class XSMBCrawler:
             # G1: 1 number (5 digits)
             first_prize = prize_ps[0].text.strip()
             
+            # Helper to get text with separator
+            def get_text_safe(element):
+                return element.get_text(separator=' ').strip()
+
             # G2: 2 numbers (5 digits each)
-            second_prize = parse_numbers(prize_ps[1].text)
+            second_prize = parse_numbers(get_text_safe(prize_ps[1]))
             
             # G3: 6 numbers (5 digits each)
-            third_prize = parse_numbers(prize_ps[2].text)
+            third_prize = parse_numbers(get_text_safe(prize_ps[2]))
             
             # G4: 4 numbers (5 digits each)
-            fourth_prize = parse_numbers(prize_ps[3].text)
+            fourth_prize = parse_numbers(get_text_safe(prize_ps[3]))
             
             # G5: 6 numbers (4 digits each)
-            fifth_prize = parse_numbers(prize_ps[4].text)
+            fifth_prize = parse_numbers(get_text_safe(prize_ps[4]))
             
             # G6: 3 numbers (3 digits each)
-            sixth_prize = parse_numbers(prize_ps[5].text)
+            sixth_prize = parse_numbers(get_text_safe(prize_ps[5]))
             
             # G7: 4 numbers (2 digits each)
-            seventh_prize = parse_numbers(prize_ps[6].text)
+            seventh_prize = parse_numbers(get_text_safe(prize_ps[6]))
             
             # Validate counts
             if len(second_prize) != 2:

@@ -37,12 +37,28 @@ class XSMNCrawler:
         'da-lat': 'Đà Lạt'
     }
     
+    # Province Schedule (0=Monday, 6=Sunday)
+    PROVINCE_SCHEDULE = {
+        0: ['tp-hcm', 'dong-thap', 'ca-mau'],
+        1: ['ben-tre', 'vung-tau', 'bac-lieu'],
+        2: ['dong-nai', 'can-tho', 'soc-trang'],
+        3: ['tay-ninh', 'an-giang', 'binh-thuan'],
+        4: ['vinh-long', 'binh-duong', 'tra-vinh'],
+        5: ['tp-hcm', 'long-an', 'binh-phuoc', 'hau-giang'],
+        6: ['tien-giang', 'kien-giang', 'da-lat']
+    }
+
     def __init__(self):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                          'AppleWebKit/537.36 (KHTML, like Gecko) '
                          'Chrome/120.0.0.0 Safari/537.36'
         }
+    
+    def get_provinces_for_date(self, target_date: date) -> list:
+        """Get list of provinces for a specific date based on schedule"""
+        weekday = target_date.weekday()
+        return self.PROVINCE_SCHEDULE.get(weekday, [])
     
     def fetch_results(self, target_date: date, province: str = 'tp-hcm') -> Optional[Dict]:
         """
@@ -70,10 +86,12 @@ class XSMNCrawler:
     def _crawl_from_xskt(self, target_date: date, province: str) -> Optional[Dict]:
         """Crawl from xskt.com.vn"""
         
-        # Format: dd-mm-yyyy
-        date_str = target_date.strftime("%d-%m-%Y")
+        # Format: ngay-d-m-yyyy (e.g., ngay-13-2-2026)
+        day = target_date.day
+        month = target_date.month
+        year = target_date.year
         # Use XSMN general page which has all provinces
-        url = f"https://xskt.com.vn/xsmn/{date_str}.html"
+        url = f"https://xskt.com.vn/xsmn/ngay-{day}-{month}-{year}"
         
         print(f"🔍 Crawling XSMN ({province}): {url}")
         

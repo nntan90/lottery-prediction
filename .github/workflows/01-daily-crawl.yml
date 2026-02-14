@@ -41,31 +41,34 @@ jobs:
           crawler = XSMBCrawler()
           db = LotteryDB()
           
-          # Crawl hôm qua (kết quả thường có sau 19h)
-          yesterday = datetime.now() - timedelta(days=1)
+          # Use Vietnam Time (UTC+7)
+          vn_time = datetime.utcnow() + timedelta(hours=7)
+          today = vn_time.date()
+          print(f"🕒 Current Vietnam Time: {vn_time}")
           
-          results = crawler.fetch_results(yesterday.date())
+          results = crawler.fetch_results(today)
           
           if results:
               try:
-                  db.insert_draw(results)
+              try:
+                  db.upsert_draw(results)
                   
                   # Log success
                   db.log_crawler_status({
-                      'crawl_date': yesterday.date(),
+                      'crawl_date': today.date(),
                       'region': 'XSMB',
                       'status': 'success',
                       'records_inserted': 1
                   })
                   
                   print('✅ XSMB crawl successful!')
-                  print(f'   Date: {yesterday.date()}')
+                  print(f'   Date: {today.date()}')
                   print(f'   Special Prize: {results[\"special_prize\"]}')
                   
               except Exception as e:
                   # Log error
                   db.log_crawler_status({
-                      'crawl_date': yesterday.date(),
+                      'crawl_date': today.date(),
                       'region': 'XSMB',
                       'status': 'failed',
                       'error_message': str(e),
@@ -76,7 +79,7 @@ jobs:
           else:
               # Log failure
               db.log_crawler_status({
-                  'crawl_date': yesterday.date(),
+                  'crawl_date': today.date(),
                   'region': 'XSMB',
                   'status': 'failed',
                   'error_message': 'Crawler returned no results',
@@ -120,44 +123,53 @@ jobs:
           crawler = XSMNCrawler()
           db = LotteryDB()
           
-          yesterday = datetime.now() - timedelta(days=1)
           
-          # Crawl TP.HCM (quay hàng ngày)
-          results = crawler.fetch_results(yesterday.date(), province='tp-hcm')
+          # Use Vietnam Time (UTC+7)
+          vn_time = datetime.utcnow() + timedelta(hours=7)
+          today = vn_time.date()
+          print(f"🕒 Current Vietnam Time: {vn_time}")
           
-          if results:
+          # Crawl XSMN for ALL provinces today
+          provinces = crawler.get_provinces_for_date(today.date())
+          print(f'   Target provinces: {provinces}')
+          
+          success_count = 0
+          
+          for province in provinces:
               try:
-                  db.insert_draw(results)
+                  print(f'   Crawling {province}...')
+                  results = crawler.fetch_results(today.date(), province=province)
                   
-                  db.log_crawler_status({
-                      'crawl_date': yesterday.date(),
-                      'region': 'XSMN',
-                      'status': 'success',
-                      'records_inserted': 1
-                  })
-                  
-                  print('✅ XSMN crawl successful!')
-                  print(f'   Date: {yesterday.date()}')
-                  print(f'   Special Prize: {results[\"special_prize\"]}')
-                  
+                  if results:
+                      # Dùng upsert để tránh lỗi duplicate nếu chạy lại
+                      db.upsert_draw(results)
+                      success_count += 1
+                      print(f'   ✅ {province} success!')
+                  else:
+                      print(f'   ⚠️ {province} no data')
+                      
               except Exception as e:
-                  db.log_crawler_status({
-                      'crawl_date': yesterday.date(),
-                      'region': 'XSMN',
-                      'status': 'failed',
-                      'error_message': str(e),
-                      'records_inserted': 0
-                  })
-                  print(f'❌ Error saving to database: {e}')
-                  exit(1)
-          else:
+                  print(f'   ❌ Error {province}: {e}')
+
+          if success_count > 0:
+              # Log overall success if at least one province succeeded
               db.log_crawler_status({
-                  'crawl_date': yesterday.date(),
+                  'crawl_date': today.date(),
+                  'region': 'XSMN',
+                  'status': 'success',
+                  'records_inserted': success_count,
+                  'error_message': f'Crawled {success_count}/{len(provinces)} provinces'
+              })
+              print(f'✅ XSMN crawl completed: {success_count}/{len(provinces)} success')
+          else:
+              # Log failure if ALL failed
+              db.log_crawler_status({
+                  'crawl_date': today.date(),
                   'region': 'XSMN',
                   'status': 'failed',
-                  'error_message': 'Crawler returned no results',
+                  'error_message': 'No data found for any province',
                   'records_inserted': 0
               })
-              print('❌ XSMN crawl failed - no results')
+              print('❌ XSMN crawl failed - no results for any province')
               exit(1)
           "
