@@ -84,7 +84,8 @@ class LotteryDB:
     def get_historical_data(
         self, 
         region: str, 
-        days: int = 365
+        days: int = 365,
+        province: str = None
     ) -> List[Dict]:
         """
         Lấy dữ liệu lịch sử
@@ -92,17 +93,23 @@ class LotteryDB:
         Args:
             region: 'XSMB' hoặc 'XSMN'
             days: Số ngày muốn lấy (mặc định 365)
+            province: Tỉnh (optional, for XSMN only)
         
         Returns:
             List of dictionaries chứa kết quả
         """
         try:
-            response = self.supabase.table("lottery_draws")\
+            query = self.supabase.table("lottery_draws")\
                 .select("*")\
                 .eq("region", region)\
                 .order("draw_date", desc=True)\
-                .limit(days)\
-                .execute()
+                .limit(days)
+            
+            # Add province filter if specified
+            if province:
+                query = query.eq("province", province)
+            
+            response = query.execute()
             
             return response.data
         except Exception as e:
@@ -171,7 +178,8 @@ class LotteryDB:
     def get_prediction_by_date(
         self, 
         prediction_date: date, 
-        region: str
+        region: str,
+        province: str = None
     ) -> Optional[Dict]:
         """
         Lấy dự đoán cho một ngày cụ thể
@@ -179,18 +187,24 @@ class LotteryDB:
         Args:
             prediction_date: Ngày cần lấy dự đoán
             region: 'XSMB' hoặc 'XSMN'
+            province: Tỉnh (optional, for XSMN only)
         
         Returns:
             Dictionary chứa dự đoán hoặc None
         """
         try:
-            response = self.supabase.table("predictions")\
+            query = self.supabase.table("predictions")\
                 .select("*")\
                 .eq("prediction_date", prediction_date.isoformat())\
                 .eq("region", region)\
                 .order("created_at", desc=True)\
-                .limit(1)\
-                .execute()
+                .limit(1)
+            
+            # Add province filter if specified
+            if province:
+                query = query.eq("province", province)
+            
+            response = query.execute()
             
             return response.data[0] if response.data else None
         except Exception as e:

@@ -41,7 +41,7 @@ jobs:
           
           db = LotteryDB()
           
-          # Lấy 90 ngày dữ liệu lịch sử
+          # Lấy 90 ngày dữ liệu lịch sử (XSMB không cần province)
           historical = db.get_historical_data('XSMB', days=90)
           
           if not historical or len(historical) < 30:
@@ -61,6 +61,7 @@ jobs:
           db.save_prediction({
               'prediction_date': tomorrow.date(),
               'region': 'XSMB',
+              'province': None,  # XSMB không có province
               'model_version': 'frequency_v1',
               'predicted_numbers': prediction,
               'confidence_score': prediction['confidence']
@@ -73,7 +74,7 @@ jobs:
           "
   
   predict-xsmn:
-    name: Generate XSMN Prediction
+    name: Generate XSMN Predictions (All Provinces)
     runs-on: ubuntu-latest
     
     steps:
@@ -91,7 +92,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Generate Prediction
+      - name: Generate Predictions for All Provinces
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -101,31 +102,68 @@ jobs:
           from src.database.supabase_client import LotteryDB
           from datetime import datetime, timedelta
           
-          print('🎯 Generating XSMN prediction...')
+          print('🎯 Generating XSMN predictions for all provinces...')
+          print('=' * 60)
+          
+          # Danh sách các tỉnh XSMN
+          provinces = [
+              'tp-hcm', 'dong-thap', 'ca-mau',
+              'ben-tre', 'vung-tau', 'bac-lieu',
+              'dong-nai', 'can-tho', 'soc-trang',
+              'tay-ninh', 'an-giang', 'binh-thuan',
+              'vinh-long', 'binh-duong', 'tra-vinh',
+              'long-an', 'binh-phuoc', 'hau-giang',
+              'tien-giang', 'kien-giang', 'da-lat'
+          ]
           
           db = LotteryDB()
-          
-          historical = db.get_historical_data('XSMN', days=90)
-          
-          if not historical or len(historical) < 30:
-              print('⚠️ Not enough historical data')
-              exit(1)
-          
-          print(f'📊 Loaded {len(historical)} historical records')
-          
-          analyzer = FrequencyAnalyzer(historical)
-          prediction = analyzer.predict_next(n_digits=5)
-          
           tomorrow = datetime.now() + timedelta(days=1)
           
-          db.save_prediction({
-              'prediction_date': tomorrow.date(),
-              'region': 'XSMN',
-              'model_version': 'frequency_v1',
-              'predicted_numbers': prediction,
-              'confidence_score': prediction['confidence']
-          })
+          success_count = 0
+          failed_count = 0
           
-          print(f'✅ Prediction saved for {tomorrow.date()}')
-          print(f'   Predicted number: {prediction[\"predicted_number\"]}')
+          for province in provinces:
+              try:
+                  print(f'\n📍 {province.upper()}...')
+                  
+                  # Lấy dữ liệu lịch sử cho tỉnh này
+                  historical = db.get_historical_data('XSMN', days=90, province=province)
+                  
+                  if not historical or len(historical) < 30:
+                      print(f'   ⚠️ Not enough data ({len(historical) if historical else 0} days)')
+                      failed_count += 1
+                      continue
+                  
+                  print(f'   📊 Loaded {len(historical)} records')
+                  
+                  # Train model cho tỉnh này
+                  analyzer = FrequencyAnalyzer(historical)
+                  prediction = analyzer.predict_next(n_digits=6)  # XSMN có 6 chữ số
+                  
+                  # Lưu dự đoán
+                  db.save_prediction({
+                      'prediction_date': tomorrow.date(),
+                      'region': 'XSMN',
+                      'province': province,
+                      'model_version': 'frequency_v1',
+                      'predicted_numbers': prediction,
+                      'confidence_score': prediction['confidence']
+                  })
+                  
+                  print(f'   ✅ Predicted: {prediction[\"predicted_number\"]} (confidence: {prediction[\"confidence\"]*100:.0f}%)')
+                  success_count += 1
+                  
+              except Exception as e:
+                  print(f'   ❌ Error: {e}')
+                  failed_count += 1
+          
+          print('\n' + '=' * 60)
+          print(f'📊 Summary:')
+          print(f'   ✅ Success: {success_count}/{len(provinces)}')
+          print(f'   ❌ Failed: {failed_count}/{len(provinces)}')
+          print('=' * 60)
+          
+          if success_count == 0:
+              print('❌ No predictions generated!')
+              exit(1)
           "

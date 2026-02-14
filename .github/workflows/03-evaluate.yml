@@ -90,7 +90,7 @@ jobs:
           "
   
   evaluate-xsmn:
-    name: Evaluate XSMN Predictions
+    name: Evaluate XSMN Predictions (All Provinces)
     runs-on: ubuntu-latest
     
     steps:
@@ -108,7 +108,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Evaluate Yesterday's Predictions
+      - name: Evaluate All Provinces
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -117,42 +117,77 @@ jobs:
           from src.database.supabase_client import LotteryDB
           from datetime import datetime, timedelta
           
-          print('📊 Evaluating XSMN predictions...')
+          print('📊 Evaluating XSMN predictions for all provinces...')
+          print('=' * 60)
+          
+          provinces = [
+              'tp-hcm', 'dong-thap', 'ca-mau',
+              'ben-tre', 'vung-tau', 'bac-lieu',
+              'dong-nai', 'can-tho', 'soc-trang',
+              'tay-ninh', 'an-giang', 'binh-thuan',
+              'vinh-long', 'binh-duong', 'tra-vinh',
+              'long-an', 'binh-phuoc', 'hau-giang',
+              'tien-giang', 'kien-giang', 'da-lat'
+          ]
           
           db = LotteryDB()
           yesterday = (datetime.now() - timedelta(days=1)).date()
           
-          prediction = db.get_prediction_by_date(yesterday, 'XSMN')
+          total_evaluated = 0
+          total_accuracy = 0.0
           
-          if not prediction:
-              print(f'⚠️ No prediction found for {yesterday}')
-              exit(0)
+          for province in provinces:
+              try:
+                  print(f'\n📍 {province.upper()}...')
+                  
+                  # Lấy prediction cho tỉnh này
+                  prediction = db.get_prediction_by_date(yesterday, 'XSMN', province)
+                  
+                  if not prediction:
+                      print(f'   ⚠️ No prediction found')
+                      continue
+                  
+                  # Lấy kết quả thực tế
+                  actual = db.get_draw_by_date(yesterday, 'XSMN', province)
+                  
+                  if not actual:
+                      print(f'   ⚠️ No actual results found')
+                      continue
+                  
+                  # So sánh
+                  pred_num = prediction['predicted_numbers']['predicted_number']
+                  actual_num = actual['special_prize']
+                  
+                  correct_digits = sum(1 for p, a in zip(pred_num, actual_num) if p == a)
+                  accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
+                  
+                  # Lưu evaluation
+                  db.save_evaluation({
+                      'evaluation_date': yesterday,
+                      'region': 'XSMN',
+                      'total_predictions': len(actual_num),
+                      'correct_predictions': correct_digits,
+                      'accuracy_rate': accuracy,
+                      'model_version': 'frequency_v1'
+                  })
+                  
+                  print(f'   Predicted: {pred_num}')
+                  print(f'   Actual:    {actual_num}')
+                  print(f'   ✅ Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)})')
+                  
+                  total_evaluated += 1
+                  total_accuracy += accuracy
+                  
+              except Exception as e:
+                  print(f'   ❌ Error: {e}')
           
-          # For XSMN, use TP.HCM as reference province
-          actual = db.get_draw_by_date(yesterday, 'XSMN', province='tp-hcm')
-          
-          if not actual:
-              print(f'⚠️ No actual results found for {yesterday} (TP.HCM)')
-              exit(0)
-          
-          pred_num = prediction['predicted_numbers']['predicted_number']
-          actual_num = actual['special_prize']
-          
-          print(f'🔍 Comparison (TP.HCM):')
-          print(f'   Predicted: {pred_num}')
-          print(f'   Actual:    {actual_num}')
-          
-          correct_digits = sum(1 for p, a in zip(pred_num, actual_num) if p == a)
-          accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
-          
-          db.save_evaluation({
-              'evaluation_date': yesterday,
-              'region': 'XSMN',
-              'total_predictions': len(actual_num),
-              'correct_predictions': correct_digits,
-              'accuracy_rate': accuracy,
-              'model_version': 'frequency_v1'
-          })
-          
-          print(f'✅ Evaluation saved! Accuracy: {accuracy*100:.1f}%')
+          print('\n' + '=' * 60)
+          if total_evaluated > 0:
+              avg_accuracy = (total_accuracy / total_evaluated) * 100
+              print(f'📊 Summary:')
+              print(f'   Evaluated: {total_evaluated}/{len(provinces)} provinces')
+              print(f'   Average accuracy: {avg_accuracy:.1f}%')
+          else:
+              print('⚠️ No evaluations completed')
+          print('=' * 60)
           "
