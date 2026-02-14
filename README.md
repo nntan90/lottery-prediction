@@ -1,30 +1,30 @@
-# 🎯 Lottery Prediction System
+# 🎲 Random Number Generator & Analysis
 
-Hệ thống dự đoán xổ số tự động **100% miễn phí** sử dụng GitHub Actions, Supabase và Telegram Bot.
+A data collection and statistical analysis system for Vietnamese lottery results, built for educational purposes using GitHub Actions, Supabase, and automated workflows.
 
-> ⚠️ **DISCLAIMER**: Hệ thống này chỉ mang tính **giải trí và nghiên cứu**. Xổ số là ngẫu nhiên và không thể dự đoán chính xác. Không nên dựa vào dự đoán này để đầu tư tiền bạc.
+> ⚠️ **EDUCATIONAL PROJECT**: This is a learning project about data collection, statistical analysis, and automation. Results are randomly generated for entertainment purposes only.
 
-## ✨ Tính Năng
+## ✨ Features
 
-- 🤖 **Tự động crawl** kết quả xổ số hàng ngày (XSMB & XSMN)
-- 📊 **Phân tích patterns** dựa trên dữ liệu lịch sử
-- 🎯 **Tạo predictions** cho ngày tiếp theo
-- 📱 **Gửi thông báo** qua Telegram Bot
-- 📈 **Đánh giá độ chính xác** của predictions
-- 💾 **Lưu trữ** tất cả dữ liệu trên Supabase
-- 🔄 **Hoàn toàn tự động** với GitHub Actions
+- 🤖 **Automated data collection** from public lottery websites
+- 📊 **Statistical pattern analysis** using historical data
+- 🎲 **Random number generation** based on frequency distribution
+- 📱 **Telegram notifications** for daily updates
+- 📈 **Performance tracking** and metrics
+- 💾 **Cloud storage** with Supabase
+- 🔄 **Fully automated** with GitHub Actions
 
-## 🏗️ Kiến Trúc
+## 🏗️ Architecture
 
 ```
 ┌─────────────────┐
-│  GitHub Actions │  ← Chạy workflows tự động hàng ngày
+│  GitHub Actions │  ← Automated daily workflows
 └────────┬────────┘
          │
-         ├─► 19:00: Crawl kết quả mới
-         ├─► 19:30: Đánh giá predictions hôm qua
-         ├─► 20:00: Tạo predictions cho ngày mai
-         └─► 20:05: Gửi Telegram notification
+         ├─► 19:00: Collect new data
+         ├─► 19:30: Analyze patterns
+         ├─► 20:00: Generate random numbers
+         └─► 07:00: Send notifications
                 │
                 ├─► Supabase (Database)
                 └─► Telegram Bot
@@ -32,54 +32,54 @@ Hệ thống dự đoán xổ số tự động **100% miễn phí** sử dụng
 
 ## 🚀 Quick Start
 
-### Bước 1: Setup Supabase
+### Step 1: Setup Supabase
 
-1. Tạo account tại [supabase.com](https://supabase.com)
-2. Tạo project mới (chọn region Singapore)
-3. Vào **SQL Editor**, copy nội dung `database/schema.sql` và run
-4. Vào **Settings → API**, lấy:
+1. Create account at [supabase.com](https://supabase.com)
+2. Create new project (Singapore region recommended)
+3. Go to **SQL Editor**, paste content from `database/schema.sql` and run
+4. Go to **Settings → API**, get:
    - `Project URL`
    - `service_role key`
 
-### Bước 2: Setup Telegram Bot
+### Step 2: Setup Telegram Bot
 
-1. Mở Telegram, tìm `@BotFather`
-2. Gửi `/newbot` và làm theo hướng dẫn
-3. Lưu lại **Bot Token**
-4. Gửi message `/start` cho bot của bạn
-5. Vào `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
-6. Lấy **Chat ID** từ response
+1. Open Telegram, find `@BotFather`
+2. Send `/newbot` and follow instructions
+3. Save the **Bot Token**
+4. Send `/start` to your bot
+5. Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+6. Get **Chat ID** from response
 
-### Bước 3: Setup GitHub Repository
+### Step 3: Setup GitHub Repository
 
-1. Fork hoặc clone repo này
-2. Vào **Settings → Secrets → Actions**
-3. Thêm 4 secrets:
+1. Fork or clone this repo
+2. Go to **Settings → Secrets → Actions**
+3. Add 4 secrets:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
 
-### Bước 4: Chạy Initial Backfill
+### Step 4: Run Initial Data Collection
 
-1. Vào tab **Actions**
-2. Chọn workflow **"05 - Initial Data Backfill"**
+1. Go to **Actions** tab
+2. Select workflow **"05 - Initial Data Backfill"**
 3. Click **"Run workflow"**
-4. Nhập số ngày (khuyến nghị: 365)
-5. Chọn region: BOTH
-6. Đợi 15-20 phút để crawl xong
+4. Enter number of days (recommended: 365)
+5. Select region: BOTH
+6. Wait 15-20 minutes for completion
 
-### Bước 5: Test Workflows
+### Step 5: Test Workflows
 
-Chạy thủ công từng workflow để test:
+Run each workflow manually to test:
 
-1. **02 - Generate Predictions** → Check Supabase có prediction mới
-2. **04 - Send Telegram Notifications** → Check Telegram nhận được message
+1. **02 - Generate Predictions** → Check Supabase for new entries
+2. **04 - Send Telegram Notifications** → Check Telegram for messages
 3. **03 - Evaluate Predictions** → Check evaluation metrics
 
-✅ **Done!** Hệ thống sẽ tự động chạy hàng ngày.
+✅ **Done!** System will run automatically every day.
 
-## 📁 Cấu Trúc Project
+## 📁 Project Structure
 
 ```
 lottery-prediction/
@@ -91,13 +91,12 @@ lottery-prediction/
 │   └── 05-initial-backfill.yml
 ├── src/
 │   ├── database/           # Supabase client
-│   ├── crawler/            # XSMB & XSMN crawlers
-│   ├── models/             # Frequency analyzer
+│   ├── crawler/            # Data collectors
+│   ├── models/             # Statistical models
 │   └── bot/                # Telegram bot
 ├── database/
 │   └── schema.sql          # Database schema
 ├── requirements.txt
-├── SETUP_GUIDE.md         # Hướng dẫn chi tiết
 └── README.md
 ```
 
@@ -110,17 +109,17 @@ lottery-prediction/
 git clone <your-repo-url>
 cd lottery-prediction
 
-# Tạo virtual environment
+# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # Mac/Linux
-# hoặc: venv\Scripts\activate  # Windows
+# or: venv\Scripts\activate  # Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Copy environment template
 cp .env.example .env
-# Sau đó edit .env và điền credentials
+# Edit .env and fill in credentials
 ```
 
 ### Test Modules
@@ -129,10 +128,10 @@ cp .env.example .env
 # Test Supabase connection
 python src/database/supabase_client.py
 
-# Test XSMB crawler
+# Test data collector
 python src/crawler/xsmb_crawler.py
 
-# Test frequency analyzer
+# Test statistical analyzer
 python src/models/frequency_analyzer.py
 
 # Test Telegram bot
@@ -141,97 +140,113 @@ python src/bot/telegram_bot.py
 
 ## 📊 Database Schema
 
-Hệ thống sử dụng 6 tables:
+The system uses 6 tables:
 
-- **lottery_draws**: Kết quả quay số
-- **predictions**: Dự đoán
-- **evaluation_metrics**: Metrics đánh giá
-- **telegram_subscribers**: Người dùng Telegram
-- **crawler_logs**: Logs crawler
-- **model_metadata**: Metadata mô hình
+- **lottery_draws**: Historical lottery results
+- **predictions**: Generated random numbers
+- **evaluation_metrics**: Performance metrics
+- **telegram_subscribers**: Telegram users
+- **crawler_logs**: Data collection logs
+- **model_metadata**: Model metadata
 
-Chi tiết xem file `database/schema.sql`.
+See `database/schema.sql` for details.
 
-## 💰 Chi Phí: 0 VNĐ
+## 💰 Cost: Free
 
-- ✅ **GitHub Actions**: Unlimited cho public repo
-- ✅ **Supabase**: 1GB storage + 2GB bandwidth/tháng (free tier)
-- ✅ **Telegram Bot**: Hoàn toàn miễn phí
+- ✅ **GitHub Actions**: Unlimited for public repos
+- ✅ **Supabase**: 1GB storage + 2GB bandwidth/month (free tier)
+- ✅ **Telegram Bot**: Completely free
 
 **Estimated usage**:
-- Storage: ~50MB/năm
-- Bandwidth: ~500MB/tháng
-- GitHub Actions: ~600 phút/tháng
+- Storage: ~50MB/year
+- Bandwidth: ~500MB/month
+- GitHub Actions: ~600 minutes/month
 
-→ Rất xa giới hạn free tier!
+→ Well within free tier limits!
 
 ## 🔍 Monitoring
 
 ### Check Logs
 
-Vào **GitHub Actions** tab để xem logs của từng workflow.
+Go to **GitHub Actions** tab to view workflow logs.
 
 ### Check Database
 
-Vào **Supabase → Table Editor** để xem data.
+Go to **Supabase → Table Editor** to view data.
 
 ### Check Telegram
 
-Bot sẽ gửi message hàng ngày lúc ~20:00 GMT+7.
+Bot sends daily messages at ~07:00 GMT+7.
 
 ## 🛠️ Troubleshooting
 
-### Crawler failed
+### Data collection failed
 
-- Check website nguồn có hoạt động không
-- CSS selectors có thể thay đổi → cần update code
-- Thử với ngày khác (có thể chưa có kết quả)
+- Check if source website is accessible
+- CSS selectors may have changed → update code
+- Try different dates (results may not be available yet)
 
-### Telegram không nhận message
+### Telegram not receiving messages
 
-- Kiểm tra `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID`
-- Đảm bảo đã click "Start" bot
+- Verify `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+- Ensure you clicked "Start" on the bot
 
 ### Workflow failed
 
-- Check **Actions** tab → Click vào workflow failed → Xem logs
-- Thường do: sai secrets hoặc không đủ dữ liệu
+- Check **Actions** tab → Click failed workflow → View logs
+- Common causes: incorrect secrets or insufficient data
 
-## 📝 Roadmap
+## 📝 Technical Details
 
-- [ ] Thêm Prophet model (advanced prediction)
-- [ ] Support thêm miền Trung
-- [ ] Web dashboard để xem predictions
-- [ ] Telegram commands (`/status`, `/stats`)
-- [ ] Email notifications
+### Random Number Generation
+
+The system uses frequency-based statistical analysis:
+1. Collects historical data
+2. Analyzes digit frequency patterns
+3. Generates random numbers weighted by historical frequency
+4. Outputs results for entertainment purposes
+
+### Data Sources
+
+- Primary: xskt.com.vn
+- Backup: minhngoc.net.vn
+
+### Automation Schedule
+
+- **19:00 GMT+7**: Daily data collection
+- **19:30 GMT+7**: Performance evaluation
+- **20:00 GMT+7**: Random number generation
+- **07:00 GMT+7**: Telegram notifications
 
 ## 🤝 Contributing
 
-Pull requests are welcome! Đặc biệt:
+Pull requests are welcome! Especially for:
 
-- Cải thiện crawler (thêm nguồn dự phòng)
-- Thêm models mới
-- Cải thiện accuracy
-- Fix bugs
+- Improving data collectors (adding backup sources)
+- Adding new statistical models
+- Improving accuracy metrics
+- Bug fixes
 
 ## 📄 License
 
 MIT License - Free to use for personal and educational purposes.
 
-## ⚠️ Legal Disclaimer
+## ⚠️ Disclaimer
 
-Hệ thống này được tạo ra chỉ với mục đích:
-- ✅ Giải trí
-- ✅ Nghiên cứu machine learning
-- ✅ Học tập về automation
+This system is created solely for:
+- ✅ Entertainment
+- ✅ Learning about machine learning and automation
+- ✅ Educational purposes
 
-**KHÔNG NÊN**:
-- ❌ Dựa vào predictions để đầu tư tiền
-- ❌ Kỳ vọng thắng xổ số
-- ❌ Sử dụng cho mục đích thương mại
+**DO NOT**:
+- ❌ Use for gambling or financial decisions
+- ❌ Expect accurate predictions
+- ❌ Use for commercial purposes
 
-Xổ số là **hoàn toàn ngẫu nhiên** và không thể dự đoán chính xác.
+All numbers are randomly generated based on statistical patterns and should not be used for any serious decision-making.
+
+**Important**: Lottery results are completely random and unpredictable. This project is purely educational and demonstrates data collection, statistical analysis, and automation techniques.
 
 ---
 
-Made with ❤️ for learning purposes
+Made with ❤️ for learning purposes | [Random.org](https://www.random.org) inspired
