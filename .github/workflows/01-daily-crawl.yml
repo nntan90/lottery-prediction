@@ -44,12 +44,11 @@ jobs:
           # Use Vietnam Time (UTC+7)
           vn_time = datetime.utcnow() + timedelta(hours=7)
           today = vn_time.date()
-          print(f'🕒 Current Vietnam Time: {vn_time}')
+          print(f'Current Vietnam Time: {vn_time}')
           
           results = crawler.fetch_results(today)
           
           if results:
-              try:
               try:
                   db.upsert_draw(results)
                   
@@ -127,7 +126,7 @@ jobs:
           # Use Vietnam Time (UTC+7)
           vn_time = datetime.utcnow() + timedelta(hours=7)
           today = vn_time.date()
-          print(f'🕒 Current Vietnam Time: {vn_time}')
+          print(f'Current Vietnam Time: {vn_time}')
           
           # Crawl XSMN for ALL provinces today
           provinces = crawler.get_provinces_for_date(today.date())
