@@ -129,7 +129,7 @@ jobs:
           print(f'Current Vietnam Time: {vn_time}')
           
           # Crawl XSMN for ALL provinces today
-          provinces = crawler.get_provinces_for_date(today.date())
+          provinces = crawler.get_provinces_for_date(today)
           print(f'   Target provinces: {provinces}')
           
           success_count = 0
