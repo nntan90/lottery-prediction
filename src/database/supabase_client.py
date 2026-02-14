@@ -149,13 +149,14 @@ class LotteryDB:
     
     def save_prediction(self, prediction_data: Dict) -> Dict:
         """
-        Lưu dự đoán vào database
+        Lưu dự đoán vào database (upsert - update nếu đã tồn tại)
         
         Args:
             prediction_data: Dictionary chứa dự đoán
                 {
                     'prediction_date': date object,
                     'region': 'XSMB',
+                    'province': None or province code,
                     'model_version': 'frequency_v1',
                     'predicted_numbers': {...},
                     'confidence_score': 0.3
@@ -169,7 +170,11 @@ class LotteryDB:
             prediction_data['prediction_date'] = prediction_data['prediction_date'].isoformat()
         
         try:
-            response = self.supabase.table("predictions").insert(prediction_data).execute()
+            # Use upsert to handle duplicates gracefully
+            response = self.supabase.table("predictions").upsert(
+                prediction_data,
+                on_conflict='prediction_date,region,province,model_version'
+            ).execute()
             return response
         except Exception as e:
             print(f"❌ Error saving prediction: {e}")
