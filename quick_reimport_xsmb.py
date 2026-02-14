@@ -1,11 +1,11 @@
 """
-XSMB Re-import with Province - Using xskt.com.vn crawler
-Re-crawl all XSMB data from 2024-01-01 with province information
+XSMN Re-import Script - Add Province Data
+Quick inline script to re-import XSMB with province
 """
 
 import os
 os.environ['SUPABASE_URL'] = 'https://islcxaqdqhwgcqkdozeq.supabase.co'
-os.environ['SUPABASE_SERVICE_KEY'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlzbGN4YXFkcWh3Z2Nxa2RvemVxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDkwNjUwMCwiZXhwIjoyMDg2NDgyNTAwfQ.K9oBxjv77u-Rz1LBfy1UfPGRnxrRYvpdux3p8ChFpNU'
+os.environ['SUPABASE_SERVICE_KEY'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlzbGN4YXFkcWh3Z2Nxa2RvemVxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDkwNjA4MywiZXhwIjoyMDg2NDgyMDgzfQ.Iq_MH_qKdHMi_yFVdlxOqJNhxJaLWRJCbvkFEQOxLgI'
 
 import sys
 sys.path.insert(0, '.')
@@ -24,7 +24,7 @@ end_date = datetime.now().date()
 total_days = (end_date - start_date).days + 1
 
 print(f"\n{'='*60}")
-print(f"🔄 XSMB Re-import with Province (xskt.com.vn)")
+print(f"🔄 XSMB Re-import with Province")
 print(f"{'='*60}")
 print(f"📅 From: {start_date} → To: {end_date} ({total_days} days)")
 print(f"⏱️  Estimated time: ~{total_days * 1.5 / 60:.0f} minutes\n")
@@ -42,17 +42,30 @@ current_date = start_date
 while current_date <= end_date:
     day_num = (current_date - start_date).days + 1
     
-    # Print every 50 days
+    # Print every 50 days to reduce output
     should_print = (day_num % 50 == 1 or day_num == total_days or day_num <= 5)
     
     if should_print:
         print(f"[{day_num}/{total_days}] {current_date.strftime('%d/%m/%Y')}...", end=' ', flush=True)
     
     try:
-        result = crawler.fetch_results(current_date)
+        # Suppress crawler output
+        import io
+        import contextlib
+        
+        if not should_print:
+            f = io.StringIO()
+            with contextlib.redirect_stdout(f):
+                result = crawler.fetch_results(current_date)
+        else:
+            result = crawler.fetch_results(current_date)
         
         if result:
-            response = db.upsert_draw(result)
+            if not should_print:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    response = db.upsert_draw(result)
+            else:
+                response = db.upsert_draw(result)
             
             if response:
                 success_count += 1
