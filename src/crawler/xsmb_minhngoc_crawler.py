@@ -136,10 +136,17 @@ class XSMBMinhNgocCrawler:
                 numbers = []
                 
                 for cell in number_cells:
-                    # Extract all 5-digit numbers from cell
-                    cell_text = cell.get_text()
-                    found_numbers = re.findall(r'\b\d{5}\b', cell_text)
-                    numbers.extend(found_numbers)
+                    cell_text = cell.get_text().strip()
+                    
+                    # Remove all non-digit characters
+                    digits_only = re.sub(r'\D', '', cell_text)
+                    
+                    # Split into 5-digit chunks
+                    if digits_only:
+                        chunks = [digits_only[i:i+5] for i in range(0, len(digits_only), 5)]
+                        # Only keep valid 5-digit numbers
+                        valid_chunks = [chunk for chunk in chunks if len(chunk) == 5]
+                        numbers.extend(valid_chunks)
                 
                 # Map to prize keys
                 if 'ĐB' in label or 'Đặc biệt' in label:
