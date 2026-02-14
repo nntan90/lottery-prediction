@@ -128,16 +128,17 @@ jobs:
               print(f'⚠️ No prediction found for {yesterday}')
               exit(0)
           
-          actual = db.get_draw_by_date(yesterday, 'XSMN')
+          # For XSMN, use TP.HCM as reference province
+          actual = db.get_draw_by_date(yesterday, 'XSMN', province='tp-hcm')
           
           if not actual:
-              print(f'⚠️ No actual results found for {yesterday}')
+              print(f'⚠️ No actual results found for {yesterday} (TP.HCM)')
               exit(0)
           
           pred_num = prediction['predicted_numbers']['predicted_number']
           actual_num = actual['special_prize']
           
-          print(f'🔍 Comparison:')
+          print(f'🔍 Comparison (TP.HCM):')
           print(f'   Predicted: {pred_num}')
           print(f'   Actual:    {actual_num}')
           

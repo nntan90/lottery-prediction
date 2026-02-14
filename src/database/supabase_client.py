@@ -109,23 +109,29 @@ class LotteryDB:
             print(f"❌ Error fetching historical data: {e}")
             return []
     
-    def get_draw_by_date(self, draw_date: date, region: str) -> Optional[Dict]:
+    def get_draw_by_date(self, draw_date: date, region: str, province: str = None) -> Optional[Dict]:
         """
         Lấy kết quả cho một ngày cụ thể
         
         Args:
             draw_date: Ngày cần lấy
             region: 'XSMB' hoặc 'XSMN'
+            province: Tỉnh (optional, for XSMN only)
         
         Returns:
             Dictionary chứa kết quả hoặc None nếu không tìm thấy
         """
         try:
-            response = self.supabase.table("lottery_draws")\
+            query = self.supabase.table("lottery_draws")\
                 .select("*")\
                 .eq("draw_date", draw_date.isoformat())\
-                .eq("region", region)\
-                .execute()
+                .eq("region", region)
+            
+            # Add province filter if specified
+            if province:
+                query = query.eq("province", province)
+            
+            response = query.execute()
             
             return response.data[0] if response.data else None
         except Exception as e:
