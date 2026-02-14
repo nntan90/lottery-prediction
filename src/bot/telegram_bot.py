@@ -63,6 +63,33 @@ class LotteryNotifier:
             print(f"❌ Error sending prediction: {e}")
             return False
     
+    async def send_message(self, message: str, parse_mode: str = 'HTML') -> bool:
+        """
+        Gửi custom message qua Telegram
+        
+        Args:
+            message: Nội dung message (hỗ trợ HTML hoặc Markdown)
+            parse_mode: 'HTML' hoặc 'Markdown'
+        
+        Returns:
+            True nếu gửi thành công
+        """
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode=parse_mode
+            )
+            
+            return True
+            
+        except TelegramError as e:
+            print(f"❌ Telegram error: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Error sending message: {e}")
+            return False
+    
     async def send_evaluation(self, metrics_data: Dict) -> bool:
         """
         Gửi báo cáo đánh giá

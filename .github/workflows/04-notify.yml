@@ -1,18 +1,15 @@
 name: 04 - Send Telegram Notifications
 
-# Trigger sau khi prediction workflow hoàn thành
+# Chạy hàng ngày lúc 7:00 GMT+7 (00:00 UTC)
 on:
-  workflow_run:
-    workflows: ["02 - Generate Predictions"]
-    types: [completed]
+  schedule:
+    - cron: '0 0 * * *'  # 7:00 GMT+7
   workflow_dispatch:
 
 jobs:
-  notify:
-    name: Send Predictions to Telegram
+  notify-predictions:
+    name: Send Daily Predictions to Telegram
     runs-on: ubuntu-latest
-    # Chỉ chạy nếu prediction workflow thành công
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     
     steps:
       - name: Checkout code
@@ -29,7 +26,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Send XSMB Prediction
+      - name: Send All Predictions
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -43,66 +40,91 @@ jobs:
           from datetime import datetime, timedelta
           
           async def main():
-              print('📱 Sending XSMB prediction to Telegram...')
+              print('📱 Sending daily predictions to Telegram...')
+              print('=' * 60)
               
               db = LotteryDB()
               bot = LotteryNotifier()
+              today = datetime.now().date()
               
-              # Lấy dự đoán cho ngày mai
-              tomorrow = (datetime.now() + timedelta(days=1)).date()
-              prediction = db.get_prediction_by_date(tomorrow, 'XSMB')
+              # === XSMB Prediction ===
+              print('\n🎯 XSMB Prediction...')
+              xsmb_pred = db.get_prediction_by_date(today, 'XSMB')
               
-              if prediction:
-                  success = await bot.send_prediction(prediction)
+              if xsmb_pred:
+                  message = f'''
+🎯 <b>DỰ ĐOÁN XSMB - {today.strftime(\"%d/%m/%Y\")}</b>
+
+🔮 Số dự đoán: <code>{xsmb_pred[\"predicted_numbers\"][\"predicted_number\"]}</code>
+📊 Độ tin cậy: {xsmb_pred[\"confidence_score\"]*100:.0f}%
+🔥 Số nóng: {', '.join(map(str, xsmb_pred[\"predicted_numbers\"][\"hot_numbers\"][:5]))}
+
+<i>Model: {xsmb_pred[\"model_version\"]}</i>
+                  '''
+                  
+                  success = await bot.send_message(message)
+                  if success:
+                      print('   ✅ XSMB sent')
+                  else:
+                      print('   ❌ XSMB failed')
+              else:
+                  print('   ⚠️ No XSMB prediction found')
+              
+              await asyncio.sleep(2)
+              
+              # === XSMN Predictions (All Provinces) ===
+              print('\n🎯 XSMN Predictions (All Provinces)...')
+              
+              provinces = {
+                  'tp-hcm': 'TP.HCM',
+                  'dong-thap': 'Đồng Tháp',
+                  'ca-mau': 'Cà Mau',
+                  'ben-tre': 'Bến Tre',
+                  'vung-tau': 'Vũng Tàu',
+                  'bac-lieu': 'Bạc Liêu',
+                  'dong-nai': 'Đồng Nai',
+                  'can-tho': 'Cần Thơ',
+                  'soc-trang': 'Sóc Trăng',
+                  'tay-ninh': 'Tây Ninh',
+                  'an-giang': 'An Giang',
+                  'binh-thuan': 'Bình Thuận',
+                  'vinh-long': 'Vĩnh Long',
+                  'binh-duong': 'Bình Dương',
+                  'tra-vinh': 'Trà Vinh',
+                  'long-an': 'Long An',
+                  'binh-phuoc': 'Bình Phước',
+                  'hau-giang': 'Hậu Giang',
+                  'tien-giang': 'Tiền Giang',
+                  'kien-giang': 'Kiên Giang',
+                  'da-lat': 'Đà Lạt'
+              }
+              
+              # Gộp tất cả predictions vào 1 message
+              xsmn_message = f'🎯 <b>DỰ ĐOÁN XSMN - {today.strftime(\"%d/%m/%Y\")}</b>\n\n'
+              
+              found_count = 0
+              for province_code, province_name in provinces.items():
+                  pred = db.get_prediction_by_date(today, 'XSMN', province_code)
+                  
+                  if pred:
+                      pred_num = pred['predicted_numbers']['predicted_number']
+                      confidence = pred['confidence_score'] * 100
+                      xsmn_message += f'📍 <b>{province_name}</b>: <code>{pred_num}</code> ({confidence:.0f}%)\n'
+                      found_count += 1
+              
+              if found_count > 0:
+                  xsmn_message += f'\n<i>Tổng: {found_count}/21 tỉnh</i>'
+                  success = await bot.send_message(xsmn_message)
                   
                   if success:
-                      print('✅ XSMB notification sent successfully!')
+                      print(f'   ✅ XSMN sent ({found_count} provinces)')
                   else:
-                      print('❌ Failed to send XSMB notification')
-                      exit(1)
+                      print('   ❌ XSMN failed')
               else:
-                  print('⚠️ No XSMB prediction found for tomorrow')
-                  exit(1)
-          
-          asyncio.run(main())
-          "
-      
-      - name: Wait before next message
-        run: sleep 3
-      
-      - name: Send XSMN Prediction
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python -c "
-          import asyncio
-          from src.bot.telegram_bot import LotteryNotifier
-          from src.database.supabase_client import LotteryDB
-          from datetime import datetime, timedelta
-          
-          async def main():
-              print('📱 Sending XSMN prediction to Telegram...')
+                  print('   ⚠️ No XSMN predictions found')
               
-              db = LotteryDB()
-              bot = LotteryNotifier()
-              
-              tomorrow = (datetime.now() + timedelta(days=1)).date()
-              prediction = db.get_prediction_by_date(tomorrow, 'XSMN')
-              
-              if prediction:
-                  success = await bot.send_prediction(prediction)
-                  
-                  if success:
-                      print('✅ XSMN notification sent successfully!')
-                  else:
-                      print('❌ Failed to send XSMN notification')
-                      exit(1)
-              else:
-                  print('⚠️ No XSMN prediction found for tomorrow')
-                  exit(1)
+              print('\n' + '=' * 60)
+              print('✅ Notification workflow completed!')
           
           asyncio.run(main())
           "
