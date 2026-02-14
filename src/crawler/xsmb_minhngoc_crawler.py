@@ -61,17 +61,24 @@ class XSMBMinhNgocCrawler:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find result table - look for table containing "Giải" or "ĐB"
-            result_table = None
+            # Find result table - look for table containing target date
+            # Format: "18/01/2024" or "Ngày: 18/01/2024"
+            # Note: Page may have multiple tables, we want the LAST one (most specific)
+            target_date_str = target_date.strftime('%d/%m/%Y')
+            matching_tables = []
+            
             for table in soup.find_all('table'):
                 text = table.get_text()
-                if 'Giải' in text and ('ĐB' in text or 'Đặc biệt' in text):
-                    result_table = table
-                    break
+                # Check if table contains both the date and prize info
+                if target_date_str in text and 'Giải' in text and ('ĐB' in text or 'Đặc biệt' in text):
+                    matching_tables.append(table)
             
-            if not result_table:
-                print(f"  ❌ Result table not found")
+            if not matching_tables:
+                print(f"  ❌ Result table not found for {target_date_str}")
                 return None
+            
+            # Use the LAST matching table (most specific to target date)
+            result_table = matching_tables[-1]
             
             # Extract province from day of week
             province = self._extract_province(target_date)
@@ -129,7 +136,14 @@ class XSMBMinhNgocCrawler:
         return province_schedule.get(day_of_week, 'ha-noi')
     
     def _extract_prizes(self, table) -> Optional[Dict]:
-        """Extract all prizes from table"""
+        """
+        Extract all prizes from table
+        XSMB has specific number formats:
+        - ĐB, G1: 5 digits
+        - G2-G5: 5 digits each
+        - G6: 3 digits each (3 numbers)
+        - G7: 2 digits each (4 numbers)
+        """
         
         try:
             prizes = {}
@@ -146,49 +160,66 @@ class XSMBMinhNgocCrawler:
                 label_cell = cells[0]
                 label = label_cell.get_text().strip()
                 
-                # Get prize numbers
+                # Get prize numbers from cells
                 number_cells = cells[1:]
-                numbers = []
-                
+                cell_text = ''
                 for cell in number_cells:
-                    cell_text = cell.get_text().strip()
-                    
-                    # Remove all non-digit characters
-                    digits_only = re.sub(r'\D', '', cell_text)
-                    
-                    # Split into 5-digit chunks
-                    if digits_only:
-                        chunks = [digits_only[i:i+5] for i in range(0, len(digits_only), 5)]
-                        # Only keep valid 5-digit numbers
-                        valid_chunks = [chunk for chunk in chunks if len(chunk) == 5]
-                        numbers.extend(valid_chunks)
+                    cell_text += cell.get_text().strip()
                 
-                # Map to prize keys
+                # Remove all non-digit characters
+                digits_only = re.sub(r'\D', '', cell_text)
+                
+                # Map to prize keys with appropriate chunking
                 if 'ĐB' in label or 'Đặc biệt' in label:
-                    if numbers:
-                        prizes['special_prize'] = numbers[0]
+                    if len(digits_only) >= 5:
+                        prizes['special_prize'] = digits_only[:5]
                 
                 elif 'Giải nhất' in label or 'G1' in label or 'Giải 1' in label:
-                    if numbers:
-                        prizes['first_prize'] = numbers[0]
+                    if len(digits_only) >= 5:
+                        prizes['first_prize'] = digits_only[:5]
                 
                 elif 'Giải nhì' in label or 'G2' in label or 'Giải 2' in label:
-                    prizes['second_prize'] = numbers[:2]
+                    # 2 numbers x 5 digits = 10 digits
+                    if len(digits_only) >= 10:
+                        prizes['second_prize'] = [
+                            digits_only[0:5],
+                            digits_only[5:10]
+                        ]
                 
                 elif 'Giải ba' in label or 'G3' in label or 'Giải 3' in label:
-                    prizes['third_prize'] = numbers[:6]
+                    # 6 numbers x 5 digits = 30 digits
+                    if len(digits_only) >= 30:
+                        prizes['third_prize'] = [
+                            digits_only[i:i+5] for i in range(0, 30, 5)
+                        ]
                 
                 elif 'Giải tư' in label or 'G4' in label or 'Giải 4' in label:
-                    prizes['fourth_prize'] = numbers[:4]
+                    # 4 numbers x 4 digits = 16 digits
+                    if len(digits_only) >= 16:
+                        prizes['fourth_prize'] = [
+                            digits_only[i:i+4] for i in range(0, 16, 4)
+                        ]
                 
                 elif 'Giải năm' in label or 'G5' in label or 'Giải 5' in label:
-                    prizes['fifth_prize'] = numbers[:6]
+                    # 6 numbers x 4 digits = 24 digits
+                    if len(digits_only) >= 24:
+                        prizes['fifth_prize'] = [
+                            digits_only[i:i+4] for i in range(0, 24, 4)
+                        ]
                 
                 elif 'Giải sáu' in label or 'G6' in label or 'Giải 6' in label:
-                    prizes['sixth_prize'] = numbers[:3]
+                    # 3 numbers x 3 digits = 9 digits
+                    if len(digits_only) >= 9:
+                        prizes['sixth_prize'] = [
+                            digits_only[i:i+3] for i in range(0, 9, 3)
+                        ]
                 
                 elif 'Giải bảy' in label or 'G7' in label or 'Giải 7' in label:
-                    prizes['seventh_prize'] = numbers[:4]
+                    # 4 numbers x 2 digits = 8 digits
+                    if len(digits_only) >= 8:
+                        prizes['seventh_prize'] = [
+                            digits_only[i:i+2] for i in range(0, 8, 2)
+                        ]
             
             # Validate required prizes
             if 'special_prize' not in prizes or 'first_prize' not in prizes:
