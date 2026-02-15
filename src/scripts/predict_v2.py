@@ -161,11 +161,13 @@ async def main():
         # Notify
         await notifier.send_prediction({
             'region': 'XSMB',
-            'date': tomorrow.date(),
-            'predicted_number': pred_xsmb['predicted_number'],
+            'prediction_date': tomorrow.date(),
+            'predicted_numbers': {
+                'predicted_number': pred_xsmb['predicted_number'],
+                'hot_numbers': pred_xsmb['hot_numbers']
+            },
             'confidence_score': pred_xsmb['confidence'],
-            'model_version': 'lstm_v2',
-            'hot_numbers': pred_xsmb['hot_numbers']
+            'model_version': 'lstm_v2'
         })
         
     # 2. XSMN
@@ -187,12 +189,14 @@ async def main():
             # Notify
             await notifier.send_prediction({
                 'region': 'XSMN',
-                'province': province,
-                'date': tomorrow.date(),
-                'predicted_number': pred_xsmn['predicted_number'],
+                'province': province, # Extra info, harmless if not used by bot
+                'prediction_date': tomorrow.date(),
+                'predicted_numbers': {
+                    'predicted_number': pred_xsmn['predicted_number'],
+                    'hot_numbers': list(map(str, pred_xsmn['hot_numbers']))
+                },
                 'confidence_score': pred_xsmn['confidence'],
-                'model_version': 'lstm_v2',
-                'hot_numbers': list(map(str, pred_xsmn['hot_numbers'])) # Ensure list of strings
+                'model_version': 'lstm_v2'
             })
 
 if __name__ == "__main__":
