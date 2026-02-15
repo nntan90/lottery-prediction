@@ -1,0 +1,35 @@
+name: 06 - Monthly Model Cleanup
+
+# Run on the 1st of every month at 04:00 UTC (11:00 GMT+7)
+on:
+  schedule:
+    - cron: '0 4 1 * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  cleanup:
+    name: Cleanup Old Models
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install supabase python-dotenv
+      
+      - name: Run Cleanup Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          # Run actual cleanup (no dry-run)
+          python src/scripts/cleanup_models.py
