@@ -136,24 +136,14 @@ jobs:
           from src.models.frequency_analyzer import FrequencyAnalyzer
           from src.database.supabase_client import LotteryDB
           from src.bot.telegram_bot import LotteryNotifier
+          from src.crawler.xsmn_crawler import XSMNCrawler
           from datetime import datetime, timedelta
           
           async def main():
-              print('🎯 Generating XSMN predictions for all provinces...')
-              print('=' * 60)
-              
-              # Danh sách các tỉnh XSMN
-              provinces = [
-                  'tp-hcm', 'dong-thap', 'ca-mau',
-                  'ben-tre', 'vung-tau', 'bac-lieu',
-                  'dong-nai', 'can-tho', 'soc-trang',
-                  'tay-ninh', 'an-giang', 'binh-thuan',
-                  'vinh-long', 'binh-duong', 'tra-vinh',
-                  'long-an', 'binh-phuoc', 'hau-giang',
-                  'tien-giang', 'kien-giang', 'da-lat'
-              ]
+              print('🎯 Generating XSMN predictions...')
               
               db = LotteryDB()
+              crawler = XSMNCrawler()
               try:
                   bot = LotteryNotifier()
               except Exception as e:
@@ -163,8 +153,14 @@ jobs:
               # Use Vietnam Time (UTC+7)
               vn_now = datetime.utcnow() + timedelta(hours=7)
               tomorrow = vn_now + timedelta(days=1)
+              
               print(f'Current Vietnam Time: {vn_now}')
               print(f'Prediction Date: {tomorrow.date()}')
+              
+              # Chỉ generate cho các tỉnh quay vào ngày mai
+              provinces = crawler.get_provinces_for_date(tomorrow.date())
+              print(f'📍 Target Provinces: {provinces}')
+              print('=' * 60)
               
               success_count = 0
               failed_count = 0
@@ -200,6 +196,18 @@ jobs:
                       
                       print(f'   ✅ Predicted: {prediction[\"predicted_number\"]} (confidence: {prediction[\"confidence\"]*100:.0f}%)')
                       success_count += 1
+                      
+                      # Send notification (immediate)
+                      if bot:
+                          await bot.send_prediction({
+                              'region': 'XSMN',
+                              'province': province,
+                              'date': tomorrow.date(),
+                              'predicted_number': prediction['predicted_number'],
+                              'confidence_score': prediction['confidence'],
+                              'model_version': 'frequency_v1'
+                          })
+                          print(f'   ✅ Notification sent for {province}')
                       
                   except Exception as e:
                       print(f'   ❌ Error: {e}')
