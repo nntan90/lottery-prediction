@@ -25,4 +25,8 @@ python-telegram-bot==21.0.1
 python-dotenv==1.0.1
 
 # Optional: Advanced Models (uncomment nếu muốn dùng Prophet)
+# Optional: Advanced Models (uncomment nếu muốn dùng Prophet)
 # prophet==1.1.5
+
+# ==================== V2 Upgrade (LSTM) ====================
+tensorflow==2.15.0

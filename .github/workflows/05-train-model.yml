@@ -1,17 +1,15 @@
-name: 02 - Generate Predictions
+name: 05 - Train LSTM Models
 
-# Chạy hàng ngày lúc 20:00 GMT+7 (13:00 UTC)
-# Sau khi crawl xong (hoặc buổi sáng hôm sau cho ngày hôm nay)
-# User request: "Generate Prediction dự đoán ngày hiện tại ... vào lúc 7:00 hằng ngày"
-# 7:00 VN = 00:00 UTC
+# Chạy hàng tuần vào 20:00 Chủ Nhật (13:00 UTC)
+# Hoặc chạy thủ công
 on:
   schedule:
-    - cron: '0 0 * * *'  # 7:00 GMT+7
+    - cron: '0 13 * * 0'  # 13:00 UTC = 20:00 VN Sunday
   workflow_dispatch:
 
 jobs:
-  predict-daily:
-    name: Generate Daily Prediction (LSTM V2)
+  train-models:
+    name: Train LSTM Models
     runs-on: ubuntu-latest
     
     steps:
@@ -27,13 +25,14 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          # We need tensorflow for LSTM
           pip install tensorflow pandas numpy scikit-learn -r requirements.txt
       
-      - name: Generate Predictions
+      - name: Run Training Manager
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python src/scripts/predict_v2.py
+          python src/scripts/train_manager.py

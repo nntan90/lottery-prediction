@@ -208,3 +208,32 @@ jobs:
           if __name__ == '__main__':
               asyncio.run(main())
           "
+  verify-results:
+    name: Verify Predictions
+    needs: [crawl-xsmb, crawl-xsmn]
+    runs-on: ubuntu-latest
+    if: always() # Run even if one crawl fails (to verify what succeeded)
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Verify Predictions vs Results
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python src/scripts/verify_predictions.py
