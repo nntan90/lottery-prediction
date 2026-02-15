@@ -162,6 +162,7 @@ class LotteryNotifier:
         # Extract data
         pred_date = data.get('prediction_date', 'N/A')
         region = data.get('region', 'N/A')
+        province = data.get('province')
         pred_numbers = data.get('predicted_numbers', {})
         confidence = data.get('confidence_score', 0)
         
@@ -171,7 +172,10 @@ class LotteryNotifier:
         
         # Build message
         msg = f"🎯 *Dự Đoán {region}*\n"
-        msg += f"📅 Ngày: `{pred_date}`\n\n"
+        msg += f"📅 Ngày: `{pred_date}`\n"
+        if province:
+            msg += f"📍 Đài: `{province}`\n"
+        msg += "\n"
         
         msg += f"🔢 *Số Dự Đoán*\n"
         msg += f"Giải Đặc Biệt: `{predicted_num}`\n\n"

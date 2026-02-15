@@ -187,9 +187,10 @@ async def main():
                 'confidence_score': pred_xsmn['confidence']
             })
             # Notify
+            province_name = crawler.PROVINCE_MAP.get(province, province)
             await notifier.send_prediction({
                 'region': 'XSMN',
-                'province': province, # Extra info, harmless if not used by bot
+                'province': province_name, # Send Display Name (e.g., "Tiền Giang") instead of slug
                 'prediction_date': tomorrow.date(),
                 'predicted_numbers': {
                     'predicted_number': pred_xsmn['predicted_number'],
