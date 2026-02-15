@@ -84,6 +84,18 @@ jobs:
                   print(f'   Confidence: {prediction[\"confidence\"]*100:.0f}%')
                   print(f'   Hot numbers: {prediction[\"hot_numbers\"]}')
                   
+                  # Send notification
+                  if bot:
+                      await bot.send_prediction({
+                          'region': 'XSMB',
+                          'date': tomorrow.date(),
+                          'predicted_number': prediction['predicted_number'],
+                          'confidence_score': prediction['confidence'],
+                          'hot_numbers': prediction['hot_numbers'],
+                          'model_version': 'frequency_v1'
+                      })
+                      print('✅ Prediction sent to Telegram')
+                  
               except Exception as e:
                   print(f'❌ Error: {e}')
                   if bot: await bot.send_error_alert(f'XSMB Prediction Error: {e}')
