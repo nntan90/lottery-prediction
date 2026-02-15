@@ -1,6 +1,6 @@
 """
-XSMB Crawler - FIXED VERSION
-Crawl lottery results from xskt.com.vn with CORRECT selectors
+XSMB Crawler - MINH NGOC VERSION
+Crawl lottery results from minhngoc.net.vn (mien=2)
 """
 
 import requests
@@ -10,8 +10,19 @@ from typing import Optional, Dict
 import time
 
 class XSMBCrawler:
-    """Crawler for XSMB (Northern Vietnam Lottery) results"""
+    """Crawler for XSMB (Northern Vietnam Lottery) results from Minh Ngoc"""
     
+    # XSMB Schedule (Weekday -> Province Slug)
+    XSMB_SCHEDULE = {
+        0: 'ha-noi',      # Monday
+        1: 'quang-ninh',  # Tuesday
+        2: 'bac-ninh',    # Wednesday
+        3: 'ha-noi',      # Thursday
+        4: 'hai-phong',   # Friday
+        5: 'nam-dinh',    # Saturday
+        6: 'thai-binh'    # Sunday
+    }
+
     def __init__(self):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -30,170 +41,132 @@ class XSMBCrawler:
             Dictionary with lottery results or None if failed
         """
         try:
-            results = self._crawl_from_xskt(target_date)
+            results = self._crawl_from_minhngoc(target_date)
             if results:
                 print(f"✅ Successfully crawled XSMB for {target_date}")
                 return results
             else:
-                print(f"❌ No data found for {target_date}")
+                print(f"❌ No data found for XSMB on {target_date}")
                 return None
         except Exception as e:
             print(f"❌ Error crawling XSMB for {target_date}: {e}")
             return None
     
-    def _crawl_from_xskt(self, target_date: date) -> Optional[Dict]:
-        """Crawl from xskt.com.vn"""
+    def _clean_prize_list(self, text_value):
+        """
+        Cleans text extracted with separator='|'.
+        Returns a list of strings.
+        """
+        if not text_value:
+            return []
+        # Replace common separators with pipe if scraping combined text
+        text_value = text_value.replace('-', '|')
+        # Split by |
+        parts = text_value.split('|')
+        # Clean each part
+        cleaned = []
+        for p in parts:
+            p = p.strip()
+            # Filter for pure digits (Minh Ngoc might have symbols)
+            if p and p.isdigit():
+                cleaned.append(p)
+        return cleaned
+
+    def _crawl_from_minhngoc(self, target_date: date) -> Optional[Dict]:
+        """Crawl from minhngoc.net.vn (Search Interface mien=2)"""
         
-        # Format: ngay-d-m-yyyy (e.g., ngay-13-2-2026)
-        # Note: xskt.com.vn uses no leading zeros for day/month in URL
-        day = target_date.day
-        month = target_date.month
-        year = target_date.year
-        url = f"https://xskt.com.vn/xsmb/ngay-{day}-{month}-{year}"
+        # URL: mien=2 for XSMB
+        url = f"https://www.minhngoc.net/tra-cuu-ket-qua-xo-so.html?mien=2&ngay={target_date.day}&thang={target_date.month}&nam={target_date.year}"
         
-        print(f"🔍 Crawling: {url}")
+        print(f"🔍 Crawling XSMB: {url}")
         
         try:
             response = requests.get(url, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            
+            # Check if successful
+            if response.status_code != 200:
+                print(f"  ❌ Failed to fetch: {response.status_code}")
+                return None
+                
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find the XSMB result table
-            table = soup.find('table', class_='result', id='MB0')
-            
+            # Determine table (try refined selector first)
+            table = soup.find('table', class_='bkqmienbac')
             if not table:
-                print(f"  ⚠️ Table not found")
+                # Fallback to general class
+                table = soup.find('table', class_='bkqmiennam')
+                
+            if not table:
+                print(f"  ⚠️ XSMB table (bkqmienbac) not found")
                 return None
             
-            # Extract province from table header
-            # Format: "XSMB> Thứ 6 (Hải Phòng)" or "XSMB> Chủ nhật (Hà Nội)"
-            province = None
-            header = table.find('th')
-            if header:
-                header_text = header.text.strip()
-                if '(' in header_text and ')' in header_text:
-                    province_name = header_text.split('(')[1].split(')')[0]
-                    # Map to province code
-                    province_map = {
-                        'Hà Nội': 'ha-noi',
-                        'Hải Phòng': 'hai-phong',
-                        'Bắc Ninh': 'bac-ninh',
-                        'Nam Định': 'nam-dinh',
-                        'Thái Bình': 'thai-binh',
-                        'Quảng Ninh': 'quang-ninh'
-                    }
-                    province = province_map.get(province_name, 'ha-noi')  # Default to ha-noi
-                    print(f"  📍 Province: {province_name} ({province})")
+            # Determine Province based on Schedule
+            weekday = target_date.weekday()
+            province_slug = self.XSMB_SCHEDULE.get(weekday, 'ha-noi') # Fallback
             
-            if not province:
-                province = 'ha-noi'  # Default fallback
+            prizes = {}
             
-            # Extract special prize (Giải ĐB) - in <em> tag
-            special_prize_em = table.find('em')
-            if not special_prize_em:
-                print(f"  ⚠️ Special prize not found")
+            # Helper to extract
+            def extract(class_name, db_field, is_array=True):
+                 # Search for ANY td with this class in the table
+                td = table.find('td', class_=class_name)
+                if td:
+                    text = td.get_text(separator='|')
+                    values = self._clean_prize_list(text)
+                    if not values:
+                        return
+                    
+                    if is_array:
+                        prizes[db_field] = values
+                    else:
+                        prizes[db_field] = values[0]
+            
+            extract('giaidb', 'special_prize', is_array=False)
+            extract('giai1', 'first_prize', is_array=False) 
+            extract('giai2', 'second_prize', is_array=True)
+            extract('giai3', 'third_prize', is_array=True)
+            extract('giai4', 'fourth_prize', is_array=True)
+            extract('giai5', 'fifth_prize', is_array=True)
+            extract('giai6', 'sixth_prize', is_array=True)
+            extract('giai7', 'seventh_prize', is_array=True)
+            
+            if 'special_prize' not in prizes:
+                print(f"  ⚠️ No special prize found for XSMB")
                 return None
-            
-            special_prize = special_prize_em.text.strip()
-            
-            # Extract all <p> tags for other prizes
-            prize_ps = table.find_all('p')
-            
-            if len(prize_ps) < 7:
-                print(f"  ⚠️ Expected 7 prize rows, found {len(prize_ps)}")
-                return None
-            
-            # Parse prizes - use regex to split numbers properly
-            import re
-            
-            def parse_numbers(text):
-                """Extract all numbers from text, handling <br/> and spaces"""
-                # .split() handles whitespace and newlines from <br/> tags perfectly
-                return [n for n in text.split() if n.isdigit()]
-            
-            # G1: 1 number (5 digits)
-            first_prize = prize_ps[0].text.strip()
-            
-            # Helper to get text with separator
-            def get_text_safe(element):
-                return element.get_text(separator=' ').strip()
-
-            # G2: 2 numbers (5 digits each)
-            second_prize = parse_numbers(get_text_safe(prize_ps[1]))
-            
-            # G3: 6 numbers (5 digits each)
-            third_prize = parse_numbers(get_text_safe(prize_ps[2]))
-            
-            # G4: 4 numbers (5 digits each)
-            fourth_prize = parse_numbers(get_text_safe(prize_ps[3]))
-            
-            # G5: 6 numbers (4 digits each)
-            fifth_prize = parse_numbers(get_text_safe(prize_ps[4]))
-            
-            # G6: 3 numbers (3 digits each)
-            sixth_prize = parse_numbers(get_text_safe(prize_ps[5]))
-            
-            # G7: 4 numbers (2 digits each)
-            seventh_prize = parse_numbers(get_text_safe(prize_ps[6]))
-            
-            # Validate counts
-            if len(second_prize) != 2:
-                print(f"  ⚠️ G2: expected 2, got {len(second_prize)}")
-            if len(third_prize) != 6:
-                print(f"  ⚠️ G3: expected 6, got {len(third_prize)}")
-            if len(fourth_prize) != 4:
-                print(f"  ⚠️ G4: expected 4, got {len(fourth_prize)}")
-            if len(fifth_prize) != 6:
-                print(f"  ⚠️ G5: expected 6, got {len(fifth_prize)}")
-            if len(sixth_prize) != 3:
-                print(f"  ⚠️ G6: expected 3, got {len(sixth_prize)}")
-            if len(seventh_prize) != 4:
-                print(f"  ⚠️ G7: expected 4, got {len(seventh_prize)}")
             
             result = {
                 'draw_date': target_date,
                 'region': 'XSMB',
-                'province': province,  # Add province
-                'special_prize': special_prize,
-                'first_prize': first_prize,
-                'second_prize': second_prize,  # PostgreSQL array
-                'third_prize': third_prize,
-                'fourth_prize': fourth_prize,
-                'fifth_prize': fifth_prize,
-                'sixth_prize': sixth_prize,
-                'seventh_prize': seventh_prize
+                'province': province_slug,
+                **prizes
             }
             
-            print(f"  ✅ Special Prize: {special_prize}")
-            print(f"  ✅ First Prize: {first_prize}")
-            
+            print(f"  ✅ Special Prize: {prizes.get('special_prize')}")
+            print(f"  ✅ Province: {province_slug}")
             return result
             
-        except requests.RequestException as e:
-            print(f"  ❌ Request error: {e}")
-            return None
         except Exception as e:
             print(f"  ❌ Parse error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
-
 
 # Test function
 if __name__ == "__main__":
     from datetime import datetime, timedelta
     
     print("=" * 60)
-    print("🧪 TESTING XSMB CRAWLER (FIXED VERSION)")
+    print("🧪 TESTING XSMB CRAWLER (MINH NGOC VERSION)")
     print("=" * 60)
     
     crawler = XSMBCrawler()
     
-    # Test with yesterday
-    yesterday = datetime.now() - timedelta(days=1)
-    results = crawler.fetch_results(yesterday.date())
+    # Test with yesterday (or a specific date)
+    # 2024-01-01 was Monday (Hanoi)
+    test_date = date(2024, 1, 1) 
+    results = crawler.fetch_results(test_date)
     
     if results:
-        print("\n✅ SUCCESS! Results:")
+        print("\n✅ SUCCESS! Results for 2024-01-01:")
         for key, value in results.items():
             print(f"  {key}: {value}")
     else:

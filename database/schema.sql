@@ -12,14 +12,15 @@ CREATE TABLE IF NOT EXISTS lottery_draws (
   region VARCHAR(10) NOT NULL, -- 'XSMB' hoặc 'XSMN'
   
   -- Các giải thưởng
-  special_prize VARCHAR(10),
-  first_prize VARCHAR(10),
-  second_prize VARCHAR(20)[],
-  third_prize VARCHAR(20)[],
-  fourth_prize VARCHAR(20)[],
-  fifth_prize VARCHAR(20)[],
-  sixth_prize VARCHAR(20)[],
-  seventh_prize VARCHAR(20)[],
+  special_prize VARCHAR(20),
+  first_prize VARCHAR(20),
+  second_prize TEXT[],
+  third_prize TEXT[],
+  fourth_prize TEXT[],
+  fifth_prize TEXT[],
+  sixth_prize TEXT[],
+  seventh_prize TEXT[],
+  eighth_prize VARCHAR(20),
   
   created_at TIMESTAMP DEFAULT NOW(),
   

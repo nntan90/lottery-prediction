@@ -31,46 +31,66 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.models.frequency_analyzer import FrequencyAnalyzer
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('🎯 Generating XSMB prediction...')
-          
-          db = LotteryDB()
-          
-          # Lấy 90 ngày dữ liệu lịch sử (XSMB không cần province)
-          historical = db.get_historical_data('XSMB', days=90)
-          
-          if not historical or len(historical) < 30:
-              print('⚠️ Not enough historical data (need at least 30 days)')
-              print(f'   Current: {len(historical) if historical else 0} days')
-              exit(1)
-          
-          print(f'📊 Loaded {len(historical)} historical records')
-          
-          # Train model
-          analyzer = FrequencyAnalyzer(historical)
-          prediction = analyzer.predict_next(n_digits=5)
-          
-          # Lưu dự đoán cho ngày mai
-          tomorrow = datetime.now() + timedelta(days=1)
-          
-          db.save_prediction({
-              'prediction_date': tomorrow.date(),
-              'region': 'XSMB',
-              'province': None,  # XSMB không có province
-              'model_version': 'frequency_v1',
-              'predicted_numbers': prediction,
-              'confidence_score': prediction['confidence']
-          })
-          
-          print(f'✅ Prediction saved for {tomorrow.date()}')
-          print(f'   Predicted number: {prediction[\"predicted_number\"]}')
-          print(f'   Confidence: {prediction[\"confidence\"]*100:.0f}%')
-          print(f'   Hot numbers: {prediction[\"hot_numbers\"]}')
+          async def main():
+              print('🎯 Generating XSMB prediction...')
+              
+              db = LotteryDB()
+              try:
+                  bot = LotteryNotifier()
+              except Exception as e:
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+              
+              try:
+                  # Lấy 90 ngày dữ liệu lịch sử (XSMB không cần province)
+                  historical = db.get_historical_data('XSMB', days=90)
+                  
+                  if not historical or len(historical) < 30:
+                      error_msg = f'Not enough historical data (need at least 30 days). Current: {len(historical) if historical else 0} days'
+                      print(f'⚠️ {error_msg}')
+                      if bot: await bot.send_error_alert(f'XSMB Prediction Failed: {error_msg}')
+                      exit(1)
+                  
+                  print(f'📊 Loaded {len(historical)} historical records')
+                  
+                  # Train model
+                  analyzer = FrequencyAnalyzer(historical)
+                  prediction = analyzer.predict_next(n_digits=5)
+                  
+                  # Lưu dự đoán cho ngày mai
+                  tomorrow = datetime.now() + timedelta(days=1)
+                  
+                  db.save_prediction({
+                      'prediction_date': tomorrow.date(),
+                      'region': 'XSMB',
+                      'province': None,  # XSMB không có province
+                      'model_version': 'frequency_v1',
+                      'predicted_numbers': prediction,
+                      'confidence_score': prediction['confidence']
+                  })
+                  
+                  print(f'✅ Prediction saved for {tomorrow.date()}')
+                  print(f'   Predicted number: {prediction[\"predicted_number\"]}')
+                  print(f'   Confidence: {prediction[\"confidence\"]*100:.0f}%')
+                  print(f'   Hot numbers: {prediction[\"hot_numbers\"]}')
+                  
+              except Exception as e:
+                  print(f'❌ Error: {e}')
+                  if bot: await bot.send_error_alert(f'XSMB Prediction Error: {e}')
+                  exit(1)
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "
   
   predict-xsmn:
@@ -96,74 +116,100 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.models.frequency_analyzer import FrequencyAnalyzer
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('🎯 Generating XSMN predictions for all provinces...')
-          print('=' * 60)
-          
-          # Danh sách các tỉnh XSMN
-          provinces = [
-              'tp-hcm', 'dong-thap', 'ca-mau',
-              'ben-tre', 'vung-tau', 'bac-lieu',
-              'dong-nai', 'can-tho', 'soc-trang',
-              'tay-ninh', 'an-giang', 'binh-thuan',
-              'vinh-long', 'binh-duong', 'tra-vinh',
-              'long-an', 'binh-phuoc', 'hau-giang',
-              'tien-giang', 'kien-giang', 'da-lat'
-          ]
-          
-          db = LotteryDB()
-          tomorrow = datetime.now() + timedelta(days=1)
-          
-          success_count = 0
-          failed_count = 0
-          
-          for province in provinces:
+          async def main():
+              print('🎯 Generating XSMN predictions for all provinces...')
+              print('=' * 60)
+              
+              # Danh sách các tỉnh XSMN
+              provinces = [
+                  'tp-hcm', 'dong-thap', 'ca-mau',
+                  'ben-tre', 'vung-tau', 'bac-lieu',
+                  'dong-nai', 'can-tho', 'soc-trang',
+                  'tay-ninh', 'an-giang', 'binh-thuan',
+                  'vinh-long', 'binh-duong', 'tra-vinh',
+                  'long-an', 'binh-phuoc', 'hau-giang',
+                  'tien-giang', 'kien-giang', 'da-lat'
+              ]
+              
+              db = LotteryDB()
               try:
-                  print(f'\n📍 {province.upper()}...')
-                  
-                  # Lấy dữ liệu lịch sử cho tỉnh này
-                  historical = db.get_historical_data('XSMN', days=90, province=province)
-                  
-                  if not historical or len(historical) < 30:
-                      print(f'   ⚠️ Not enough data ({len(historical) if historical else 0} days)')
-                      failed_count += 1
-                      continue
-                  
-                  print(f'   📊 Loaded {len(historical)} records')
-                  
-                  # Train model cho tỉnh này
-                  analyzer = FrequencyAnalyzer(historical)
-                  prediction = analyzer.predict_next(n_digits=6)  # XSMN có 6 chữ số
-                  
-                  # Lưu dự đoán
-                  db.save_prediction({
-                      'prediction_date': tomorrow.date(),
-                      'region': 'XSMN',
-                      'province': province,
-                      'model_version': 'frequency_v1',
-                      'predicted_numbers': prediction,
-                      'confidence_score': prediction['confidence']
-                  })
-                  
-                  print(f'   ✅ Predicted: {prediction[\"predicted_number\"]} (confidence: {prediction[\"confidence\"]*100:.0f}%)')
-                  success_count += 1
-                  
+                  bot = LotteryNotifier()
               except Exception as e:
-                  print(f'   ❌ Error: {e}')
-                  failed_count += 1
-          
-          print('\n' + '=' * 60)
-          print(f'📊 Summary:')
-          print(f'   ✅ Success: {success_count}/{len(provinces)}')
-          print(f'   ❌ Failed: {failed_count}/{len(provinces)}')
-          print('=' * 60)
-          
-          if success_count == 0:
-              print('❌ No predictions generated!')
-              exit(1)
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+                  
+              # Use Vietnam Time (UTC+7)
+              vn_now = datetime.utcnow() + timedelta(hours=7)
+              tomorrow = vn_now + timedelta(days=1)
+              print(f'Current Vietnam Time: {vn_now}')
+              print(f'Prediction Date: {tomorrow.date()}')
+              
+              success_count = 0
+              failed_count = 0
+              errors = []
+              
+              for province in provinces:
+                  try:
+                      print(f'\n📍 {province.upper()}...')
+                      
+                      # Lấy dữ liệu lịch sử cho tỉnh này
+                      historical = db.get_historical_data('XSMN', days=90, province=province)
+                      
+                      if not historical or len(historical) < 30:
+                          print(f'   ⚠️ Not enough data ({len(historical) if historical else 0} days)')
+                          failed_count += 1
+                          continue
+                      
+                      print(f'   📊 Loaded {len(historical)} records')
+                      
+                      # Train model cho tỉnh này
+                      analyzer = FrequencyAnalyzer(historical)
+                      prediction = analyzer.predict_next(n_digits=6)  # XSMN có 6 chữ số
+                      
+                      # Lưu dự đoán
+                      db.save_prediction({
+                          'prediction_date': tomorrow.date(),
+                          'region': 'XSMN',
+                          'province': province,
+                          'model_version': 'frequency_v1',
+                          'predicted_numbers': prediction,
+                          'confidence_score': prediction['confidence']
+                      })
+                      
+                      print(f'   ✅ Predicted: {prediction[\"predicted_number\"]} (confidence: {prediction[\"confidence\"]*100:.0f}%)')
+                      success_count += 1
+                      
+                  except Exception as e:
+                      print(f'   ❌ Error: {e}')
+                      failed_count += 1
+                      errors.append(f'{province}: {str(e)}')
+              
+              print('\n' + '=' * 60)
+              print(f'📊 Summary:')
+              print(f'   ✅ Success: {success_count}/{len(provinces)}')
+              print(f'   ❌ Failed: {failed_count}/{len(provinces)}')
+              print('=' * 60)
+              
+              if success_count == 0:
+                  error_msg = 'No predictions generated!'
+                  print(f'❌ {error_msg}')
+                  if bot: await bot.send_error_alert(f'XSMN Prediction Failed: {error_msg}')
+                  exit(1)
+              
+              if failed_count > 0:
+                  # Optional: Alert on partial failures?
+                  pass
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "

@@ -31,62 +31,85 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('📊 Evaluating XSMB predictions...')
-          
-          db = LotteryDB()
-          yesterday = (datetime.now() - timedelta(days=1)).date()
-          
-          # Lấy dự đoán hôm qua
-          prediction = db.get_prediction_by_date(yesterday, 'XSMB')
-          
-          if not prediction:
-              print(f'⚠️ No prediction found for {yesterday}')
-              exit(0)  # Không fail workflow
-          
-          # Lấy kết quả thực tế
-          actual = db.get_draw_by_date(yesterday, 'XSMB')
-          
-          if not actual:
-              print(f'⚠️ No actual results found for {yesterday}')
-              print(f'   Results might not be available yet')
-              exit(0)
-          
-          # So sánh
-          pred_num = prediction['predicted_numbers']['predicted_number']
-          actual_num = actual['special_prize']
-          
-          print(f'🔍 Comparison:')
-          print(f'   Predicted: {pred_num}')
-          print(f'   Actual:    {actual_num}')
-          
-          # Tính số chữ số trùng
-          correct_digits = 0
-          for i, (p, a) in enumerate(zip(pred_num, actual_num)):
-              if p == a:
-                  correct_digits += 1
-                  print(f'   Position {i}: ✅ {p} = {a}')
-              else:
-                  print(f'   Position {i}: ❌ {p} ≠ {a}')
-          
-          accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
-          
-          # Lưu metrics
-          db.save_evaluation({
-              'evaluation_date': yesterday,
-              'region': 'XSMB',
-              'total_predictions': len(actual_num),
-              'correct_predictions': correct_digits,
-              'accuracy_rate': accuracy,
-              'model_version': 'frequency_v1'
-          })
-          
-          print(f'✅ Evaluation saved!')
-          print(f'   Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)} digits)')
+          async def main():
+              print('📊 Evaluating XSMB predictions...')
+              
+              db = LotteryDB()
+              try:
+                  bot = LotteryNotifier()
+              except Exception as e:
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+                  
+              # Use Vietnam Time (UTC+7)
+              vn_now = datetime.utcnow() + timedelta(hours=7)
+              yesterday = (vn_now - timedelta(days=1)).date()
+              print(f'Current Vietnam Time: {vn_now}')
+              print(f'Evaluation Date (Yesterday): {yesterday}')
+              
+              # Lấy dự đoán hôm qua
+              prediction = db.get_prediction_by_date(yesterday, 'XSMB')
+              
+              if not prediction:
+                  print(f'⚠️ No prediction found for {yesterday}')
+                  if bot: await bot.send_message(f'⚠️ <b>XSMB Evaluation</b>: No prediction found for {yesterday}')
+                  exit(0)  # Không fail workflow
+              
+              # Lấy kết quả thực tế
+              actual = db.get_draw_by_date(yesterday, 'XSMB')
+              
+              if not actual:
+                  print(f'⚠️ No actual results found for {yesterday}')
+                  print(f'   Results might not be available yet')
+                  if bot: await bot.send_message(f'⚠️ <b>XSMB Evaluation</b>: No actual results found for {yesterday}')
+                  exit(0)
+              
+              # So sánh
+              pred_num = prediction['predicted_numbers']['predicted_number']
+              actual_num = actual['special_prize']
+              
+              print(f'🔍 Comparison:')
+              print(f'   Predicted: {pred_num}')
+              print(f'   Actual:    {actual_num}')
+              
+              # Tính số chữ số trùng
+              correct_digits = 0
+              for i, (p, a) in enumerate(zip(pred_num, actual_num)):
+                  if p == a:
+                      correct_digits += 1
+                      print(f'   Position {i}: ✅ {p} = {a}')
+                  else:
+                      print(f'   Position {i}: ❌ {p} ≠ {a}')
+              
+              accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
+              
+              # Lưu metrics
+              metrics_data = {
+                  'evaluation_date': yesterday,
+                  'region': 'XSMB',
+                  'total_predictions': len(actual_num),
+                  'correct_predictions': correct_digits,
+                  'accuracy_rate': accuracy,
+                  'model_version': 'frequency_v1'
+              }
+              db.save_evaluation(metrics_data)
+              
+              print(f'✅ Evaluation saved!')
+              print(f'   Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)} digits)')
+              
+              if bot: await bot.send_evaluation(metrics_data)
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "
   
   evaluate-xsmn:
@@ -112,82 +135,113 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('📊 Evaluating XSMN predictions for all provinces...')
-          print('=' * 60)
-          
-          provinces = [
-              'tp-hcm', 'dong-thap', 'ca-mau',
-              'ben-tre', 'vung-tau', 'bac-lieu',
-              'dong-nai', 'can-tho', 'soc-trang',
-              'tay-ninh', 'an-giang', 'binh-thuan',
-              'vinh-long', 'binh-duong', 'tra-vinh',
-              'long-an', 'binh-phuoc', 'hau-giang',
-              'tien-giang', 'kien-giang', 'da-lat'
-          ]
-          
-          db = LotteryDB()
-          yesterday = (datetime.now() - timedelta(days=1)).date()
-          
-          total_evaluated = 0
-          total_accuracy = 0.0
-          
-          for province in provinces:
+          async def main():
+              print('📊 Evaluating XSMN predictions for all provinces...')
+              print('=' * 60)
+              
+              provinces = [
+                  'tp-hcm', 'dong-thap', 'ca-mau',
+                  'ben-tre', 'vung-tau', 'bac-lieu',
+                  'dong-nai', 'can-tho', 'soc-trang',
+                  'tay-ninh', 'an-giang', 'binh-thuan',
+                  'vinh-long', 'binh-duong', 'tra-vinh',
+                  'long-an', 'binh-phuoc', 'hau-giang',
+                  'tien-giang', 'kien-giang', 'da-lat'
+              ]
+              
+              db = LotteryDB()
               try:
-                  print(f'\n📍 {province.upper()}...')
-                  
-                  # Lấy prediction cho tỉnh này
-                  prediction = db.get_prediction_by_date(yesterday, 'XSMN', province)
-                  
-                  if not prediction:
-                      print(f'   ⚠️ No prediction found')
-                      continue
-                  
-                  # Lấy kết quả thực tế
-                  actual = db.get_draw_by_date(yesterday, 'XSMN', province)
-                  
-                  if not actual:
-                      print(f'   ⚠️ No actual results found')
-                      continue
-                  
-                  # So sánh
-                  pred_num = prediction['predicted_numbers']['predicted_number']
-                  actual_num = actual['special_prize']
-                  
-                  correct_digits = sum(1 for p, a in zip(pred_num, actual_num) if p == a)
-                  accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
-                  
-                  # Lưu evaluation
-                  db.save_evaluation({
-                      'evaluation_date': yesterday,
-                      'region': 'XSMN',
-                      'total_predictions': len(actual_num),
-                      'correct_predictions': correct_digits,
-                      'accuracy_rate': accuracy,
-                      'model_version': 'frequency_v1'
-                  })
-                  
-                  print(f'   Predicted: {pred_num}')
-                  print(f'   Actual:    {actual_num}')
-                  print(f'   ✅ Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)})')
-                  
-                  total_evaluated += 1
-                  total_accuracy += accuracy
-                  
+                  bot = LotteryNotifier()
               except Exception as e:
-                  print(f'   ❌ Error: {e}')
-          
-          print('\n' + '=' * 60)
-          if total_evaluated > 0:
-              avg_accuracy = (total_accuracy / total_evaluated) * 100
-              print(f'📊 Summary:')
-              print(f'   Evaluated: {total_evaluated}/{len(provinces)} provinces')
-              print(f'   Average accuracy: {avg_accuracy:.1f}%')
-          else:
-              print('⚠️ No evaluations completed')
-          print('=' * 60)
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+                  
+              # Use Vietnam Time (UTC+7)
+              vn_now = datetime.utcnow() + timedelta(hours=7)
+              yesterday = (vn_now - timedelta(days=1)).date()
+              print(f'Current Vietnam Time: {vn_now}')
+              print(f'Evaluation Date (Yesterday): {yesterday}')
+              
+              total_evaluated = 0
+              total_accuracy = 0.0
+              
+              for province in provinces:
+                  try:
+                      print(f'\n📍 {province.upper()}...')
+                      
+                      # Lấy prediction cho tỉnh này
+                      prediction = db.get_prediction_by_date(yesterday, 'XSMN', province)
+                      
+                      if not prediction:
+                          print(f'   ⚠️ No prediction found')
+                          continue
+                      
+                      # Lấy kết quả thực tế
+                      actual = db.get_draw_by_date(yesterday, 'XSMN', province)
+                      
+                      if not actual:
+                          print(f'   ⚠️ No actual results found')
+                          continue
+                      
+                      # So sánh
+                      pred_num = prediction['predicted_numbers']['predicted_number']
+                      actual_num = actual['special_prize']
+                      
+                      correct_digits = sum(1 for p, a in zip(pred_num, actual_num) if p == a)
+                      accuracy = correct_digits / len(actual_num) if len(actual_num) > 0 else 0
+                      
+                      # Lưu evaluation
+                      db.save_evaluation({
+                          'evaluation_date': yesterday,
+                          'region': 'XSMN',
+                          'total_predictions': len(actual_num),
+                          'correct_predictions': correct_digits,
+                          'accuracy_rate': accuracy,
+                          'model_version': 'frequency_v1'
+                      })
+                      
+                      print(f'   Predicted: {pred_num}')
+                      print(f'   Actual:    {actual_num}')
+                      print(f'   ✅ Accuracy: {accuracy*100:.1f}% ({correct_digits}/{len(actual_num)})')
+                      
+                      total_evaluated += 1
+                      total_accuracy += accuracy
+                      
+                  except Exception as e:
+                      print(f'   ❌ Error: {e}')
+              
+              print('\n' + '=' * 60)
+              if total_evaluated > 0:
+                  avg_accuracy = (total_accuracy / total_evaluated)
+                  print(f'📊 Summary:')
+                  print(f'   Evaluated: {total_evaluated}/{len(provinces)} provinces')
+                  print(f'   Average accuracy: {avg_accuracy*100:.1f}%')
+                  
+                  # Gửi báo cáo tổng hợp cho XSMN (chứ không gửi từng tỉnh sẽ bị spam)
+                  metrics_data = {
+                      'evaluation_date': yesterday,
+                      'region': 'XSMN (Avg)',
+                      'total_predictions': 6, # dummy
+                      'correct_predictions': 0, # dummy
+                      'accuracy_rate': avg_accuracy,
+                      'model_version': 'frequency_v1'
+                  }
+                  if bot: await bot.send_evaluation(metrics_data)
+                  
+              else:
+                  print('⚠️ No evaluations completed')
+                  if bot: await bot.send_message(f'⚠️ <b>XSMN Evaluation</b>: No evaluations completed for {yesterday}')
+              print('=' * 60)
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "

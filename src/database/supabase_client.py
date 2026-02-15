@@ -7,6 +7,7 @@ import os
 from supabase import create_client, Client
 from datetime import datetime, date
 from typing import List, Dict, Optional
+from dotenv import load_dotenv
 
 
 class LotteryDB:
@@ -14,6 +15,7 @@ class LotteryDB:
     
     def __init__(self):
         """Initialize Supabase client với credentials từ environment variables"""
+        load_dotenv()
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         
@@ -169,8 +171,13 @@ class LotteryDB:
         if isinstance(prediction_data.get('prediction_date'), date):
             prediction_data['prediction_date'] = prediction_data['prediction_date'].isoformat()
         
+        # Force province to empty string if None (to support unique constraint)
+        if prediction_data.get('province') is None:
+            prediction_data['province'] = ''
+            
         try:
-            # Use upsert to handle duplicates gracefully
+            # Upsert: insert nếu chưa có, update nếu đã có
+            # Use the new constraint keys
             response = self.supabase.table("predictions").upsert(
                 prediction_data,
                 on_conflict='prediction_date,region,province,model_version'

@@ -30,62 +30,80 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.crawler.xsmb_crawler import XSMBCrawler
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('🚀 Starting XSMB crawler...')
-          
-          crawler = XSMBCrawler()
-          db = LotteryDB()
-          
-          # Use Vietnam Time (UTC+7)
-          vn_time = datetime.utcnow() + timedelta(hours=7)
-          today = vn_time.date()
-          print(f'Current Vietnam Time: {vn_time}')
-          
-          results = crawler.fetch_results(today)
-          
-          if results:
+          async def main():
+              print('🚀 Starting XSMB crawler...')
+              
+              crawler = XSMBCrawler()
+              db = LotteryDB()
               try:
-                  db.upsert_draw(results)
-                  
-                  # Log success
-                  db.log_crawler_status({
-                      'crawl_date': today,
-                      'region': 'XSMB',
-                      'status': 'success',
-                      'records_inserted': 1
-                  })
-                  
-                  print('✅ XSMB crawl successful!')
-                  print(f'   Date: {today}')
-                  print(f'   Special Prize: {results[\"special_prize\"]}')
-                  
+                  bot = LotteryNotifier()
               except Exception as e:
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+              
+              # Use Vietnam Time (UTC+7)
+              vn_time = datetime.utcnow() + timedelta(hours=7)
+              today = vn_time.date()
+              print(f'Current Vietnam Time: {vn_time}')
+              
+              try:
+                  results = crawler.fetch_results(today)
+                  
+                  if results:
+                      db.upsert_draw(results)
+                      
+                      # Log success
+                      db.log_crawler_status({
+                          'crawl_date': today,
+                          'region': 'XSMB',
+                          'status': 'success',
+                          'records_inserted': 1
+                      })
+                      
+                      msg = f'✅ <b>Crawl XSMB Success</b>\n📅 {today}\n🏆 ĐB: {results[\"special_prize\"]}'
+                      print(msg)
+                      if bot: await bot.send_message(msg)
+                      
+                  else:
+                      error_msg = 'Crawler returned no results'
+                      # Log failure
+                      db.log_crawler_status({
+                          'crawl_date': today,
+                          'region': 'XSMB',
+                          'status': 'failed',
+                          'error_message': error_msg,
+                          'records_inserted': 0
+                      })
+                      print(f'❌ {error_msg}')
+                      if bot: await bot.send_error_alert(f'XSMB Crawl Failed: {error_msg}')
+                      exit(1)
+                      
+              except Exception as e:
+                  error_msg = str(e)
                   # Log error
                   db.log_crawler_status({
                       'crawl_date': today,
                       'region': 'XSMB',
                       'status': 'failed',
-                      'error_message': str(e),
+                      'error_message': error_msg,
                       'records_inserted': 0
                   })
-                  print(f'❌ Error saving to database: {e}')
+                  print(f'❌ Error: {e}')
+                  if bot: await bot.send_error_alert(f'XSMB Crawl Error: {e}')
                   exit(1)
-          else:
-              # Log failure
-              db.log_crawler_status({
-                  'crawl_date': today,
-                  'region': 'XSMB',
-                  'status': 'failed',
-                  'error_message': 'Crawler returned no results',
-                  'records_inserted': 0
-              })
-              print('❌ XSMB crawl failed - no results')
-              exit(1)
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "
   
   crawl-xsmn:
@@ -111,64 +129,82 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
+          import asyncio
           from src.crawler.xsmn_crawler import XSMNCrawler
           from src.database.supabase_client import LotteryDB
+          from src.bot.telegram_bot import LotteryNotifier
           from datetime import datetime, timedelta
           
-          print('🚀 Starting XSMN crawler...')
-          
-          crawler = XSMNCrawler()
-          db = LotteryDB()
-          
-          
-          # Use Vietnam Time (UTC+7)
-          vn_time = datetime.utcnow() + timedelta(hours=7)
-          today = vn_time.date()
-          print(f'Current Vietnam Time: {vn_time}')
-          
-          # Crawl XSMN for ALL provinces today
-          provinces = crawler.get_provinces_for_date(today)
-          print(f'   Target provinces: {provinces}')
-          
-          success_count = 0
-          
-          for province in provinces:
+          async def main():
+              print('🚀 Starting XSMN crawler...')
+              
+              crawler = XSMNCrawler()
+              db = LotteryDB()
               try:
-                  print(f'   Crawling {province}...')
-                  results = crawler.fetch_results(today, province=province)
-                  
-                  if results:
-                      # Dùng upsert để tránh lỗi duplicate nếu chạy lại
-                      db.upsert_draw(results)
-                      success_count += 1
-                      print(f'   ✅ {province} success!')
-                  else:
-                      print(f'   ⚠️ {province} no data')
-                      
+                  bot = LotteryNotifier()
               except Exception as e:
-                  print(f'   ❌ Error {province}: {e}')
+                  print(f'⚠️ Could not init bot: {e}')
+                  bot = None
+              
+              # Use Vietnam Time (UTC+7)
+              vn_time = datetime.utcnow() + timedelta(hours=7)
+              today = vn_time.date()
+              print(f'Current Vietnam Time: {vn_time}')
+              
+              # Crawl XSMN for ALL provinces today
+              provinces = crawler.get_provinces_for_date(today)
+              print(f'   Target provinces: {provinces}')
+              
+              success_count = 0
+              
+              for province in provinces:
+                  try:
+                      print(f'   Crawling {province}...')
+                      results = crawler.fetch_results(today, province=province)
+                      
+                      if results:
+                          # Dùng upsert để tránh lỗi duplicate nếu chạy lại
+                          db.upsert_draw(results)
+                          success_count += 1
+                          print(f'   ✅ {province} success!')
+                      else:
+                          print(f'   ⚠️ {province} no data')
+                          
+                  except Exception as e:
+                      print(f'   ❌ Error {province}: {e}')
 
-          if success_count > 0:
-              # Log overall success if at least one province succeeded
-              db.log_crawler_status({
-                  'crawl_date': today,
-                  'region': 'XSMN',
-                  'status': 'success',
-                  'records_inserted': success_count,
-                  'error_message': f'Crawled {success_count}/{len(provinces)} provinces'
-              })
-              print(f'✅ XSMN crawl completed: {success_count}/{len(provinces)} success')
-          else:
-              # Log failure if ALL failed
-              db.log_crawler_status({
-                  'crawl_date': today,
-                  'region': 'XSMN',
-                  'status': 'failed',
-                  'error_message': 'No data found for any province',
-                  'records_inserted': 0
-              })
-              print('❌ XSMN crawl failed - no results for any province')
-              exit(1)
+              if success_count > 0:
+                  # Log overall success if at least one province succeeded
+                  db.log_crawler_status({
+                      'crawl_date': today,
+                      'region': 'XSMN',
+                      'status': 'success',
+                      'records_inserted': success_count,
+                      'error_message': f'Crawled {success_count}/{len(provinces)} provinces'
+                  })
+                  
+                  msg = f'✅ <b>Crawl XSMN Success</b>\n📅 {today}\n📊 Updated: {success_count}/{len(provinces)} provinces'
+                  print(msg)
+                  if bot: await bot.send_message(msg)
+                  
+              else:
+                  error_msg = 'No data found for any province'
+                  # Log failure if ALL failed
+                  db.log_crawler_status({
+                      'crawl_date': today,
+                      'region': 'XSMN',
+                      'status': 'failed',
+                      'error_message': error_msg,
+                      'records_inserted': 0
+                  })
+                  print(f'❌ {error_msg}')
+                  if bot: await bot.send_error_alert(f'XSMN Crawl Failed: {error_msg}')
+                  exit(1)
+
+          if __name__ == '__main__':
+              asyncio.run(main())
           "
