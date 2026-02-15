@@ -100,7 +100,13 @@ class TrainingManager:
             
             # 5. Upload to Storage
             storage_path = f"{region.lower()}/{filename}"
-            self.storage.upload_model(local_path, storage_path)
+            upload_success = self.storage.upload_model(local_path, storage_path)
+            
+            if not upload_success:
+                print(f"❌ Upload failed for {filename}. Skipping DB log.")
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+                return None, None
             
             # 6. Log to DB
             metrics = {
