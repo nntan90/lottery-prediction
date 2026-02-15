@@ -155,45 +155,37 @@ jobs:
               today = vn_time.date()
               print(f'Current Vietnam Time: {vn_time}')
               
-              # Crawl XSMN for ALL provinces today
-              provinces = crawler.get_provinces_for_date(today)
-              print(f'   Target provinces: {provinces}')
+              # Crawl XSMN for ALL provinces today (BATCH MODE)
+              print(f'   Target: Fetching all provinces for {today} in one request...')
+              results_list = crawler.fetch_batch_results(today)
               
               success_count = 0
-              
-              for province in provinces:
-                  try:
-                      print(f'   Crawling {province}...')
-                      results = crawler.fetch_results(today, province=province)
-                      
-                      if results:
-                          # Dùng upsert để tránh lỗi duplicate nếu chạy lại
-                          db.upsert_draw(results)
+              if results_list:
+                  for res in results_list:
+                      try:
+                          db.upsert_draw(res)
                           success_count += 1
-                          print(f'   ✅ {province} success!')
-                      else:
-                          print(f'   ⚠️ {province} no data')
-                          
-                  except Exception as e:
-                      print(f'   ❌ Error {province}: {e}')
-
+                          print(f"   ✅ Saved {res['province']}")
+                      except Exception as e:
+                          print(f"   ❌ Error saving {res['province']}: {e}")
+              
               if success_count > 0:
-                  # Log overall success if at least one province succeeded
+                  # Log overall success
                   db.log_crawler_status({
                       'crawl_date': today,
                       'region': 'XSMN',
                       'status': 'success',
                       'records_inserted': success_count,
-                      'error_message': f'Crawled {success_count}/{len(provinces)} provinces'
+                      'error_message': f'Batch crawled {success_count} provinces'
                   })
                   
-                  msg = f'✅ <b>Crawl XSMN Success</b>\n📅 {today}\n📊 Updated: {success_count}/{len(provinces)} provinces'
+                  msg = f'✅ <b>Crawl XSMN Success</b>\n📅 {today}\n📊 Saved: {success_count} provinces'
                   print(msg)
                   if bot: await bot.send_message(msg)
                   
               else:
-                  error_msg = 'No data found for any province'
-                  # Log failure if ALL failed
+                  error_msg = 'No data found for any province (Batch Mode)'
+                  # Log failure
                   db.log_crawler_status({
                       'crawl_date': today,
                       'region': 'XSMN',

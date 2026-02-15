@@ -200,6 +200,114 @@ class XSMNCrawler:
             traceback.print_exc()
             return None
 
+    def fetch_batch_results(self, target_date: date) -> list:
+        """
+        Fetch results for ALL provinces on a specific date in one request.
+        Returns a list of result dictionaries.
+        """
+        try:
+            results = self._crawl_batch_from_minhngoc(target_date)
+            if results:
+                print(f"✅ Successfully crawled batch XSMN for {target_date}: {len(results)} provinces found")
+                return results
+            else:
+                print(f"❌ No data found for XSMN on {target_date}")
+                return []
+        except Exception as e:
+            print(f"❌ Error crawling batch XSMN for {target_date}: {e}")
+            return []
+
+    def _crawl_batch_from_minhngoc(self, target_date: date) -> list:
+        """Crawl ALL provinces from minhngoc page"""
+        url = f"https://www.minhngoc.net/tra-cuu-ket-qua-xo-so.html?mien=1&ngay={target_date.day}&thang={target_date.month}&nam={target_date.year}"
+        print(f"🔍 Crawling Batch XSMN: {url}")
+        
+        try:
+            response = requests.get(url, headers=self.headers, timeout=15)
+            if response.status_code != 200:
+                print(f"  ❌ Failed to fetch: {response.status_code}")
+                return []
+                
+            soup = BeautifulSoup(response.content, 'html.parser')
+            table = soup.find('table', class_='bkqmiennam')
+            
+            if not table:
+                print(f"  ⚠️ XSMN table (bkqmiennam) not found")
+                return []
+                
+            results = []
+            rows = table.find_all('tr')
+            
+            # Create a reverse map for easier lookup: 'Display Name' -> 'slug'
+            # Note: lowercase for comparison
+            name_to_slug = {v.lower(): k for k, v in self.PROVINCE_MAP.items()}
+            
+            for idx, row in enumerate(rows):
+                td_tinh = row.find('td', class_='tinh')
+                if not td_tinh:
+                    continue
+                
+                prov_name_text = td_tinh.text.strip()
+                prov_lower = prov_name_text.lower()
+                
+                # Check known provinces
+                # We try exact match first
+                found_slug = name_to_slug.get(prov_lower)
+                
+                # If not exact, maybe we can map common variations if needed
+                # For now, rely on exact match (Minh Ngoc is consistent)
+                if not found_slug:
+                     # Check if it's "Đà Lạt" vs "Lâm Đồng"?
+                     if "đà lạt" in prov_lower: found_slug = "da-lat"
+                     elif "hcm" in prov_lower: found_slug = "tp-hcm"
+                     else:
+                        # Log but verify if it's a province we care about
+                        # print(f"  ⚠️ Unknown province name in row: {prov_name_text}")
+                        continue
+                
+                print(f"  ✅ Found province: {prov_name_text} ({found_slug})")
+                
+                prizes = {}
+                # Reuse extraction logic (embedded here since method is cleaner)
+                def extract(class_name, db_field, is_array=True):
+                    td = row.find('td', class_=class_name)
+                    if td:
+                        text = td.get_text(separator='|')
+                        values = self._clean_prize_list(text)
+                        if not values: return
+                        if is_array: prizes[db_field] = values
+                        else: prizes[db_field] = values[0]
+                
+                extract('giai8', 'eighth_prize', is_array=False)
+                
+                 # Check header row
+                g8 = prizes.get('eighth_prize')
+                if g8 and ('Giải' in str(g8) or not str(g8).replace('|', '').isdigit()):
+                     continue
+
+                extract('giai7', 'seventh_prize', is_array=True)
+                extract('giai6', 'sixth_prize', is_array=True)
+                extract('giai5', 'fifth_prize', is_array=True)
+                extract('giai4', 'fourth_prize', is_array=True)
+                extract('giai3', 'third_prize', is_array=True)
+                extract('giai2', 'second_prize', is_array=True)
+                extract('giai1', 'first_prize', is_array=False)
+                extract('giaidb', 'special_prize', is_array=False)
+                
+                if 'special_prize' in prizes:
+                    results.append({
+                        'draw_date': target_date,
+                        'region': 'XSMN',
+                        'province': found_slug,
+                        **prizes
+                    })
+            
+            return results
+            
+        except Exception as e:
+            print(f"  ❌ Batch Parse error: {e}")
+            return []
+
 # Test function
 if __name__ == "__main__":
     from datetime import datetime, timedelta
