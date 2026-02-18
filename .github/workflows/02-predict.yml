@@ -1,9 +1,6 @@
 name: 02 - Generate Predictions
 
-# Chạy hàng ngày lúc 20:00 GMT+7 (13:00 UTC)
-# Sau khi crawl xong (hoặc buổi sáng hôm sau cho ngày hôm nay)
-# User request: "Generate Prediction dự đoán ngày hiện tại ... vào lúc 7:00 hằng ngày"
-# 7:00 VN = 00:00 UTC
+# Chạy hàng ngày lúc 7:00 GMT+7 (00:00 UTC)
 on:
   schedule:
     - cron: '0 0 * * *'  # 7:00 GMT+7
@@ -13,23 +10,24 @@ jobs:
   predict-daily:
     name: Generate Daily Prediction (LSTM V2)
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install tensorflow pandas numpy scikit-learn -r requirements.txt
-      
+
       - name: Generate Predictions
+        id: predict
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -38,3 +36,21 @@ jobs:
           PYTHONPATH: .
         run: |
           python src/scripts/predict_v2.py
+
+      # Gửi Telegram nếu bất kỳ step nào fail hoặc bị terminate
+      - name: "🚨 Notify Telegram - Predict Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>02 - Generate Predictions FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Bước tạo dự đoán bị lỗi hoặc terminate."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"

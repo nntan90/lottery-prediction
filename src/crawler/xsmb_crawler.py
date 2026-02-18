@@ -96,6 +96,12 @@ class XSMBCrawler:
                 table = soup.find('table', class_='bkqmiennam')
                 
             if not table:
+                # Check for Holiday
+                page_text = soup.get_text().lower()
+                if any(kw in page_text for kw in ["nghỉ tết", "nghỉ lễ", "lịch tết", "miền bắc nghỉ"]):
+                    print(f"  ⚠️ Holiday detected: XSMB is not drawn today.")
+                    return None
+
                 print(f"  ⚠️ XSMB table (bkqmienbac) not found")
                 return None
             

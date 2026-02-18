@@ -7,221 +7,135 @@ on:
   workflow_dispatch:  # Cho phép chạy thủ công
 
 jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: Crawl XSMB (Miền Bắc) - độc lập
+  # ─────────────────────────────────────────────
   crawl-xsmb:
-    name: Crawl XSMB
+    name: Crawl XSMB (Miền Bắc)
     runs-on: ubuntu-latest
-    
+    continue-on-error: true
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Crawl XSMB Results
+        id: crawl_xsmb
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
         run: |
-          python -c "
-          import asyncio
-          from src.crawler.xsmb_crawler import XSMBCrawler
-          from src.database.supabase_client import LotteryDB
-          from src.bot.telegram_bot import LotteryNotifier
-          from datetime import datetime, timedelta
-          
-          async def main():
-              print('🚀 Starting XSMB crawler...')
-              
-              crawler = XSMBCrawler()
-              db = LotteryDB()
-              try:
-                  bot = LotteryNotifier()
-              except Exception as e:
-                  print(f'⚠️ Could not init bot: {e}')
-                  bot = None
-              
-              # Use Vietnam Time (UTC+7)
-              vn_time = datetime.utcnow() + timedelta(hours=7)
-              today = vn_time.date()
-              print(f'Current Vietnam Time: {vn_time}')
-              
-              try:
-                  results = crawler.fetch_results(today)
-                  
-                  if results:
-                      db.upsert_draw(results)
-                      
-                      # Log success
-                      db.log_crawler_status({
-                          'crawl_date': today,
-                          'region': 'XSMB',
-                          'status': 'success',
-                          'records_inserted': 1
-                      })
-                      
-                      msg = f'✅ <b>Crawl XSMB Success</b>\n📅 {today}\n🏆 ĐB: {results[\"special_prize\"]}'
-                      print(msg)
-                      if bot: await bot.send_message(msg)
-                      
-                  else:
-                      error_msg = 'Crawler returned no results'
-                      # Log failure
-                      db.log_crawler_status({
-                          'crawl_date': today,
-                          'region': 'XSMB',
-                          'status': 'failed',
-                          'error_message': error_msg,
-                          'records_inserted': 0
-                      })
-                      print(f'❌ {error_msg}')
-                      if bot: await bot.send_error_alert(f'XSMB Crawl Failed: {error_msg}')
-                      exit(1)
-                      
-              except Exception as e:
-                  error_msg = str(e)
-                  # Log error
-                  db.log_crawler_status({
-                      'crawl_date': today,
-                      'region': 'XSMB',
-                      'status': 'failed',
-                      'error_message': error_msg,
-                      'records_inserted': 0
-                  })
-                  print(f'❌ Error: {e}')
-                  if bot: await bot.send_error_alert(f'XSMB Crawl Error: {e}')
-                  exit(1)
+          python src/scripts/crawl_xsmb.py
 
-          if __name__ == '__main__':
-              asyncio.run(main())
-          "
-  
+      - name: "🚨 Notify Telegram - XSMB Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>XSMB Crawl FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Job bị lỗi hoặc bị terminate. Kiểm tra GitHub Actions."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"
+
+  # ─────────────────────────────────────────────
+  # Job 2: Crawl XSMN (Miền Nam) - độc lập
+  # ─────────────────────────────────────────────
   crawl-xsmn:
-    name: Crawl XSMN
+    name: Crawl XSMN (Miền Nam)
     runs-on: ubuntu-latest
-    
+    continue-on-error: true
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Crawl XSMN Results
+        id: crawl_xsmn
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
         run: |
-          python -c "
-          import asyncio
-          from src.crawler.xsmn_crawler import XSMNCrawler
-          from src.database.supabase_client import LotteryDB
-          from src.bot.telegram_bot import LotteryNotifier
-          from datetime import datetime, timedelta
-          
-          async def main():
-              print('🚀 Starting XSMN crawler...')
-              
-              crawler = XSMNCrawler()
-              db = LotteryDB()
-              try:
-                  bot = LotteryNotifier()
-              except Exception as e:
-                  print(f'⚠️ Could not init bot: {e}')
-                  bot = None
-              
-              # Use Vietnam Time (UTC+7)
-              vn_time = datetime.utcnow() + timedelta(hours=7)
-              today = vn_time.date()
-              print(f'Current Vietnam Time: {vn_time}')
-              
-              # Crawl XSMN for ALL provinces today (BATCH MODE)
-              print(f'   Target: Fetching all provinces for {today} in one request...')
-              results_list = crawler.fetch_batch_results(today)
-              
-              success_count = 0
-              if results_list:
-                  for res in results_list:
-                      try:
-                          db.upsert_draw(res)
-                          success_count += 1
-                          print(f"   ✅ Saved {res['province']}")
-                      except Exception as e:
-                          print(f"   ❌ Error saving {res['province']}: {e}")
-              
-              if success_count > 0:
-                  # Log overall success
-                  db.log_crawler_status({
-                      'crawl_date': today,
-                      'region': 'XSMN',
-                      'status': 'success',
-                      'records_inserted': success_count,
-                      'error_message': f'Batch crawled {success_count} provinces'
-                  })
-                  
-                  msg = f'✅ <b>Crawl XSMN Success</b>\n📅 {today}\n📊 Saved: {success_count} provinces'
-                  print(msg)
-                  if bot: await bot.send_message(msg)
-                  
-              else:
-                  error_msg = 'No data found for any province (Batch Mode)'
-                  # Log failure
-                  db.log_crawler_status({
-                      'crawl_date': today,
-                      'region': 'XSMN',
-                      'status': 'failed',
-                      'error_message': error_msg,
-                      'records_inserted': 0
-                  })
-                  print(f'❌ {error_msg}')
-                  if bot: await bot.send_error_alert(f'XSMN Crawl Failed: {error_msg}')
-                  exit(1)
+          python src/scripts/crawl_xsmn.py
 
-          if __name__ == '__main__':
-              asyncio.run(main())
-          "
+      - name: "🚨 Notify Telegram - XSMN Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>XSMN Crawl FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Job bị lỗi hoặc bị terminate. Kiểm tra GitHub Actions."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"
+
+  # ─────────────────────────────────────────────
+  # Job 3: Verify Predictions
+  # Luôn chạy sau cả 2 job dù fail hay không
+  # ─────────────────────────────────────────────
   verify-results:
     name: Verify Predictions
     needs: [crawl-xsmb, crawl-xsmn]
     runs-on: ubuntu-latest
-    if: always() # Run even if one crawl fails (to verify what succeeded)
-    
+    if: always()
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Verify Predictions vs Results
+        id: verify
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -230,3 +144,20 @@ jobs:
           PYTHONPATH: .
         run: |
           python src/scripts/verify_predictions.py
+
+      - name: "🚨 Notify Telegram - Verify Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>Verify Predictions FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Bước kiểm tra dự đoán bị lỗi hoặc terminate."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"

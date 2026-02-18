@@ -1,7 +1,6 @@
 name: 05 - Train LSTM Models
 
 # Chạy hàng tuần vào 20:00 Chủ Nhật (13:00 UTC)
-# Hoặc chạy thủ công
 on:
   schedule:
     - cron: '0 13 * * 0'  # 13:00 UTC = 20:00 VN Sunday
@@ -11,24 +10,24 @@ jobs:
   train-models:
     name: Train LSTM Models
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # We need tensorflow for LSTM
           pip install tensorflow pandas numpy scikit-learn -r requirements.txt
-      
+
       - name: Run Training Manager
+        id: train
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -37,3 +36,21 @@ jobs:
           PYTHONPATH: .
         run: |
           python src/scripts/train_manager.py
+
+      # Gửi Telegram nếu bất kỳ step nào fail hoặc bị terminate
+      - name: "🚨 Notify Telegram - Training Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>05 - Train LSTM Models FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Bước training model bị lỗi hoặc terminate (timeout/OOM?)."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"

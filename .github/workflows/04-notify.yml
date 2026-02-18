@@ -10,121 +10,47 @@ jobs:
   notify-predictions:
     name: Send Daily Predictions to Telegram
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Send All Predictions
+        id: notify
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
         run: |
-          python -c "
-          import asyncio
-          from src.bot.telegram_bot import LotteryNotifier
-          from src.database.supabase_client import LotteryDB
-          from datetime import datetime, timedelta
-          
-          async def main():
-              print('📱 Sending daily predictions to Telegram...')
-              print('=' * 60)
-              
-              db = LotteryDB()
-              bot = LotteryNotifier()
-              today = datetime.now().date()
-              
-              # === XSMB Prediction ===
-              print('\n🎯 XSMB Prediction...')
-              xsmb_pred = db.get_prediction_by_date(today, 'XSMB')
-              
-              if xsmb_pred:
-                  message = f'''
-🎯 <b>DỰ ĐOÁN XSMB - {today.strftime(\"%d/%m/%Y\")}</b>
+          python src/scripts/send_daily_notifications.py
 
-🔮 Số dự đoán: <code>{xsmb_pred[\"predicted_numbers\"][\"predicted_number\"]}</code>
-📊 Độ tin cậy: {xsmb_pred[\"confidence_score\"]*100:.0f}%
-🔥 Số nóng: {', '.join(map(str, xsmb_pred[\"predicted_numbers\"][\"hot_numbers\"][:5]))}
-
-<i>Model: {xsmb_pred[\"model_version\"]}</i>
-                  '''
-                  
-                  success = await bot.send_message(message)
-                  if success:
-                      print('   ✅ XSMB sent')
-                  else:
-                      print('   ❌ XSMB failed')
-              else:
-                  print('   ⚠️ No XSMB prediction found')
-              
-              await asyncio.sleep(2)
-              
-              # === XSMN Predictions (All Provinces) ===
-              print('\n🎯 XSMN Predictions (All Provinces)...')
-              
-              provinces = {
-                  'tp-hcm': 'TP.HCM',
-                  'dong-thap': 'Đồng Tháp',
-                  'ca-mau': 'Cà Mau',
-                  'ben-tre': 'Bến Tre',
-                  'vung-tau': 'Vũng Tàu',
-                  'bac-lieu': 'Bạc Liêu',
-                  'dong-nai': 'Đồng Nai',
-                  'can-tho': 'Cần Thơ',
-                  'soc-trang': 'Sóc Trăng',
-                  'tay-ninh': 'Tây Ninh',
-                  'an-giang': 'An Giang',
-                  'binh-thuan': 'Bình Thuận',
-                  'vinh-long': 'Vĩnh Long',
-                  'binh-duong': 'Bình Dương',
-                  'tra-vinh': 'Trà Vinh',
-                  'long-an': 'Long An',
-                  'binh-phuoc': 'Bình Phước',
-                  'hau-giang': 'Hậu Giang',
-                  'tien-giang': 'Tiền Giang',
-                  'kien-giang': 'Kiên Giang',
-                  'da-lat': 'Đà Lạt'
-              }
-              
-              # Gộp tất cả predictions vào 1 message
-              xsmn_message = f'🎯 <b>DỰ ĐOÁN XSMN - {today.strftime(\"%d/%m/%Y\")}</b>\n\n'
-              
-              found_count = 0
-              for province_code, province_name in provinces.items():
-                  pred = db.get_prediction_by_date(today, 'XSMN', province_code)
-                  
-                  if pred:
-                      pred_num = pred['predicted_numbers']['predicted_number']
-                      confidence = pred['confidence_score'] * 100
-                      xsmn_message += f'📍 <b>{province_name}</b>: <code>{pred_num}</code> ({confidence:.0f}%)\n'
-                      found_count += 1
-              
-              if found_count > 0:
-                  xsmn_message += f'\n<i>Tổng: {found_count}/21 tỉnh</i>'
-                  success = await bot.send_message(xsmn_message)
-                  
-                  if success:
-                      print(f'   ✅ XSMN sent ({found_count} provinces)')
-                  else:
-                      print('   ❌ XSMN failed')
-              else:
-                  print('   ⚠️ No XSMN predictions found')
-              
-              print('\n' + '=' * 60)
-              print('✅ Notification workflow completed!')
-          
-          asyncio.run(main())
-          "
+      # Gửi Telegram nếu bất kỳ step nào fail hoặc bị terminate
+      - name: "🚨 Notify Telegram - Send Notifications Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>04 - Send Notifications FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Bước gửi thông báo Telegram bị lỗi hoặc terminate."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"
