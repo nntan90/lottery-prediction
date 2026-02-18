@@ -218,7 +218,15 @@ class XSMNCrawler:
             return []
 
     def _crawl_batch_from_minhngoc(self, target_date: date) -> list:
-        """Crawl ALL provinces from minhngoc page"""
+        """Crawl ALL provinces from minhngoc page.
+        
+        HTML structure: each province spans MULTIPLE rows:
+          - Row with class 'tinh': province name
+          - Row with class 'matinh': lottery code
+          - Rows with class 'giai8', 'giai7', ..., 'giaidb': individual prizes
+        
+        We group rows into province blocks by detecting 'tinh' rows as separators.
+        """
         url = f"https://www.minhngoc.net/tra-cuu-ket-qua-xo-so.html?mien=1&ngay={target_date.day}&thang={target_date.month}&nam={target_date.year}"
         print(f"🔍 Crawling Batch XSMN: {url}")
         
@@ -234,56 +242,86 @@ class XSMNCrawler:
             if not table:
                 print(f"  ⚠️ XSMN table (bkqmiennam) not found")
                 return []
-                
-            results = []
-            rows = table.find_all('tr')
-            
-            # Create a reverse map for easier lookup: 'Display Name' -> 'slug'
-            # Note: lowercase for comparison
+
+            # Reverse map: 'display name (lowercase)' -> 'slug'
             name_to_slug = {v.lower(): k for k, v in self.PROVINCE_MAP.items()}
-            
-            for idx, row in enumerate(rows):
-                td_tinh = row.find('td', class_='tinh')
-                if not td_tinh:
+
+            rows = table.find_all('tr')
+
+            # ── Step 1: Group rows into province blocks ──────────────────────
+            # A new block starts whenever we see a row with class 'tinh'
+            # (but skip the very first header block which has no real province)
+            blocks = []       # list of (province_slug, [rows_in_block])
+            current_slug = None
+            current_rows = []
+
+            for row in rows:
+                all_tinh_tds = row.find_all('td', class_='tinh')
+
+                if len(all_tinh_tds) > 1:
+                    # Summary row containing all provinces — skip entirely
                     continue
-                
-                prov_name_text = td_tinh.text.strip()
-                prov_lower = prov_name_text.lower()
-                
-                # Check known provinces
-                # We try exact match first
-                found_slug = name_to_slug.get(prov_lower)
-                
-                # If not exact, maybe we can map common variations if needed
-                # For now, rely on exact match (Minh Ngoc is consistent)
-                if not found_slug:
-                     # Check if it's "Đà Lạt" vs "Lâm Đồng"?
-                     if "đà lạt" in prov_lower: found_slug = "da-lat"
-                     elif "hcm" in prov_lower: found_slug = "tp-hcm"
-                     else:
-                        # Log but verify if it's a province we care about
-                        # print(f"  ⚠️ Unknown province name in row: {prov_name_text}")
-                        continue
-                
-                print(f"  ✅ Found province: {prov_name_text} ({found_slug})")
-                
+                elif len(all_tinh_tds) == 1:
+                    # Individual province header row — start a new block
+                    if current_slug and current_rows:
+                        blocks.append((current_slug, current_rows))
+
+                    prov_name = all_tinh_tds[0].text.strip()
+                    prov_lower = prov_name.lower()
+                    slug = name_to_slug.get(prov_lower)
+                    if not slug:
+                        if 'đà lạt' in prov_lower:
+                            slug = 'da-lat'
+                        elif 'hcm' in prov_lower:
+                            slug = 'tp-hcm'
+                        else:
+                            current_slug = None
+                            current_rows = []
+                            continue
+
+                    print(f"  ✅ Found province: {prov_name} ({slug})")
+                    current_slug = slug
+                    current_rows = [row]
+                else:
+                    # Prize row — append to current province block
+                    if current_slug is not None:
+                        current_rows.append(row)
+
+            # Don't forget the last block
+            if current_slug and current_rows:
+                blocks.append((current_slug, current_rows))
+
+            # ── Step 2: Extract prizes from each block ───────────────────────
+            results = []
+
+            for slug, block_rows in blocks:
                 prizes = {}
-                # Reuse extraction logic (embedded here since method is cleaner)
+
+                def get_td_text(class_name):
+                    """Find a td with given class across all rows in the block."""
+                    for r in block_rows:
+                        td = r.find('td', class_=class_name)
+                        if td:
+                            return td.get_text(separator='|')
+                    return None
+
                 def extract(class_name, db_field, is_array=True):
-                    td = row.find('td', class_=class_name)
-                    if td:
-                        text = td.get_text(separator='|')
+                    text = get_td_text(class_name)
+                    if text:
                         values = self._clean_prize_list(text)
-                        if not values: return
-                        if is_array: prizes[db_field] = values
-                        else: prizes[db_field] = values[0]
-                
+                        if not values:
+                            return
+                        if is_array:
+                            prizes[db_field] = values
+                        else:
+                            prizes[db_field] = values[0]
+
                 extract('giai8', 'eighth_prize', is_array=False)
-                
-                 # Check header row
+
+                # Skip header rows (value contains "Giải" or is not numeric)
                 g8 = prizes.get('eighth_prize')
                 if g8 and ('Giải' in str(g8) or not str(g8).replace('|', '').isdigit()):
-                     continue
+                    continue
 
                 extract('giai7', 'seventh_prize', is_array=True)
                 extract('giai6', 'sixth_prize', is_array=True)
@@ -293,19 +331,23 @@ class XSMNCrawler:
                 extract('giai2', 'second_prize', is_array=True)
                 extract('giai1', 'first_prize', is_array=False)
                 extract('giaidb', 'special_prize', is_array=False)
-                
+
                 if 'special_prize' in prizes:
                     results.append({
                         'draw_date': target_date,
                         'region': 'XSMN',
-                        'province': found_slug,
+                        'province': slug,
                         **prizes
                     })
-            
+                else:
+                    print(f"  ⚠️ No special prize found for {slug}, skipping")
+
             return results
             
         except Exception as e:
             print(f"  ❌ Batch Parse error: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
 # Test function
