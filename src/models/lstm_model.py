@@ -3,9 +3,14 @@ LSTM Model for Lottery Prediction
 """
 
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential, load_model
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+except ImportError:
+    tf = None
+    print("⚠️ TensorFlow not available. LSTM model will be disabled.")
+    
 from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
@@ -22,6 +27,9 @@ class LotteryLSTM:
         Prepare data for LSTM training.
         Extracts numerical values from the specified prize column.
         """
+        if tf is None:
+            return np.array([]), np.array([])
+            
         df = pd.DataFrame(data)
         
         # Sort by date
@@ -45,6 +53,9 @@ class LotteryLSTM:
 
     def build_model(self, input_shape: Tuple[int, int]):
         """Build LSTM architecture"""
+        if tf is None:
+            return None
+            
         model = Sequential()
         model.add(LSTM(units=50, return_sequences=True, input_shape=input_shape))
         model.add(Dropout(0.2))
@@ -58,6 +69,9 @@ class LotteryLSTM:
 
     def train(self, X: np.ndarray, y: np.ndarray, epochs: int = 50, batch_size: int = 32):
         """Train the model"""
+        if tf is None or self.model is None:
+            return None
+            
         # Reshape X to (samples, time steps, features)
         X = np.reshape(X, (X.shape[0], X.shape[1], 1))
         
@@ -72,6 +86,11 @@ class LotteryLSTM:
         Predict the next value.
         recent_data: valid numpy array of last `sequence_length` values
         """
+        if tf is None:
+            # Fallback: Return average of recent data or just last value?
+            # Let's return the simplified average for now to allow pipeline to complete
+            return float(np.mean(recent_data))
+            
         if self.model is None:
             raise ValueError("Model not trained or loaded!")
             
@@ -97,6 +116,10 @@ class LotteryLSTM:
 
     def load(self, filepath: str):
         """Load model from .h5 file"""
+        if tf is None:
+            print("⚠️ TensorFlow missing. Model loading skipped.")
+            return
+            
         if os.path.exists(filepath):
             self.model = load_model(filepath)
             print(f"✅ Model loaded from {filepath}")

@@ -138,20 +138,27 @@ async def predict_region(region: str, province: str = None):
 async def main():
     notifier = LotteryNotifier()
     db = LotteryDB()
-    crawler = XSMNCrawler()
+    today = datetime.now().date()
     
-    # 1. XSMB
-    print("🎯 Predicting XSMB (LSTM)...")
-    pred_xsmb = await predict_region('XSMB')
-    
-    # Calculate Date
+    # Logic: If run early in the day (e.g. < 12:00), predict for TODAY.
+    # If run late (e.g. > 18:00), predict for TOMORROW.
+    # Our cron runs at 7:00 AM, so it should be TODAY.
     vn_now = datetime.utcnow() + timedelta(hours=7)
-    tomorrow = vn_now + timedelta(days=1)
+    if vn_now.hour < 12:
+        target_date = vn_now.date()
+        print(f"🌅 Morning run ({vn_now.hour}h): Predicting for TODAY ({target_date})")
+    else:
+        target_date = (vn_now + timedelta(days=1)).date()
+        print(f"c Evening run ({vn_now.hour}h): Predicting for TOMORROW ({target_date})")
+
+    # 1. XSMB
+    print(f"🎯 Predicting XSMB for {target_date}...")
+    pred_xsmb = await predict_region('XSMB')
     
     if pred_xsmb:
         print(f"✅ XSMB: {pred_xsmb['predicted_number']}")
         db.save_prediction({
-            'prediction_date': tomorrow.date(),
+            'prediction_date': target_date,
             'region': 'XSMB',
             'province': None,
             'model_version': 'lstm_v2',
@@ -161,7 +168,7 @@ async def main():
         # Notify
         await notifier.send_prediction({
             'region': 'XSMB',
-            'prediction_date': tomorrow.date(),
+            'prediction_date': target_date,
             'predicted_numbers': {
                 'predicted_number': pred_xsmb['predicted_number'],
                 'hot_numbers': pred_xsmb['hot_numbers']
@@ -169,17 +176,22 @@ async def main():
             'confidence_score': pred_xsmb['confidence'],
             'model_version': 'lstm_v2'
         })
-        
+    else:
+        print("❌ XSMB Prediction Failed")
+        await notifier.send_error_alert(f"⚠️ XSMB Prediction Failed for {target_date}")
+
     # 2. XSMN
-    provinces = crawler.get_provinces_for_date(tomorrow.date())
+    crawler = XSMNCrawler()
+    provinces = crawler.get_provinces_for_date(target_date)
     print(f"🎯 Predicting XSMN for {provinces}...")
     
+    success_count = 0
     for province in provinces:
         pred_xsmn = await predict_region('XSMN', province)
         if pred_xsmn:
             print(f"✅ XSMN-{province}: {pred_xsmn['predicted_number']}")
             db.save_prediction({
-                'prediction_date': tomorrow.date(),
+                'prediction_date': target_date,
                 'region': 'XSMN',
                 'province': province,
                 'model_version': 'lstm_v2',
@@ -190,8 +202,8 @@ async def main():
             province_name = crawler.PROVINCE_MAP.get(province, province)
             await notifier.send_prediction({
                 'region': 'XSMN',
-                'province': province_name, # Send Display Name (e.g., "Tiền Giang") instead of slug
-                'prediction_date': tomorrow.date(),
+                'province': province_name,
+                'prediction_date': target_date,
                 'predicted_numbers': {
                     'predicted_number': pred_xsmn['predicted_number'],
                     'hot_numbers': list(map(str, pred_xsmn['hot_numbers']))
@@ -199,6 +211,11 @@ async def main():
                 'confidence_score': pred_xsmn['confidence'],
                 'model_version': 'lstm_v2'
             })
+            success_count += 1
+            
+    if success_count == 0 and provinces:
+        print("❌ XSMN Prediction Failed (All provinces)")
+        await notifier.send_error_alert(f"⚠️ XSMN Prediction Failed for {target_date}")
 
 if __name__ == "__main__":
     asyncio.run(main())
