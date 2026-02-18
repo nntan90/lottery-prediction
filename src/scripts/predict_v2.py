@@ -112,9 +112,13 @@ async def predict_region(region: str, province: str = None):
         
         # Hot numbers? LSTM doesn't give hot numbers directly.
         # We can run Frequency Analyzer on the side for that!
-        from src.models.frequency_analyzer import FrequencyAnalyzer
-        freq_analyzer = FrequencyAnalyzer(data)
-        hot_numbers = freq_analyzer.find_hot_numbers(top_n=5)
+        try:
+            from src.models.frequency_analyzer import FrequencyAnalyzer
+            freq_analyzer = FrequencyAnalyzer(data)
+            hot_numbers = freq_analyzer.find_hot_numbers(top_n=5)
+        except ImportError:
+            print("⚠️ FrequencyAnalyzer not found. Hot numbers will be empty.")
+            hot_numbers = []
         
         result = {
              'predicted_number': predicted_str,
