@@ -1,14 +1,14 @@
-name: 06 - Monthly Model Cleanup
+name: 03 - Send Telegram Notifications
 
-# Run on the 1st of every month at 04:00 UTC (11:00 GMT+7)
+# Chạy hàng ngày lúc 7:00 GMT+7 (00:00 UTC)
 on:
   schedule:
-    - cron: '0 4 1 * *'
+    - cron: '5 0 * * *'  # 7:05 GMT+7 (sau 02-predict)
   workflow_dispatch:
 
 jobs:
-  cleanup:
-    name: Cleanup Old Models
+  notify-predictions:
+    name: Send Daily Predictions to Telegram
     runs-on: ubuntu-latest
 
     steps:
@@ -26,8 +26,8 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Cleanup Script
-        id: cleanup
+      - name: Send All Predictions
+        id: notify
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -35,20 +35,20 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
         run: |
-          python src/scripts/cleanup_models.py
+          python src/scripts/send_daily_notifications.py
 
       # Gửi Telegram nếu bất kỳ step nào fail hoặc bị terminate
-      - name: "🚨 Notify Telegram - Cleanup Failed"
+      - name: "🚨 Notify Telegram - 03 Send Notifications Failed"
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="🚨 <b>06 - Monthly Cleanup FAILED</b>%0A"
+          MSG="🚨 <b>03 - Send Notifications FAILED</b>%0A"
           MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
           MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
-          MSG+="⚠️ Bước dọn dẹp model hàng tháng bị lỗi hoặc terminate."
+          MSG+="⚠️ Bước gửi thông báo Telegram bị lỗi hoặc terminate."
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "text=${MSG}" \
