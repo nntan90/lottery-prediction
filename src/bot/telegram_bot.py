@@ -19,11 +19,10 @@ class LotteryNotifier:
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
         if not bot_token or not self.chat_id:
-            raise ValueError(
-                "Missing Telegram credentials! "
-                "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables."
-            )
-        
+            print("⚠️ Missing Telegram credentials. Notifications will be disabled (Mock Mode).")
+            self.bot = None
+            return
+            
         self.bot = Bot(token=bot_token)
         print(f"✅ Telegram bot initialized")
     
@@ -44,6 +43,10 @@ class LotteryNotifier:
         Returns:
             True nếu gửi thành công, False nếu failed
         """
+        if not self.bot:
+            print(f"[MOCK] Sending Prediction: {prediction_data}")
+            return True
+
         try:
             message = self._format_prediction_message(prediction_data)
             
@@ -74,6 +77,10 @@ class LotteryNotifier:
         Returns:
             True nếu gửi thành công
         """
+        if not self.bot:
+            print(f"[MOCK] Sending Message: {message[:100]}...")
+            return True
+
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -90,42 +97,6 @@ class LotteryNotifier:
             print(f"❌ Error sending message: {e}")
             return False
     
-    async def send_evaluation(self, metrics_data: Dict) -> bool:
-        """
-        Gửi báo cáo đánh giá
-        
-        Args:
-            metrics_data: Dictionary từ database
-                {
-                    'evaluation_date': '2024-01-15',
-                    'region': 'XSMB',
-                    'accuracy_rate': 0.4,
-                    'correct_predictions': 2,
-                    'total_predictions': 5,
-                    ...
-                }
-        
-        Returns:
-            True nếu gửi thành công
-        """
-        try:
-            message = self._format_evaluation_message(metrics_data)
-            
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode='Markdown'
-            )
-            
-            print(f"✅ Evaluation sent to Telegram")
-            return True
-            
-        except TelegramError as e:
-            print(f"❌ Telegram error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Error sending evaluation: {e}")
-            return False
     
     async def send_error_alert(self, error_message: str) -> bool:
         """
@@ -193,39 +164,6 @@ class LotteryNotifier:
         
         return msg
     
-    def _format_evaluation_message(self, data: Dict) -> str:
-        """
-        Format message đẹp cho evaluation
-        
-        Returns:
-            Formatted markdown string
-        """
-        eval_date = data.get('evaluation_date', 'N/A')
-        region = data.get('region', 'N/A')
-        accuracy = data.get('accuracy_rate', 0)
-        correct = data.get('correct_predictions', 0)
-        total = data.get('total_predictions', 5)
-        
-        msg = f"📊 *Báo Cáo Đánh Giá {region}*\n"
-        msg += f"📅 Ngày: `{eval_date}`\n\n"
-        
-        msg += f"✅ Số chữ số đúng: {correct}/{total}\n"
-        msg += f"📈 Tỷ lệ chính xác: {accuracy*100:.1f}%\n\n"
-        
-        # Emoji dựa trên accuracy
-        if accuracy >= 0.6:
-            emoji = "🎉"
-            comment = "Tuyệt vời!"
-        elif accuracy >= 0.4:
-            emoji = "👍"
-            comment = "Khá tốt!"
-        else:
-            emoji = "📝"
-            comment = "Cần cải thiện"
-        
-        msg += f"{emoji} _{comment}_"
-        
-        return msg
 
 
 async def test_bot():
@@ -245,41 +183,6 @@ async def test_bot():
         'confidence_score': 0.28
     }
     
-    # Sample evaluation data
-    sample_evaluation = {
-        'evaluation_date': '2024-01-14',
-        'region': 'XSMB',
-        'accuracy_rate': 0.4,
-        'correct_predictions': 2,
-        'total_predictions': 5
-    }
-    
-    try:
-        notifier = LotteryNotifier()
-        
-        # Test prediction
-        print("Sending test prediction...")
-        success = await notifier.send_prediction(sample_prediction)
-        
-        if success:
-            print("✅ Prediction sent successfully!")
-        else:
-            print("❌ Failed to send prediction")
-        
-        # Wait a bit
-        await asyncio.sleep(2)
-        
-        # Test evaluation
-        print("\nSending test evaluation...")
-        success = await notifier.send_evaluation(sample_evaluation)
-        
-        if success:
-            print("✅ Evaluation sent successfully!")
-        else:
-            print("❌ Failed to send evaluation")
-            
-    except Exception as e:
-        print(f"❌ Test failed: {e}")
 
 
 if __name__ == "__main__":

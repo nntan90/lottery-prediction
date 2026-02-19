@@ -223,60 +223,8 @@ class LotteryDB:
             print(f"❌ Error fetching prediction: {e}")
             return None
     
-    # ==================== EVALUATION METRICS ====================
-    
-    def save_evaluation(self, metrics_data: Dict) -> Dict:
-        """
-        Lưu kết quả đánh giá
-        
-        Args:
-            metrics_data: Dictionary chứa metrics
-                {
-                    'evaluation_date': date object,
-                    'region': 'XSMB',
-                    'total_predictions': 1,
-                    'correct_predictions': 2,
-                    'accuracy_rate': 0.4,
-                    'model_version': 'frequency_v1'
-                }
-        
-        Returns:
-            Response từ Supabase
-        """
-        # Convert date object sang string
-        if isinstance(metrics_data.get('evaluation_date'), date):
-            metrics_data['evaluation_date'] = metrics_data['evaluation_date'].isoformat()
-        
-        try:
-            response = self.supabase.table("evaluation_metrics").insert(metrics_data).execute()
-            return response
-        except Exception as e:
-            print(f"❌ Error saving evaluation: {e}")
-            raise
-    
-    def get_recent_metrics(self, region: str, days: int = 30) -> List[Dict]:
-        """
-        Lấy metrics gần đây
-        
-        Args:
-            region: 'XSMB' hoặc 'XSMN'
-            days: Số ngày gần đây (mặc định 30)
-        
-        Returns:
-            List of dictionaries chứa metrics
-        """
-        try:
-            response = self.supabase.table("evaluation_metrics")\
-                .select("*")\
-                .eq("region", region)\
-                .order("evaluation_date", desc=True)\
-                .limit(days)\
-                .execute()
-            
-            return response.data
-        except Exception as e:
-            print(f"❌ Error fetching metrics: {e}")
-            return []
+    # ==================== EVALUATION METRICS (REMOVED) ====================
+    # Methods removed as table 'evaluation_metrics' is deprecated (2026-02-16)
     
     # ==================== CRAWLER LOGS ====================
     

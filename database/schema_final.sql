@@ -122,17 +122,10 @@ COMMENT ON COLUMN model_training_logs.trigger_reason IS 'Lý do train: scheduled
 CREATE INDEX IF NOT EXISTS idx_training_logs_date ON model_training_logs(training_date DESC);
 
 
--- 4. TABLE: telegram_subscribers
--- Quản lý người dùng Telegram
-CREATE TABLE IF NOT EXISTS telegram_subscribers (
-  chat_id BIGINT PRIMARY KEY,
-  username VARCHAR(100),
-  subscribed_regions VARCHAR(20)[], -- ['XSMB', 'XSMN']
-  is_active BOOLEAN DEFAULT true,
-  subscribed_at TIMESTAMP DEFAULT NOW()
-);
 
-COMMENT ON TABLE telegram_subscribers IS 'Danh sách người dùng đăng ký nhận thông báo Telegram';
+-- 4. TABLE: telegram_subscribers (REMOVED)
+-- Quản lý người dùng Telegram - Đã xóa vì không sử dụng (2026-02-16)
+-- CREATE TABLE IF NOT EXISTS telegram_subscribers ...
 
 
 -- 5. TABLE: crawler_logs
@@ -151,30 +144,12 @@ COMMENT ON TABLE crawler_logs IS 'Nhật ký hoạt động của Crawler';
 CREATE INDEX IF NOT EXISTS idx_crawler_logs_date ON crawler_logs(crawl_date DESC);
 
 
--- 6. TABLE: evaluation_metrics (Legacy/V1)
-CREATE TABLE IF NOT EXISTS evaluation_metrics (
-  id SERIAL PRIMARY KEY,
-  evaluation_date DATE NOT NULL,
-  region VARCHAR(10),
-  total_predictions INT,
-  correct_predictions INT,
-  accuracy_rate FLOAT,
-  model_version VARCHAR(20),
-  created_at TIMESTAMP DEFAULT NOW()
-);
-COMMENT ON TABLE evaluation_metrics IS 'Bảng đánh giá hiệu quả dự đoán (Ít dùng trong V2, thay bằng model_training_logs)';
 
+-- 6. TABLE: evaluation_metrics (REMOVED)
+-- Bảng đánh giá hiệu quả dự đoán (Legacy/V1) - Đã xóa vì không sử dụng (2026-02-16)
 
--- 7. TABLE: model_metadata (Legacy/V1)
-CREATE TABLE IF NOT EXISTS model_metadata (
-  version VARCHAR(20) PRIMARY KEY,
-  model_type VARCHAR(50),
-  training_date DATE,
-  accuracy_baseline FLOAT,
-  is_active BOOLEAN DEFAULT true,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-COMMENT ON TABLE model_metadata IS 'Metadata cho các model cũ (Prophet, Frequency) - Ít dùng trong V2';
+-- 7. TABLE: model_metadata (REMOVED)
+-- Metadata cho các model cũ (Prophet, Frequency) - Đã xóa vì không sử dụng (2026-02-16)
 
 
 -- =====================================================
@@ -185,7 +160,7 @@ COMMENT ON TABLE model_metadata IS 'Metadata cho các model cũ (Prophet, Freque
 ALTER TABLE lottery_draws ENABLE ROW LEVEL SECURITY;
 ALTER TABLE predictions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE evaluation_metrics ENABLE ROW LEVEL SECURITY;
-ALTER TABLE telegram_subscribers ENABLE ROW LEVEL SECURITY;
+-- ALTER TABLE telegram_subscribers ENABLE ROW LEVEL SECURITY; -- Removed
 ALTER TABLE crawler_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_metadata ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_training_logs ENABLE ROW LEVEL SECURITY;
@@ -193,16 +168,16 @@ ALTER TABLE model_training_logs ENABLE ROW LEVEL SECURITY;
 -- Policies: Public Read
 CREATE POLICY "Public read access" ON lottery_draws FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON predictions FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON evaluation_metrics FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON model_metadata FOR SELECT USING (true);
+-- CREATE POLICY "Public read access" ON evaluation_metrics FOR SELECT USING (true); -- Removed
+-- CREATE POLICY "Public read access" ON model_metadata FOR SELECT USING (true); -- Removed
 CREATE POLICY "Public read access" ON model_training_logs FOR SELECT USING (true);
 
 -- Policies: Service Write Only
 CREATE POLICY "Service write access" ON lottery_draws FOR INSERT WITH CHECK (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON predictions FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON evaluation_metrics FOR INSERT WITH CHECK (auth.role() = 'service_role');
+-- CREATE POLICY "Service write access" ON evaluation_metrics FOR INSERT WITH CHECK (auth.role() = 'service_role'); -- Removed
 CREATE POLICY "Service write access" ON crawler_logs FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON model_metadata FOR INSERT WITH CHECK (auth.role() = 'service_role');
+-- CREATE POLICY "Service write access" ON model_metadata FOR INSERT WITH CHECK (auth.role() = 'service_role'); -- Removed
 CREATE POLICY "Service write access" ON model_training_logs FOR INSERT WITH CHECK (auth.role() = 'service_role');
 
 -- =====================================================

@@ -1,48 +1,40 @@
 """
 Verify Predictions Script
 Runs after daily crawl to check if we won.
+Supports checking a specific date via CLI args.
 """
 
 import asyncio
 import os
+import argparse
 from datetime import datetime, timedelta, date
 
 from src.database.supabase_client import LotteryDB
 from src.utils.verification import verify_prediction
 from src.bot.telegram_bot import LotteryNotifier
 
-async def verify_daily_results():
+async def verify_daily_results(check_date: date = None):
     db = LotteryDB()
     notifier = LotteryNotifier()
     
-    # Verify for TODAY (or specifically the crawl date)
-    # Crawl runs at 19:00, so we check "today"
-    # But strictly speaking, we should check the result date
-    
-    # Use Vietnam Time
-    vn_now = datetime.utcnow() + timedelta(hours=7)
-    check_date = vn_now.date()
-    
+    # 1. Determine Date
+    if not check_date:
+        # Use Vietnam Time (UTC+7)
+        vn_now = datetime.utcnow() + timedelta(hours=7)
+        check_date = vn_now.date()
+        print(f"🕒 Auto-detected date (Vietnam Time): {check_date}")
+    else:
+        print(f"🕒 Using specific date: {check_date}")
+        
     print(f"🕵️‍♀️ Verifying predictions for {check_date}...")
     
     regions = ['XSMB', 'XSMN']
     results_report = []
+    has_any_prediction = False
     
     for region in regions:
-        # 1. Get Draw Result
-        # For XSMN we need to check each province
-        # But `db.get_draw_by_date` fetches single record. 
-        # For XSMN, we need to iterate all provinces that have results today.
-        
-        # Helper to fetch all results for a date/region?
-        # Our current client `get_draw_by_date` is specific.
-        # Let's fetch all predictions for today first, then verify each.
-        
-        # 2. Get Predictions for today
+        # 2. Get Predictions for date
         try:
-            # We need to query predictions table again. 
-            # Client `get_prediction_by_date` returns ONE.
-            # We need ALL (especially for XSMN multiple provinces).
              query = db.supabase.table("predictions")\
                 .select("*")\
                 .eq("prediction_date", check_date.isoformat())\
@@ -51,24 +43,28 @@ async def verify_daily_results():
                 
              predictions = query.data
         except Exception as e:
-            print(f"❌ Error fetching predictions: {e}")
+            print(f"❌ Error fetching predictions for {region}: {e}")
             continue
 
         if not predictions:
             print(f"⚠️ No predictions found for {region} on {check_date}")
+            # If explicit run, maybe notify? For now, just log.
+            # Update: User wants notification on failure to find prediction?
+            # actually the error "No prediction found" came from somewhere else.
+            # Let's add a note to the report if verified explicitly.
             continue
             
+        has_any_prediction = True
         print(f"🔍 Found {len(predictions)} predictions for {region}")
         
         for pred in predictions:
             province = pred.get('province')
             
             # Get Verification Result from DB
-            # We need the actual draw result for this province
             draw = db.get_draw_by_date(check_date, region, province)
             
             if not draw:
-                print(f"⚠️ No draw result found for {region}-{province}")
+                print(f"⚠️ No draw result found for {region}-{province} on {check_date}")
                 continue
                 
             # VERIFY!
@@ -96,15 +92,37 @@ async def verify_daily_results():
             except Exception as e:
                 print(f"❌ Error updating prediction verify status: {e}")
 
-    # Send Report
+    # Send Result Report
+    msg_header = f"🏆 <b>KẾT QUẢ DỰ ĐOÁN ({check_date})</b>\n\n"
+    
+    
     if results_report:
-        msg = f"🏆 <b>DAILY RESULT VERIFICATION ({check_date})</b>\n\n" + "\n".join(results_report)
-        await notifier.send_message(msg)
+        msg_body = "\n".join(results_report)
+        await notifier.send_message(msg_header + msg_body)
+        print("✅ Sent success report to Telegram")
+    elif not has_any_prediction:
+         print("⚠️ No predictions found to verify.")
+         # Optional: Send a message saying "No predictions to verify"
+         msg_body = "⚠️ Không tìm thấy dữ liệu dự đoán cho ngày hôm nay."
+         await notifier.send_message(f"{msg_header}{msg_body}")
     else:
-        # Optional: Send "No wins" message? Or just silent.
-        # User might want to know verification ran.
-        print("No wins detected today.")
-        # await notifier.send_message(f"📉 No wins detected for {check_date}")
+        # No wins but we HAD predictions
+        print("📉 No wins detected today.")
+        msg_body = "📉 Không có dự đoán nào chính xác hôm nay."
+        await notifier.send_message(f"{msg_header}{msg_body}")
+        print("✅ Sent 'No win' report to Telegram")
 
 if __name__ == "__main__":
-    asyncio.run(verify_daily_results())
+    parser = argparse.ArgumentParser(description='Verify daily lottery predictions')
+    parser.add_argument('--date', type=str, help='Date to verify (YYYY-MM-DD)')
+    args = parser.parse_args()
+    
+    target_date = None
+    if args.date:
+        try:
+            target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+        except ValueError:
+            print("❌ Invalid date format. Use YYYY-MM-DD")
+            exit(1)
+            
+    asyncio.run(verify_daily_results(target_date))
