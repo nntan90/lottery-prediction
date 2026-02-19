@@ -1,4 +1,4 @@
-name: 06 - Verify Predictions
+name: 03 - Verify Predictions
 
 # Chạy sau khi crawl xong (19:30 GMT+7 = 12:30 UTC)
 # Đủ thời gian để job 01 crawl xong trước
@@ -38,14 +38,14 @@ jobs:
         run: |
           python src/scripts/verify_predictions.py
 
-      - name: "🚨 Notify Telegram - 06 Verify Failed"
+      - name: "🚨 Notify Telegram - 03 Verify Failed"
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="🚨 <b>06 - Verify Predictions FAILED</b>%0A"
+          MSG="🚨 <b>03 - Verify Predictions FAILED</b>%0A"
           MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
           MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
           MSG+="⚠️ Bước kiểm tra dự đoán bị lỗi hoặc terminate."
