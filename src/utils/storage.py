@@ -12,7 +12,7 @@ class LotteryStorage:
         load_dotenv()
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_KEY")
-        self.bucket = "lottery-models"
+        self.bucket = "models"   # Supabase Storage bucket for V3 .pkl files
         
         if not url or not key:
             raise ValueError("Missing Supabase credentials")
@@ -26,7 +26,7 @@ class LotteryStorage:
                 self.supabase.storage.from_(self.bucket).upload(
                     file=f,
                     path=storage_path,
-                    file_options={"cache-control": "3600", "upsert": "true"}
+                    file_options={"content-type": "application/octet-stream", "upsert": "true"}
                 )
             print(f"✅ Uploaded {local_path} to {self.bucket}/{storage_path}")
             return True

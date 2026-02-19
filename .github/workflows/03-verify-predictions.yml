@@ -36,7 +36,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
         run: |
-          python src/scripts/verify_predictions.py
+          python src/scripts/verify_v3.py
 
       - name: "🚨 Notify Telegram - 03 Verify Failed"
         if: failure()

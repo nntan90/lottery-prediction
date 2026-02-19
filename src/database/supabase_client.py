@@ -147,84 +147,9 @@ class LotteryDB:
             print(f"❌ Error fetching draw by date: {e}")
             return None
     
-    # ==================== PREDICTIONS ====================
-    
-    def save_prediction(self, prediction_data: Dict) -> Dict:
-        """
-        Lưu dự đoán vào database (upsert - update nếu đã tồn tại)
-        
-        Args:
-            prediction_data: Dictionary chứa dự đoán
-                {
-                    'prediction_date': date object,
-                    'region': 'XSMB',
-                    'province': None or province code,
-                    'model_version': 'frequency_v1',
-                    'predicted_numbers': {...},
-                    'confidence_score': 0.3
-                }
-        
-        Returns:
-            Response từ Supabase
-        """
-        # Convert date object sang string
-        if isinstance(prediction_data.get('prediction_date'), date):
-            prediction_data['prediction_date'] = prediction_data['prediction_date'].isoformat()
-        
-        # Force province to empty string if None (to support unique constraint)
-        if prediction_data.get('province') is None:
-            prediction_data['province'] = ''
-            
-        try:
-            # Upsert: insert nếu chưa có, update nếu đã có
-            # Use the new constraint keys
-            response = self.supabase.table("predictions").upsert(
-                prediction_data,
-                on_conflict='prediction_date,region,province,model_version'
-            ).execute()
-            return response
-        except Exception as e:
-            print(f"❌ Error saving prediction: {e}")
-            raise
-    
-    def get_prediction_by_date(
-        self, 
-        prediction_date: date, 
-        region: str,
-        province: str = None
-    ) -> Optional[Dict]:
-        """
-        Lấy dự đoán cho một ngày cụ thể
-        
-        Args:
-            prediction_date: Ngày cần lấy dự đoán
-            region: 'XSMB' hoặc 'XSMN'
-            province: Tỉnh (optional, for XSMN only)
-        
-        Returns:
-            Dictionary chứa dự đoán hoặc None
-        """
-        try:
-            query = self.supabase.table("predictions")\
-                .select("*")\
-                .eq("prediction_date", prediction_date.isoformat())\
-                .eq("region", region)\
-                .order("created_at", desc=True)\
-                .limit(1)
-            
-            # Add province filter if specified
-            if province:
-                query = query.eq("province", province)
-            
-            response = query.execute()
-            
-            return response.data[0] if response.data else None
-        except Exception as e:
-            print(f"❌ Error fetching prediction: {e}")
-            return None
-    
-    # ==================== EVALUATION METRICS (REMOVED) ====================
-    # Methods removed as table 'evaluation_metrics' is deprecated (2026-02-16)
+    # ==================== PREDICTION RESULTS ====================
+    # V3 uses 'prediction_results' table accessed directly via self.supabase.table(...)
+    # in scripts/predict_v3.py and scripts/verify_v3.py
     
     # ==================== CRAWLER LOGS ====================
     

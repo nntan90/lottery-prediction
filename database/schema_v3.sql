@@ -1,66 +1,19 @@
 -- =====================================================
--- LOTTERY PREDICTION SYSTEM V3 - FINAL DATABASE SCHEMA
+-- LOTTERY PREDICTION SYSTEM V3 — NEW TABLES
 -- =====================================================
--- Full schema definition for V3 system.
--- Includes: lottery_draws, crawler_logs (Base)
--- Includes: tails_2d, pair_features, model_registry, prediction_results, training_queue (V3)
--- Removed: predictions, model_training_logs (V2)
--- Generated: 2026-02-20
+-- Run this AFTER schema_final.sql (which keeps lottery_draws, crawler_logs)
+-- Generated: 2026-02-19
 -- =====================================================
 
 -- =====================================================
--- 1. TABLE: lottery_draws
--- Lưu trữ kết quả xổ số kiến thiết hằng ngày (Raw Data)
+-- DROP OLD V2 TABLES
 -- =====================================================
-CREATE TABLE IF NOT EXISTS lottery_draws (
-  id SERIAL PRIMARY KEY,
-  draw_date DATE NOT NULL,
-  region VARCHAR(10) NOT NULL, -- 'XSMB' hoặc 'XSMN'
-  province VARCHAR(50),        -- Tên tỉnh (slug) cho XSMN, NULL cho XSMB
-  
-  -- Các giải thưởng
-  special_prize VARCHAR(20),
-  first_prize VARCHAR(20),
-  second_prize TEXT[],
-  third_prize TEXT[],
-  fourth_prize TEXT[],
-  fifth_prize TEXT[],
-  sixth_prize TEXT[],
-  seventh_prize TEXT[],
-  eighth_prize VARCHAR(20), -- Chỉ có ở XSMN
-  
-  created_at TIMESTAMP DEFAULT NOW(),
-  
-  -- Constraint: Unique per date + region + province
-  CONSTRAINT lottery_draws_draw_date_region_province_key UNIQUE(draw_date, region, province)
-);
-
-COMMENT ON TABLE lottery_draws IS 'Lưu trữ kết quả xổ số kiến thiết hằng ngày (Raw Data)';
-CREATE INDEX IF NOT EXISTS idx_lottery_draws_date ON lottery_draws(draw_date DESC);
-CREATE INDEX IF NOT EXISTS idx_lottery_draws_region ON lottery_draws(region);
-CREATE INDEX IF NOT EXISTS idx_lottery_draws_province ON lottery_draws(province);
+DROP TABLE IF EXISTS predictions CASCADE;
+DROP TABLE IF EXISTS model_training_logs CASCADE;
 
 
 -- =====================================================
--- 2. TABLE: crawler_logs
--- Theo dõi hoạt động crawler
--- =====================================================
-CREATE TABLE IF NOT EXISTS crawler_logs (
-  id SERIAL PRIMARY KEY,
-  crawl_date DATE,
-  region VARCHAR(10),
-  status VARCHAR(20),     -- 'success', 'failed', 'partial'
-  error_message TEXT,
-  records_inserted INT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-COMMENT ON TABLE crawler_logs IS 'Nhật ký hoạt động của Crawler';
-CREATE INDEX IF NOT EXISTS idx_crawler_logs_date ON crawler_logs(crawl_date DESC);
-
-
--- =====================================================
--- 3. TABLE: tails_2d (V3)
+-- 1. tails_2d
 -- 2 số cuối của mọi giải, theo từng kỳ quay
 -- =====================================================
 CREATE TABLE IF NOT EXISTS tails_2d (
@@ -74,14 +27,21 @@ CREATE TABLE IF NOT EXISTS tails_2d (
 );
 
 COMMENT ON TABLE tails_2d IS '2 số cuối của mọi giải trong từng kỳ quay';
+COMMENT ON COLUMN tails_2d.prize_code IS 'Mã giải: DB=đặc biệt, 1=nhất, 2=nhì, ..., 8=tám';
+COMMENT ON COLUMN tails_2d.tail_2d IS '2 số cuối (0–99) của giải đó';
+
 CREATE INDEX IF NOT EXISTS idx_tails_draw_id   ON tails_2d(draw_id);
 CREATE INDEX IF NOT EXISTS idx_tails_date      ON tails_2d(draw_date DESC);
 CREATE INDEX IF NOT EXISTS idx_tails_region    ON tails_2d(region, province);
 CREATE INDEX IF NOT EXISTS idx_tails_pair      ON tails_2d(tail_2d);
 
+ALTER TABLE tails_2d ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read access" ON tails_2d FOR SELECT USING (true);
+CREATE POLICY "Service write access" ON tails_2d FOR INSERT WITH CHECK (auth.role() = 'service_role');
+
 
 -- =====================================================
--- 4. TABLE: pair_features (V3)
+-- 2. pair_features
 -- Feature vector cho mỗi cặp 00–99, mỗi ngày, mỗi đài
 -- =====================================================
 CREATE TABLE IF NOT EXISTS pair_features (
@@ -117,14 +77,21 @@ CREATE TABLE IF NOT EXISTS pair_features (
 );
 
 COMMENT ON TABLE pair_features IS 'Feature vector cho ML: 100 cặp (00–99) × ngày × đài';
+COMMENT ON COLUMN pair_features.hit IS '1 nếu cặp xuất hiện trong bất kỳ giải nào của ngày đó';
+
 CREATE INDEX IF NOT EXISTS idx_pf_date     ON pair_features(feature_date DESC);
 CREATE INDEX IF NOT EXISTS idx_pf_region   ON pair_features(region, province);
 CREATE INDEX IF NOT EXISTS idx_pf_pair     ON pair_features(pair);
 CREATE INDEX IF NOT EXISTS idx_pf_hit      ON pair_features(hit);
 
+ALTER TABLE pair_features ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read access" ON pair_features FOR SELECT USING (true);
+CREATE POLICY "Service write access" ON pair_features FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service update access" ON pair_features FOR UPDATE USING (auth.role() = 'service_role');
+
 
 -- =====================================================
--- 5. TABLE: model_registry (V3)
+-- 3. model_registry
 -- Quản lý các version model XGBoost theo từng đài
 -- =====================================================
 CREATE TABLE IF NOT EXISTS model_registry (
@@ -145,12 +112,20 @@ CREATE TABLE IF NOT EXISTS model_registry (
 );
 
 COMMENT ON TABLE model_registry IS 'Quản lý model XGBoost V3 theo đài';
+COMMENT ON COLUMN model_registry.status IS 'active = đang dùng, deprecated = đã thay thế';
+COMMENT ON COLUMN model_registry.metric_hit_rate IS 'Hit-rate khi chọn top-3 pairs trên tập val';
+
 CREATE INDEX IF NOT EXISTS idx_registry_region  ON model_registry(region, province);
 CREATE INDEX IF NOT EXISTS idx_registry_status  ON model_registry(status);
 
+ALTER TABLE model_registry ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read access" ON model_registry FOR SELECT USING (true);
+CREATE POLICY "Service write access" ON model_registry FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service update access" ON model_registry FOR UPDATE USING (auth.role() = 'service_role');
+
 
 -- =====================================================
--- 6. TABLE: prediction_results (V3)
+-- 4. prediction_results
 -- Kết quả dự đoán hàng ngày (3 cặp) + verify
 -- =====================================================
 CREATE TABLE IF NOT EXISTS prediction_results (
@@ -183,13 +158,22 @@ CREATE TABLE IF NOT EXISTS prediction_results (
 );
 
 COMMENT ON TABLE prediction_results IS 'Kết quả dự đoán V3: 3 cặp 2-số-cuối per ngày per đài';
+COMMENT ON COLUMN prediction_results.hit IS 'TRUE nếu ≥1 cặp trong top-3 xuất hiện trong TAIL_SET';
+COMMENT ON COLUMN prediction_results.matched_pairs IS 'Cặp số nào thực sự trúng';
+COMMENT ON COLUMN prediction_results.tail_set IS 'Tất cả 2 số cuối mọi giải của ngày đó';
+
 CREATE INDEX IF NOT EXISTS idx_pr_date    ON prediction_results(prediction_date DESC);
 CREATE INDEX IF NOT EXISTS idx_pr_region  ON prediction_results(region, province);
 CREATE INDEX IF NOT EXISTS idx_pr_hit     ON prediction_results(hit);
 
+ALTER TABLE prediction_results ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public read access" ON prediction_results FOR SELECT USING (true);
+CREATE POLICY "Service write access" ON prediction_results FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service update access" ON prediction_results FOR UPDATE USING (auth.role() = 'service_role');
+
 
 -- =====================================================
--- 7. TABLE: training_queue (V3)
+-- 5. training_queue
 -- Hàng đợi yêu cầu train lại model
 -- =====================================================
 CREATE TABLE IF NOT EXISTS training_queue (
@@ -215,42 +199,18 @@ CREATE TABLE IF NOT EXISTS training_queue (
 );
 
 COMMENT ON TABLE training_queue IS 'Hàng đợi đề xuất/trigger train lại model';
+COMMENT ON COLUMN training_queue.trigger_reason IS 'new_data: đủ data mới | perf_drop: hiệu năng giảm | manual: thủ công';
+COMMENT ON COLUMN training_queue.status IS 'pending → triggered → done | skipped';
+
 CREATE INDEX IF NOT EXISTS idx_tq_status   ON training_queue(status);
 CREATE INDEX IF NOT EXISTS idx_tq_region   ON training_queue(region, province);
 CREATE INDEX IF NOT EXISTS idx_tq_created  ON training_queue(created_at DESC);
 
-
--- =====================================================
--- ROW LEVEL SECURITY (RLS)
--- =====================================================
-
--- Enable RLS
-ALTER TABLE lottery_draws ENABLE ROW LEVEL SECURITY;
-ALTER TABLE crawler_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tails_2d ENABLE ROW LEVEL SECURITY;
-ALTER TABLE pair_features ENABLE ROW LEVEL SECURITY;
-ALTER TABLE model_registry ENABLE ROW LEVEL SECURITY;
-ALTER TABLE prediction_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE training_queue ENABLE ROW LEVEL SECURITY;
-
--- Policies: Public Read
-CREATE POLICY "Public read access" ON lottery_draws FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON crawler_logs FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON tails_2d FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON pair_features FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON model_registry FOR SELECT USING (true);
-CREATE POLICY "Public read access" ON prediction_results FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON training_queue FOR SELECT USING (true);
-
--- Policies: Service Write Only
-CREATE POLICY "Service write access" ON lottery_draws FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON crawler_logs FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON tails_2d FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON pair_features FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON pair_features FOR UPDATE USING (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON model_registry FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON model_registry FOR UPDATE USING (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON prediction_results FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON prediction_results FOR UPDATE USING (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON training_queue FOR INSERT WITH CHECK (auth.role() = 'service_role');
-CREATE POLICY "Service write access" ON training_queue FOR UPDATE USING (auth.role() = 'service_role');
+CREATE POLICY "Service update access" ON training_queue FOR UPDATE USING (auth.role() = 'service_role');
+
+-- =====================================================
+-- DONE — V3 Schema
+-- =====================================================
