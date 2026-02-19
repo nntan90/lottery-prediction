@@ -26,6 +26,37 @@ class LotteryNotifier:
         self.bot = Bot(token=bot_token)
         print(f"✅ Telegram bot initialized")
     
+    async def send_message(self, message: str, parse_mode: str = 'HTML') -> bool:
+        """
+        Gửi custom message qua Telegram
+        
+        Args:
+            message: Nội dung message (hỗ trợ HTML hoặc Markdown)
+            parse_mode: 'HTML' hoặc 'Markdown'
+        
+        Returns:
+            True nếu gửi thành công
+        """
+        if not self.bot:
+            print(f"[MOCK] Sending Message: {message[:100]}...")
+            return True
+
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode=parse_mode
+            )
+            
+            return True
+            
+        except TelegramError as e:
+            print(f"❌ Telegram error: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Error sending message: {e}")
+            return False
+    
     async def send_error_alert(self, error_message: str) -> bool:
         """
         Gửi thông báo lỗi
