@@ -5,7 +5,7 @@ Chạy: nightly sau crawl (bước cuối trong 01-daily-crawl.yml)
       hoặc thủ công để backfill toàn bộ lịch sử.
 
 Usage:
-  python src/scripts/build_tails.py            # chỉ xử lý ngày hôm qua (nightly)
+  python src/scripts/build_tails.py            # xử lý ngày hôm nay (nightly)
   python src/scripts/build_tails.py --backfill  # toàn bộ lịch sử
   python src/scripts/build_tails.py --date 2026-02-19
 """
@@ -115,8 +115,8 @@ def main():
             total += build_tails_for_date(db, date.fromisoformat(draw_date))
 
     else:
-        # Nightly: xử lý ngày hôm qua
-        target = date.today() - timedelta(days=1)
+        # Nightly: xử lý ngày hôm nay
+        target = date.today()
         print(f"🌙 Nightly build tails for {target}...")
         total = build_tails_for_date(db, target)
 

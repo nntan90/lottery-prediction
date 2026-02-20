@@ -5,7 +5,7 @@ Chạy: sau build_tails.py trong pipeline nightly (01-daily-crawl.yml)
       hoặc thủ công để backfill.
 
 Usage:
-  python src/scripts/build_features.py             # ngày hôm qua
+  python src/scripts/build_features.py             # ngày hôm nay
   python src/scripts/build_features.py --backfill  # toàn bộ lịch sử
   python src/scripts/build_features.py --date 2026-02-19
 """
@@ -175,7 +175,7 @@ def main():
                 total += build_features_for_station(db, region, province, date.fromisoformat(d_str))
 
     else:
-        target = date.today() - timedelta(days=1)
+        target = date.today()
         print(f"🌙 Nightly build features for {target}...")
         for region, province in STATIONS:
             total += build_features_for_station(db, region, province, target)

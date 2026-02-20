@@ -6,13 +6,13 @@ Logic: trúng nếu bất kỳ cặp nào trong [pair_1, pair_2, pair_3] ∈ TAI
 TAIL_SET = tất cả 2 số cuối mọi giải của đài đó trong ngày đó
 
 Flow:
-  1. Lấy prediction_results của hôm qua (chưa verify)
+  1. Lấy prediction_results của hôm nay (chưa verify)
   2. Với mỗi đài: build TAIL_SET từ tails_2d
   3. Check hit, ghi lại matched_pairs + tail_set
   4. Gửi Telegram: hit/miss report tổng hợp
 
 Usage:
-  python src/scripts/verify_v3.py               # hôm qua
+  python src/scripts/verify_v3.py               # hôm nay
   python src/scripts/verify_v3.py --date 2026-02-19
 """
 
@@ -125,10 +125,10 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", type=str, help="Ngày verify (YYYY-MM-DD). Mặc định = hôm qua")
+    parser.add_argument("--date", type=str, help="Ngày verify (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 
-    target_date = date.fromisoformat(args.date) if args.date else date.today() - timedelta(days=1)
+    target_date = date.fromisoformat(args.date) if args.date else date.today()
 
     db = LotteryDB()
     notifier = LotteryNotifier()

@@ -41,7 +41,7 @@ async def main():
                 'status': 'success',
                 'records_inserted': 1
             })
-            msg = f'✅ <b>Crawl XSMB Success</b>\n📅 {today}\n🏆 ĐB: {results["special_prize"]}'
+            msg = f'✅ <b>Crawl XSMB Success</b>\n📅 {today}'
             print(msg)
             if bot:
                 await bot.send_message(msg)

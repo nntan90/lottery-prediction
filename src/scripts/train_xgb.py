@@ -86,6 +86,7 @@ async def main():
     parser.add_argument("--region", required=True, choices=["XSMB", "XSMN"])
     parser.add_argument("--province", default=None, help="Slug tỉnh, hoặc 'all' cho XSMB")
     parser.add_argument("--version", default=None, help="Version string, mặc định = ngày hôm nay")
+    parser.add_argument("--force", action="store_true", help="Force train dù ít dữ liệu (<1000 rows)")
     args = parser.parse_args()
 
     province = None if args.province in (None, "all", "") else args.province
@@ -101,8 +102,10 @@ async def main():
 
     # 1. Load data
     df = load_training_data(db, args.region, province)
-    if len(df) < 1000:  # < 10 kỳ
-        msg = f"❌ Không đủ data để train {label}: {len(df)} rows (cần ≥ 1000)"
+    
+    min_rows = 100 if args.force else 1000
+    if len(df) < min_rows:
+        msg = f"❌ Không đủ data để train {label}: {len(df)} rows (cần ≥ {min_rows})"
         print(msg)
         await notifier.send_error_alert(msg)
         return
