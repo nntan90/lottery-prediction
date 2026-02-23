@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import sys
 import os
+import csv
 from datetime import datetime, date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -50,6 +51,7 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
     total_profit_overall = 0
 
     report_lines = []
+    csv_data = [["Ngày", "Vùng", "Đài", "Vốn (VNĐ)", "Thu (VNĐ)", "Lợi nhuận (VNĐ)", "Chi tiết trúng"]]
     
     current_date = None
     daily_cost = 0
@@ -93,6 +95,17 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
         
         match_str = ", ".join(matched_details) if matched_details else "—"
         
+        # Append to CSV
+        csv_data.append([
+            d_obj.strftime("%d/%m/%Y"), 
+            region.upper(), 
+            lbl, 
+            cost, 
+            rev, 
+            prof, 
+            match_str
+        ])
+        
         # e.g., ✅ TPHCM: +56,000 [Trúng: 10(2 nháy)]
         report_lines.append(f" {status_icon} {lbl}: {prof:+,.0f} đ [Trúng: {match_str}]")
 
@@ -123,6 +136,16 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
     full_msg = summary_msg + details_msg + "\n" + footer_msg
     
     print(full_msg.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
+
+    # Save to CSV
+    csv_filename = f"profit_report_{from_date.strftime('%Y%m%d')}_{to_date.strftime('%Y%m%d')}.csv"
+    with open(csv_filename, mode='w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerows(csv_data)
+        # Add summary row at bottom
+        writer.writerow([])
+        writer.writerow(["TỔNG CỘNG", "", "", total_cost_overall, total_rev_overall, total_profit_overall, sign])
+    print(f"\n💾 Đã lưu báo cáo chi tiết vào file: {csv_filename}")
 
     # Logic to chunk message to avoid Telegram size limits
     max_len = 4000

@@ -40,3 +40,9 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         python src/scripts/report_profit.py --from-date "${{ inputs.from_date }}" --to-date "${{ inputs.to_date }}"
+
+    - name: Upload CSV Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: profit-report-${{ inputs.from_date }}-to-${{ inputs.to_date }}
+        path: profit_report_*.csv
