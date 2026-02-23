@@ -28,6 +28,46 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 
+# Constants for Profit Calculation
+XSMN_TIER_POINTS = [3, 2, 2]
+XSMN_COST_PER_POINT = 14000
+XSMN_REVENUE_PER_HIT_POINT = 70000
+
+XSMB_TIER_POINTS = [2, 1, 1]
+XSMB_COST_PER_POINT = 23000
+XSMB_REVENUE_PER_HIT_POINT = 80000
+
+def calculate_station_profit(region, pairs, tail_rows):
+    """Calculate cost, revenue, profit, and hit details for a station."""
+    if region == "xsmn":
+        tie_points = XSMN_TIER_POINTS
+        cost_per_pt = XSMN_COST_PER_POINT
+        rev_per_pt = XSMN_REVENUE_PER_HIT_POINT
+    elif region == "xsmb":
+        tie_points = XSMB_TIER_POINTS
+        cost_per_pt = XSMB_COST_PER_POINT
+        rev_per_pt = XSMB_REVENUE_PER_HIT_POINT
+    else:
+        return 0, 0, 0, {}
+
+    total_cost = sum(tie_points) * cost_per_pt
+    total_revenue = 0
+    details = {}
+    
+    tails_list = [r["tail_2d"] for r in tail_rows]
+
+    for idx, pair in enumerate(pairs):
+        if pair is None:
+            continue
+        occurrences = tails_list.count(pair)
+        if occurrences > 0:
+            total_revenue += tie_points[idx] * occurrences * rev_per_pt
+            details[str(pair)] = occurrences
+
+    profit = total_revenue - total_cost
+    return total_cost, total_revenue, profit, details
+
+
 
 async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: date):
     """Verify tất cả dự đoán cho target_date."""
@@ -73,7 +113,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         matched = [p for p in pairs if p in tail_set]
         hit = len(matched) > 0
 
-        # Update DB
+        # Update DB for prediction_results
         db.supabase.table("prediction_results")\
             .update({
                 "hit":          hit,
@@ -83,6 +123,33 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             })\
             .eq("id", pred["id"])\
             .execute()
+
+        # Calculate Profit
+        total_cost, total_revenue, profit, details = calculate_station_profit(region, pairs, tail_rows)
+
+        # Upsert profit_tracking
+        profit_data = {
+            "prediction_date": target_date.isoformat(),
+            "region": region,
+            "province": province if province else "all",
+            "total_cost": total_cost,
+            "total_revenue": total_revenue,
+            "profit": profit,
+            "details": details
+        }
+
+        # Check if exists to avoid duplicates or use upsert if we defined unique constraints
+        existing = db.supabase.table("profit_tracking")\
+            .select("id")\
+            .eq("prediction_date", target_date.isoformat())\
+            .eq("region", region)\
+            .eq("province", province if province else "all")\
+            .execute().data
+        
+        if existing:
+            db.supabase.table("profit_tracking").update(profit_data).eq("id", existing[0]["id"]).execute()
+        else:
+            db.supabase.table("profit_tracking").insert(profit_data).execute()
 
         status = "✅ TRÚNG" if hit else "❌ Trượt"
         pairs_str = ", ".join(f"{p:02d}" for p in pairs)
