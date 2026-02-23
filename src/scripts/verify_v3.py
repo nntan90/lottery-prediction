@@ -69,6 +69,17 @@ def calculate_station_profit(region, pairs, tail_rows):
 
 
 
+# Tỉnh hợp lệ theo ngày trong tuần của người dùng (0=Monday, 6=Sunday)
+VALID_XSMN_STATIONS = {
+    0: ["tphcm", "dong_thap"],    # Thứ 2
+    1: ["ben_tre", "vung_tau"],   # Thứ 3
+    2: ["dong_nai", "can_tho"],   # Thứ 4
+    3: ["tay_ninh", "an_giang"],  # Thứ 5
+    4: ["vinh_long", "binh_duong"],# Thứ 6
+    5: ["tphcm", "long_an"],      # Thứ 7
+    6: ["tien_giang", "kien_giang"],# Chủ nhật
+}
+
 async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: date):
     """Verify tất cả dự đoán cho target_date."""
     date_str = target_date.strftime("%d/%m/%Y")
@@ -124,32 +135,44 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             .eq("id", pred["id"])\
             .execute()
 
-        # Calculate Profit
-        total_cost, total_revenue, profit, details = calculate_station_profit(region, pairs, tail_rows)
+        # --- Calculate Profit & Tracking ---
+        # Kiểm tra xem đài này có nằm trong danh sách cần track theo ngày không
+        is_tracking_enabled = False
+        weekday = target_date.weekday()
 
-        # Upsert profit_tracking
-        profit_data = {
-            "prediction_date": target_date.isoformat(),
-            "region": region,
-            "province": province if province else "all",
-            "total_cost": total_cost,
-            "total_revenue": total_revenue,
-            "profit": profit,
-            "details": details
-        }
+        if region == "xsmb":
+            is_tracking_enabled = True # XSMB always tracked
+        elif region == "xsmn" and province:
+            # Tên province trong DB hiện tại (từ crawler) có dạng "tp_hcm", sửa lại cho khớp với list:
+            mapped_prov = province.replace("tp_hcm", "tphcm")
+            if mapped_prov in VALID_XSMN_STATIONS.get(weekday, []):
+                is_tracking_enabled = True
 
-        # Check if exists to avoid duplicates or use upsert if we defined unique constraints
-        existing = db.supabase.table("profit_tracking")\
-            .select("id")\
-            .eq("prediction_date", target_date.isoformat())\
-            .eq("region", region)\
-            .eq("province", province if province else "all")\
-            .execute().data
-        
-        if existing:
-            db.supabase.table("profit_tracking").update(profit_data).eq("id", existing[0]["id"]).execute()
-        else:
-            db.supabase.table("profit_tracking").insert(profit_data).execute()
+        if is_tracking_enabled:
+            total_cost, total_revenue, profit, details = calculate_station_profit(region, pairs, tail_rows)
+
+            # Upsert profit_tracking
+            profit_data = {
+                "prediction_date": target_date.isoformat(),
+                "region": region,
+                "province": province if province else "all",
+                "total_cost": total_cost,
+                "total_revenue": total_revenue,
+                "profit": profit,
+                "details": details
+            }
+
+            existing = db.supabase.table("profit_tracking")\
+                .select("id")\
+                .eq("prediction_date", target_date.isoformat())\
+                .eq("region", region)\
+                .eq("province", province if province else "all")\
+                .execute().data
+            
+            if existing:
+                db.supabase.table("profit_tracking").update(profit_data).eq("id", existing[0]["id"]).execute()
+            else:
+                db.supabase.table("profit_tracking").insert(profit_data).execute()
 
         status = "✅ TRÚNG" if hit else "❌ Trượt"
         pairs_str = ", ".join(f"{p:02d}" for p in pairs)
