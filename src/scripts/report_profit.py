@@ -90,8 +90,7 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
         # Format matched info for reporting
         matched_details = []
         for pair, count in details.items():
-            if count > 0:
-                 matched_details.append(f"{pair}({count} nháy)")
+            matched_details.append(f"{pair}({count} nháy)")
         
         match_str = ", ".join(matched_details) if matched_details else "—"
         

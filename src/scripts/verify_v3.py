@@ -61,9 +61,9 @@ def calculate_station_profit(region, pairs, tail_rows):
         if pair is None:
             continue
         occurrences = tails_list.count(pair)
+        details[str(pair)] = occurrences
         if occurrences > 0:
             total_revenue += tie_points[idx] * occurrences * rev_per_pt
-            details[str(pair)] = occurrences
 
     profit = total_revenue - total_cost
     return total_cost, total_revenue, profit, details
