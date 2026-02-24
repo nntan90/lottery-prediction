@@ -39,11 +39,12 @@ XSMB_REVENUE_PER_HIT_POINT = 80000
 
 def calculate_station_profit(region, pairs, tail_rows):
     """Calculate cost, revenue, profit, and hit details for a station."""
-    if region == "xsmn":
+    region_lower = region.lower()
+    if region_lower == "xsmn":
         tie_points = XSMN_TIER_POINTS
         cost_per_pt = XSMN_COST_PER_POINT
         rev_per_pt = XSMN_REVENUE_PER_HIT_POINT
-    elif region == "xsmb":
+    elif region_lower == "xsmb":
         tie_points = XSMB_TIER_POINTS
         cost_per_pt = XSMB_COST_PER_POINT
         rev_per_pt = XSMB_REVENUE_PER_HIT_POINT
@@ -85,11 +86,9 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
     date_str = target_date.strftime("%d/%m/%Y")
     print(f"\n🔍 Verifying predictions for {target_date}...")
 
-    # Lấy tất cả prediction_results chưa verify
     preds = db.supabase.table("prediction_results")\
         .select("*")\
         .eq("prediction_date", target_date.isoformat())\
-        .is_("hit", "null")\
         .execute().data
 
     if not preds:
@@ -139,12 +138,13 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         # Kiểm tra xem đài này có nằm trong danh sách cần track theo ngày không
         is_tracking_enabled = False
         weekday = target_date.weekday()
+        region_lower = region.lower()
 
-        if region == "xsmb":
+        if region_lower == "xsmb":
             is_tracking_enabled = True # XSMB always tracked
-        elif region == "xsmn" and province:
-            # Tên province trong DB hiện tại (từ crawler) có dạng "tp_hcm", sửa lại cho khớp với list:
-            mapped_prov = province.replace("tp_hcm", "tphcm")
+        elif region_lower == "xsmn" and province:
+            # Tên province trong DB hiện tại (từ crawler) có dạng "tp_hcm", "ben-tre", sửa lại cho khớp với list:
+            mapped_prov = province.replace("-", "_").replace("tp_hcm", "tphcm")
             if mapped_prov in VALID_XSMN_STATIONS.get(weekday, []):
                 is_tracking_enabled = True
 
@@ -154,7 +154,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             # Upsert profit_tracking
             profit_data = {
                 "prediction_date": target_date.isoformat(),
-                "region": region,
+                "region": region.lower(),
                 "province": province if province else "all",
                 "total_cost": total_cost,
                 "total_revenue": total_revenue,
@@ -165,7 +165,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             existing = db.supabase.table("profit_tracking")\
                 .select("id")\
                 .eq("prediction_date", target_date.isoformat())\
-                .eq("region", region)\
+                .eq("region", region.lower())\
                 .eq("province", province if province else "all")\
                 .execute().data
             
