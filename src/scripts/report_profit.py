@@ -51,20 +51,27 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
     total_profit_overall = 0
 
     report_lines = []
-    csv_data = [["Ngày", "Vùng", "Đài", "Vốn (VNĐ)", "Thu (VNĐ)", "Lợi nhuận (VNĐ)", "Chi tiết trúng"]]
+    csv_data = [["Ngày", "Vùng", "Đài", "Số", "Số nháy", "Vốn (VNĐ)", "Thu (VNĐ)", "Lợi nhuận (VNĐ)"]]
     
     current_date = None
     daily_cost = 0
     daily_rev = 0
 
+    # Sort profits by date, region, province, pair to ensure consistent display
+    # (assuming supabase returns them in order, or we sort them here)
+    def sort_key(x):
+        return (x["prediction_date"], x["region"], x["province"], x["pair"])
+    profits.sort(key=sort_key)
+
     for row in profits:
         p_date = row["prediction_date"]
         region = row["region"]
         province = row["province"]
-        cost = row["total_cost"]
-        rev = row["total_revenue"]
+        pair = row["pair"]
+        hit_count = row["hit_count"]
+        cost = row["cost"]
+        rev = row["revenue"]
         prof = row["profit"]
-        details = row.get("details", {}) or {}
 
         if p_date != current_date:
             if current_date is not None:
@@ -87,26 +94,21 @@ async def generate_report(db: LotteryDB, notifier: LotteryNotifier, from_date: d
         lbl = XSMNCrawler().PROVINCE_MAP.get(province, province.upper() if province != 'all' else region.upper())
         status_icon = "✅" if rev > 0 else "❌"
         
-        # Format matched info for reporting
-        matched_details = []
-        for pair, count in details.items():
-            matched_details.append(f"{pair}({count} nháy)")
-        
-        match_str = ", ".join(matched_details) if matched_details else "—"
-        
         # Append to CSV
         csv_data.append([
             d_obj.strftime("%d/%m/%Y"), 
             region.upper(), 
             lbl, 
+            f"{pair:02d}",
+            hit_count,
             cost, 
             rev, 
-            prof, 
-            match_str
+            prof
         ])
         
-        # e.g., ✅ TPHCM: +56,000 [Trúng: 10(2 nháy)]
-        report_lines.append(f" {status_icon} {lbl}: {prof:+,.0f} đ [Trúng: {match_str}]")
+        # Output line: 2026-02-24 xsmn vung-tau số 00 trúng 1 total cost: ... total revenue: ... profit: ...
+        # (Formatting customized for Telegram readability)
+        report_lines.append(f" {status_icon} {lbl} | Số: <b>{pair:02d}</b> ({hit_count} nháy) | Vốn: {cost:,} | Thu: {rev:,} | Lãi/Lỗ: {prof:+,.0f}")
 
     # Print last day summary
     if current_date is not None:

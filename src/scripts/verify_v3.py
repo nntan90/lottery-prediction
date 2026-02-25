@@ -38,7 +38,7 @@ XSMB_COST_PER_POINT = 23000
 XSMB_REVENUE_PER_HIT_POINT = 80000
 
 def calculate_station_profit(region, pairs, tail_rows):
-    """Calculate cost, revenue, profit, and hit details for a station."""
+    """Calculate cost, revenue, profit, and hit details for a station per pair."""
     region_lower = region.lower()
     if region_lower == "xsmn":
         tie_points = XSMN_TIER_POINTS
@@ -49,24 +49,29 @@ def calculate_station_profit(region, pairs, tail_rows):
         cost_per_pt = XSMB_COST_PER_POINT
         rev_per_pt = XSMB_REVENUE_PER_HIT_POINT
     else:
-        return 0, 0, 0, {}
+        return []
 
-    total_cost = sum(tie_points) * cost_per_pt
-    total_revenue = 0
-    details = {}
-    
+    results = []
     tails_list = [r["tail_2d"] for r in tail_rows]
 
     for idx, pair in enumerate(pairs):
         if pair is None:
             continue
+            
+        cost = tie_points[idx] * cost_per_pt
         occurrences = tails_list.count(pair)
-        details[str(pair)] = occurrences
-        if occurrences > 0:
-            total_revenue += tie_points[idx] * occurrences * rev_per_pt
+        revenue = tie_points[idx] * occurrences * rev_per_pt
+        profit = revenue - cost
+        
+        results.append({
+            "pair": int(pair),
+            "hit_count": occurrences,
+            "cost": cost,
+            "revenue": revenue,
+            "profit": profit
+        })
 
-    profit = total_revenue - total_cost
-    return total_cost, total_revenue, profit, details
+    return results
 
 
 
@@ -149,30 +154,33 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 is_tracking_enabled = True
 
         if is_tracking_enabled:
-            total_cost, total_revenue, profit, details = calculate_station_profit(region, pairs, tail_rows)
+            pair_results = calculate_station_profit(region, pairs, tail_rows)
 
-            # Upsert profit_tracking
-            profit_data = {
-                "prediction_date": target_date.isoformat(),
-                "region": region.lower(),
-                "province": province if province else "all",
-                "total_cost": total_cost,
-                "total_revenue": total_revenue,
-                "profit": profit,
-                "details": details
-            }
+            for p_res in pair_results:
+                # Upsert profit_tracking per pair
+                profit_data = {
+                    "prediction_date": target_date.isoformat(),
+                    "region": region.lower(),
+                    "province": province if province else "all",
+                    "pair": p_res["pair"],
+                    "hit_count": p_res["hit_count"],
+                    "cost": p_res["cost"],
+                    "revenue": p_res["revenue"],
+                    "profit": p_res["profit"]
+                }
 
-            existing = db.supabase.table("profit_tracking")\
-                .select("id")\
-                .eq("prediction_date", target_date.isoformat())\
-                .eq("region", region.lower())\
-                .eq("province", province if province else "all")\
-                .execute().data
-            
-            if existing:
-                db.supabase.table("profit_tracking").update(profit_data).eq("id", existing[0]["id"]).execute()
-            else:
-                db.supabase.table("profit_tracking").insert(profit_data).execute()
+                existing = db.supabase.table("profit_tracking")\
+                    .select("id")\
+                    .eq("prediction_date", target_date.isoformat())\
+                    .eq("region", region.lower())\
+                    .eq("province", province if province else "all")\
+                    .eq("pair", p_res["pair"])\
+                    .execute().data
+                
+                if existing:
+                    db.supabase.table("profit_tracking").update(profit_data).eq("id", existing[0]["id"]).execute()
+                else:
+                    db.supabase.table("profit_tracking").insert(profit_data).execute()
 
         status = "✅ TRÚNG" if hit else "❌ Trượt"
         pairs_str = ", ".join(f"{p:02d}" for p in pairs)
