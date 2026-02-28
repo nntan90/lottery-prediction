@@ -79,7 +79,7 @@ def has_manual_request(db: LotteryDB, region: str, province: str | None) -> bool
     return len(query.execute().data) > 0
 
 
-def trigger_training(region: str, province: str | None):
+def trigger_training(region: str, province: str | None, weekday: int | None = None):
     """Trigger 05-train-model.yml qua gh CLI."""
     prov_arg = province if province else "all"
     cmd = [
@@ -87,10 +87,13 @@ def trigger_training(region: str, province: str | None):
         "-f", f"region={region}",
         "-f", f"province={prov_arg}",
     ]
+    if weekday is not None:
+        cmd += ["-f", f"weekday={weekday}"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            print(f"  ✅ Triggered 05-train-model for {region}/{prov_arg}")
+            wd_label = f" [wd={weekday}]" if weekday is not None else ""
+            print(f"  ✅ Triggered 05-train-model for {region}/{prov_arg}{wd_label}")
             return True
         else:
             print(f"  ❌ gh workflow run failed: {result.stderr}")
@@ -104,9 +107,9 @@ async def main():
     db = LotteryDB()
     notifier = LotteryNotifier()
 
-    # Lấy tất cả model active
+    # Lấy tất cả model active (bao gồm cả weekday)
     models = db.supabase.table("model_registry")\
-        .select("region,province,version,train_end_date,train_draws,metric_hit_rate")\
+        .select("region,province,weekday,version,train_end_date,train_draws,metric_hit_rate")\
         .eq("status", "active")\
         .execute().data
 
@@ -119,13 +122,15 @@ async def main():
     for m in models:
         region   = m["region"]
         province = m["province"]
-        label    = f"{region}/{province or 'all'}"
+        weekday  = m.get("weekday")  # None = legacy model (not weekday-specific)
+        DOW_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        wd_label = f" [{DOW_NAMES[weekday]}]" if weekday is not None else ""
+        label    = f"{region}/{province or 'all'}{wd_label}"
 
         train_draws     = m.get("train_draws") or 0
         hit_rate_train  = m.get("metric_hit_rate") or 0.0
         train_end       = date.fromisoformat(m["train_end_date"]) if m.get("train_end_date") else date.today() - timedelta(days=90)
 
-        # Tính các chỉ số
         new_draws       = count_new_draws(db, region, province, train_end)
         hit_rate_recent = get_recent_hit_rate(db, region, province, RECENT_WINDOW)
         manual_req      = has_manual_request(db, region, province)
@@ -171,8 +176,8 @@ async def main():
                 "notified_at":     "now()",
             }).execute()
 
-        # Trigger workflow
-        ok = trigger_training(region, province)
+        # Trigger workflow (trưyền thêm weekday nếu có)
+        ok = trigger_training(region, province, weekday)
         if not ok:
             continue
 

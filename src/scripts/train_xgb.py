@@ -27,13 +27,17 @@ from src.utils.storage import LotteryStorage
 from src.bot.telegram_bot import LotteryNotifier
 
 
-def load_training_data(db: LotteryDB, region: str, province: str | None) -> pd.DataFrame:
+def load_training_data(
+    db: LotteryDB, region: str, province: str | None, weekday: int | None = None
+) -> pd.DataFrame:
     """
     Load pair_features từ Supabase cho 1 station (có pagination).
     Chỉ lấy rows có label hit != NULL.
+    Nếu weekday được chỉ định, chỉ lấy các kỳ có day_of_week == weekday.
     """
     label = f"{region}/{province or 'all'}"
-    print(f"📥 Loading training data: {label}...")
+    weekday_label = f" | weekday={weekday}" if weekday is not None else ""
+    print(f"📥 Loading training data: {label}{weekday_label}...")
 
     cols = ",".join(FEATURE_COLS + ["pair", "feature_date", "hit"])
     all_data = []
@@ -52,6 +56,10 @@ def load_training_data(db: LotteryDB, region: str, province: str | None) -> pd.D
         else:
             query = query.is_("province", "null")
 
+        # Filter theo weekday nếu được chỉ định
+        if weekday is not None:
+            query = query.eq("day_of_week", weekday)
+
         batch = query.execute().data
         if not batch:
             break
@@ -61,7 +69,8 @@ def load_training_data(db: LotteryDB, region: str, province: str | None) -> pd.D
         offset += 1000
 
     df = pd.DataFrame(all_data)
-    print(f"  ✅ Loaded {len(df)} rows ({len(df)//100} kỳ)")
+    n_ky = len(df) // 100 if len(df) > 0 else 0
+    print(f"  ✅ Loaded {len(df)} rows ({n_ky} kỳ){weekday_label}")
     return df
 
 
@@ -87,11 +96,18 @@ async def main():
     parser.add_argument("--province", default=None, help="Slug tỉnh, hoặc 'all' cho XSMB")
     parser.add_argument("--version", default=None, help="Version string, mặc định = ngày hôm nay")
     parser.add_argument("--force", action="store_true", help="Force train dù ít dữ liệu (<1000 rows)")
+    parser.add_argument("--weekday", type=int, default=None, choices=list(range(7)),
+                        help="Ngày trong tuần để train riêng (0=T2..6=CN). Mặc định: train tất cả")
     args = parser.parse_args()
 
     province = None if args.province in (None, "all", "") else args.province
-    version = args.version or f"v3_{date.today().strftime('%Y%m%d')}"
+    weekday  = args.weekday  # None = không phân biệt
+    wd_suffix = f"_wd{weekday}" if weekday is not None else ""
+    version = args.version or f"v3_{date.today().strftime('%Y%m%d')}{wd_suffix}"
     label = f"{args.region}/{province or 'all'}"
+    if weekday is not None:
+        DOW_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+        label += f" [{DOW_NAMES[weekday]}]"
 
     db = LotteryDB()
     storage = LotteryStorage()
@@ -101,8 +117,8 @@ async def main():
     print("=" * 60)
 
     # 1. Load data
-    df = load_training_data(db, args.region, province)
-    
+    df = load_training_data(db, args.region, province, weekday)
+
     min_rows = 100 if args.force else 1000
     if len(df) < min_rows:
         msg = f"❌ Không đủ data để train {label}: {len(df)} rows (cần ≥ {min_rows})"
@@ -130,7 +146,10 @@ async def main():
         model.save(local_path)
 
         # 5. Upload to Supabase Storage
-        storage_path = f"models/{args.region}/{model_filename}"
+        region_folder = args.region
+        if weekday is not None:
+            region_folder = f"{args.region}/wd{weekday}"
+        storage_path = f"models/{region_folder}/{model_filename}"
         print(f"\n📤 Uploading to Supabase Storage: {storage_path}...")
         if not storage.upload_model(local_path, storage_path):
             msg = f"❌ Upload thất bại cho {label}"
@@ -138,62 +157,59 @@ async def main():
             await notifier.send_error_alert(msg)
             return
 
-    # 6. Deprecate model cũ
-    db.supabase.table("model_registry")\
+    # 6. Deprecate model cũ (chỉ deprecate model cùng weekday)
+    dep_query = db.supabase.table("model_registry")\
         .update({"status": "deprecated"})\
         .eq("region", args.region)\
-        .eq("status", "active")\
-        .execute() if province is None else \
-    db.supabase.table("model_registry")\
-        .update({"status": "deprecated"})\
-        .eq("region", args.region)\
-        .eq("province", province)\
-        .eq("status", "active")\
-        .execute()
+        .eq("status", "active")
+    if province is not None:
+        dep_query = dep_query.eq("province", province)
+    else:
+        dep_query = dep_query.is_("province", "null")
+    # Chỉ deprecate model cùng weekday (None deprecates NULL weekday models)
+    if weekday is not None:
+        dep_query = dep_query.eq("weekday", weekday)
+    else:
+        dep_query = dep_query.is_("weekday", "null")
+    dep_query.execute()
 
     # 7. Insert vào model_registry
     dates_used = sorted(df["feature_date"].unique())
     db.supabase.table("model_registry").insert({
-        "region": args.region,
-        "province": province,
-        "version": version,
-        "status": "active",
-        "file_path": storage_path,
+        "region":           args.region,
+        "province":         province,
+        "weekday":          weekday,       # None = không phân biệt
+        "version":          version,
+        "status":           "active",
+        "file_path":        storage_path,
         "train_start_date": dates_used[0],
-        "train_end_date": dates_used[-1],
-        "train_draws": len(df) // 100,
-        "metric_auc": metrics.get("auc"),
-        "metric_hit_rate": metrics.get("hit_rate_top3"),
-        "trained_at": datetime.utcnow().isoformat(),
+        "train_end_date":   dates_used[-1],
+        "train_draws":      len(df) // 100,
+        "metric_auc":       metrics.get("auc"),
+        "metric_hit_rate":  metrics.get("hit_rate_top3"),
+        "trained_at":       datetime.utcnow().isoformat(),
     }).execute()
 
     # 8. Update training_queue
-    db.supabase.table("training_queue")\
-        .update({
-            "status": "done",
-            "completed_at": datetime.utcnow().isoformat(),
-        })\
+    tq_upd = db.supabase.table("training_queue")\
+        .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
         .eq("region", args.region)\
-        .eq("status", "triggered")\
-        .execute() if province is None else \
-    db.supabase.table("training_queue")\
-        .update({
-            "status": "done",
-            "completed_at": datetime.utcnow().isoformat(),
-        })\
-        .eq("region", args.region)\
-        .eq("province", province)\
-        .eq("status", "triggered")\
-        .execute()
+        .eq("status", "triggered")
+    if province is not None:
+        tq_upd = tq_upd.eq("province", province)
+    else:
+        tq_upd = tq_upd.is_("province", "null")
+    tq_upd.execute()
 
     # 9. Gửi Telegram
     hit_pct = int(metrics.get("hit_rate_top3", 0) * 100)
     auc = metrics.get("auc", 0)
+    wd_info = f" | Weekday: {weekday}" if weekday is not None else ""
     msg = (
         f"✅ <b>Training xong: {label}</b>\n\n"
         f"📊 AUC: <code>{auc}</code>\n"
         f"🎯 Hit@3: <code>{hit_pct}%</code>\n"
-        f"📅 Data: {dates_used[0]} → {dates_used[-1]}\n"
+        f"📅 Data: {dates_used[0]} → {dates_used[-1]}{wd_info}\n"
         f"🔢 Kỳ train: {len(df)//100} | Version: {version}\n\n"
         f"<i>Model đã được set active trong registry.</i>"
     )

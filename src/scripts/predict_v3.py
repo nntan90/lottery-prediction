@@ -39,21 +39,34 @@ HISTORY_DAYS = 100  # số kỳ lịch sử để build feature
 _model_cache: dict = {}
 
 
-def get_active_model(db: LotteryDB, region: str, province: str | None) -> dict | None:
-    """Lấy model active mới nhất từ model_registry."""
-    query = db.supabase.table("model_registry")\
-        .select("*")\
-        .eq("region", region)\
-        .eq("status", "active")\
-        .order("trained_at", desc=True)\
-        .limit(1)
+def get_active_model(db: LotteryDB, region: str, province: str | None, weekday: int | None = None) -> dict | None:
+    """Lấy model active mới nhất từ model_registry.
+    
+    Ưu tiên:
+    1. Model weekday-specific (weekday == target weekday)
+    2. Fallback: model cũ không có weekday (weekday IS NULL)
+    """
+    def _build_base_query():
+        q = db.supabase.table("model_registry")\
+            .select("*")\
+            .eq("region", region)\
+            .eq("status", "active")\
+            .order("trained_at", desc=True)\
+            .limit(1)
+        if province:
+            q = q.eq("province", province)
+        else:
+            q = q.is_("province", "null")
+        return q
 
-    if province:
-        query = query.eq("province", province)
-    else:
-        query = query.is_("province", "null")
+    # 1. Tìm model weekday-specific
+    if weekday is not None:
+        result = _build_base_query().eq("weekday", weekday).execute()
+        if result.data:
+            return result.data[0]
 
-    result = query.execute()
+    # 2. Fallback: model không có weekday (legacy)
+    result = _build_base_query().is_("weekday", "null").execute()
     return result.data[0] if result.data else None
 
 
@@ -136,16 +149,19 @@ async def predict_station(
     Returns: {'pair_1': int, 'pair_2': int, 'pair_3': int, 'prob_1': float, ...}
     """
     label = f"{region}/{province or 'all'}"
+    weekday = target_date.weekday()  # 0=Mon..6=Sun
 
-    # 1. Lấy model
-    registry = get_active_model(db, region, province)
+    # 1. Lấy model (uu tien weekday-specific, fallback legacy)
+    registry = get_active_model(db, region, province, weekday)
     if not registry:
         print(f"  ⚠️  {label}: không có model active")
         return None
 
+    model_wd = registry.get("weekday")
+    wd_note = f" [wd={model_wd}]" if model_wd is not None else " [legacy]"
     model = load_model_cached(storage, registry["file_path"], tmpdir)
     if model is None:
-        print(f"  ❌ {label}: không load được model")
+        print(f"  ❌ {label}: không load được model{wd_note}")
         return None
 
     # 2. Lấy feature vector
@@ -160,7 +176,7 @@ async def predict_station(
     pair_2, prob_2 = top3[1]
     pair_3, prob_3 = top3[2]
 
-    print(f"  ✅ {label}: [{pair_1:02d}, {pair_2:02d}, {pair_3:02d}] probs=[{prob_1:.3f}, {prob_2:.3f}, {prob_3:.3f}]")
+    print(f"  ✅ {label}{wd_note}: [{pair_1:02d}, {pair_2:02d}, {pair_3:02d}] probs=[{prob_1:.3f}, {prob_2:.3f}, {prob_3:.3f}]")
 
     return {
         "prediction_date": target_date.isoformat(),
