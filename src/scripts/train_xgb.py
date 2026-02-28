@@ -146,10 +146,14 @@ async def main():
         model.save(local_path)
 
         # 5. Upload to Supabase Storage
-        region_folder = args.region
+        # Convention: storage_path = "models/{region}/{file}" inside bucket "models"
+        # Bucket "models" + path "models/XSMN/..." → actual path trong bucket là "models/XSMN/..."
+        # (consistent với các model cũ đã lưu theo format này)
         if weekday is not None:
-            region_folder = f"{args.region}/wd{weekday}"
-        storage_path = f"models/{region_folder}/{model_filename}"
+            region_folder = f"models/{args.region}/wd{weekday}"
+        else:
+            region_folder = f"models/{args.region}"
+        storage_path = f"{region_folder}/{model_filename}"
         print(f"\n📤 Uploading to Supabase Storage: {storage_path}...")
         if not storage.upload_model(local_path, storage_path):
             msg = f"❌ Upload thất bại cho {label}"
