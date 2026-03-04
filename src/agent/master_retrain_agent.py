@@ -38,22 +38,24 @@ PYTHON_EXEC = sys.executable  # dùng cùng Python environment
 
 # Mapping province → weekday (từ verify_v3.py)
 # Dùng để biết weekday model nào cần retrain
+# Slug format: hyphen (khớp với DB)
 XSMN_WEEKDAY_MAP = {
-    0: ["tphcm", "dong_thap"],
-    1: ["ben_tre", "vung_tau"],
-    2: ["dong_nai", "can_tho"],
-    3: ["tay_ninh", "an_giang"],
-    4: ["vinh_long", "binh_duong"],
-    5: ["tphcm", "long_an"],
-    6: ["tien_giang", "kien_giang"],
+    0: ["tp-hcm", "dong-thap", "ca-mau"],
+    1: ["ben-tre", "vung-tau", "bac-lieu"],
+    2: ["dong-nai", "can-tho", "soc-trang"],
+    3: ["tay-ninh", "an-giang", "binh-thuan"],
+    4: ["vinh-long", "binh-duong", "tra-vinh"],
+    5: ["tp-hcm", "long-an", "binh-phuoc", "hau-giang"],
+    6: ["tien-giang", "kien-giang", "da-lat"],
 }
 
 
 def _get_weekday_for_province(province: str, target_weekday: int) -> Optional[int]:
-    """Trả về weekday model cần check/retrain cho tỉnh này."""
-    mapped = province.replace("-", "_").replace("tp_hcm", "tphcm")
+    """Trả về weekday model cần check/retrain cho tỉnh XSMN."""
+    # Chuẩn hóa về hyphen-slug (khớp với DB)
+    normalized = province.replace("_", "-")
     stations = XSMN_WEEKDAY_MAP.get(target_weekday, [])
-    if mapped in stations:
+    if normalized in stations:
         return target_weekday
     return None
 
@@ -157,7 +159,8 @@ async def run_agent(
 
         # Xác định weekday model cần check
         if region.upper() == "XSMB":
-            station_weekday = None  # XSMB không dùng weekday-specific
+            # XSMB giờ đã split theo weekday → pass weekday của ngày hiện tại
+            station_weekday = weekday
         else:
             station_weekday = _get_weekday_for_province(province or "", weekday)
 

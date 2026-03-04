@@ -112,7 +112,7 @@ class DecisionEngine:
             )
 
         # Bước 4: Cooldown — đã retrain gần đây chưa?
-        days_since_retrain = self._days_since_last_retrain(db, region, province, target_date)
+        days_since_retrain = self._days_since_last_retrain(db, region, province, target_date, weekday=weekday)
         if days_since_retrain is not None and days_since_retrain < self.min_days_since_retrain:
             return DecisionResult(
                 should_retrain=False,
@@ -190,10 +190,11 @@ class DecisionEngine:
         return False
 
     def _days_since_last_retrain(
-        self, db, region: str, province: Optional[str], target_date: date
+        self, db, region: str, province: Optional[str], target_date: date,
+        weekday: Optional[int] = None,
     ) -> Optional[int]:
         """
-        Kiểm tra xem đài này có được retrain gần đây không, qua bảng agent_actions.
+        Kiểm tra xem đài này (theo weekday nếu có) có được retrain gần đây không.
         Returns: số ngày kể từ lần retrain cuối, hoặc None nếu chưa bao giờ retrain.
         """
         try:
@@ -210,6 +211,12 @@ class DecisionEngine:
             else:
                 q = q.is_("province", "null")
 
+            # Filter theo weekday để cooldown per-weekday (XSMB wd=0 không block wd=1)
+            if weekday is not None:
+                q = q.eq("weekday", weekday)
+            else:
+                q = q.is_("weekday", "null")
+
             result = q.execute()
             if not result.data:
                 return None
@@ -218,6 +225,7 @@ class DecisionEngine:
             return (target_date - last_retrain).days
         except Exception:
             return None  # nếu table chưa tồn tại → không có cooldown
+
 
     def _count_consecutive_fails(
         self, db, region: str, province: Optional[str], target_date: date
