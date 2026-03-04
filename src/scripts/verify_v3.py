@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
+from src.agent.master_retrain_agent import run_agent
 
 # Constants for Profit Calculation
 XSMN_TIER_POINTS = [3, 2, 2]
@@ -189,6 +190,8 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
         results_summary.append({
             "label": label,
+            "region": region,
+            "province": province,
             "hit": hit,
             "pairs": pairs,
             "matched": matched,
@@ -219,6 +222,13 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
     await notifier.send_message(msg)
     print(f"\n📊 Verify done: {hits}/{total} hit ({hit_rate:.0f}%)")
+
+    # 🤖 Master Retrain Agent — chạy sau khi verify xong
+    # Wrapped trong try/except: nếu agent crash, verify pipeline không bị ảnh hưởng
+    try:
+        await run_agent(db, notifier, results_summary, target_date)
+    except Exception as agent_err:
+        print(f"\n⚠️  Master Retrain Agent lỗi (không ảnh hưởng verify): {agent_err}")
 
 
 async def main():

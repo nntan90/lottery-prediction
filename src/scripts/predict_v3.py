@@ -195,6 +195,28 @@ async def predict_station(
     }
 
 
+def _save_prediction(db: LotteryDB, result: dict) -> None:
+    """Save hoặc update prediction_results, xử lý NULL province đúng cách.
+    Dùng check-then-update/insert thay vì upsert on_conflict vì
+    Supabase không hỗ trợ COALESCE trong on_conflict parameter.
+    """
+    region    = result["region"]
+    province  = result.get("province")
+    pred_date = result["prediction_date"]
+
+    q = db.supabase.table("prediction_results").select("id") \
+        .eq("prediction_date", pred_date).eq("region", region)
+    q = q.is_("province", "null") if province is None else q.eq("province", province)
+    existing = q.execute().data
+
+    if existing:
+        db.supabase.table("prediction_results").update(result) \
+            .eq("id", existing[0]["id"]).execute()
+        print(f"  ↩️  Updated prediction: {region}/{province or 'all'}")
+    else:
+        db.supabase.table("prediction_results").insert(result).execute()
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, help="Ngày dự đoán (YYYY-MM-DD). Mặc định = hôm nay")
@@ -224,9 +246,7 @@ async def main():
         xsmb_result = await predict_station(db, storage, "XSMB", None, target_date, tmpdir)
         if xsmb_result:
             all_results["XSMB"] = xsmb_result
-            db.supabase.table("prediction_results").upsert(
-                xsmb_result, on_conflict="prediction_date,region,province"
-            ).execute()
+            _save_prediction(db, xsmb_result)
 
         # 2. XSMN — các đài hôm nay
         crawler = XSMNCrawler()
@@ -237,9 +257,7 @@ async def main():
             result = await predict_station(db, storage, "XSMN", province, target_date, tmpdir)
             if result:
                 all_results["XSMN"].append(result)
-                db.supabase.table("prediction_results").upsert(
-                    result, on_conflict="prediction_date,region,province"
-                ).execute()
+                _save_prediction(db, result)
 
     # 3. Gửi Telegram
     # XSMB
@@ -263,8 +281,10 @@ async def main():
             pname = province_map.get(r["province"], r["province"])
             pairs_str = f"<code>{r['pair_1']:02d}</code>, <code>{r['pair_2']:02d}</code>, <code>{r['pair_3']:02d}</code>"
             xsmn_msg += f"📍 <b>{pname}</b>: {pairs_str}\n"
-        xsmn_msg += f"\n<i>Tổng: {len(all_results['XSMN'])} đài | Model: xgb_v3</i>"
+            xsmn_msg += f"   <i>Model: {r['model_version']}</i>\n"
+        xsmn_msg += f"\n<i>Tổng: {len(all_results['XSMN'])} đài</i>"
         await notifier.send_message(xsmn_msg)
+
 
     print("\n✅ Predict V3 complete!")
 

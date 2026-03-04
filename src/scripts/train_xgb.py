@@ -98,6 +98,10 @@ async def main():
     parser.add_argument("--force", action="store_true", help="Force train dù ít dữ liệu (<1000 rows)")
     parser.add_argument("--weekday", type=int, default=None, choices=list(range(7)),
                         help="Ngày trong tuần để train riêng (0=T2..6=CN). Mặc định: train tất cả")
+    # Hyperparameter overrides — dùng bởi Master Retrain Agent
+    parser.add_argument("--n_estimators", type=int, default=300, help="XGBoost n_estimators (default: 300)")
+    parser.add_argument("--max_depth", type=int, default=4, help="XGBoost max_depth (default: 4)")
+    parser.add_argument("--learning_rate", type=float, default=0.05, help="XGBoost learning_rate (default: 0.05)")
     args = parser.parse_args()
 
     province = None if args.province in (None, "all", "") else args.province
@@ -131,10 +135,11 @@ async def main():
 
     # 3. Train
     print("\n🏋️ Training XGBoost...")
+    print(f"   Params: n_estimators={args.n_estimators}, max_depth={args.max_depth}, learning_rate={args.learning_rate}")
     model = LotteryXGB(
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate,
     )
     metrics = model.train(X_train, y_train, X_val, y_val)
     print(f"  AUC: {metrics.get('auc', 'N/A')} | Hit@3: {metrics.get('hit_rate_top3', 'N/A')}")

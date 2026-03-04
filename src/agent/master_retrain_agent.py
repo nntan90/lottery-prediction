@@ -1,0 +1,315 @@
+"""
+master_retrain_agent.py
+Bộ não chính (Master Retrain Agent) — chạy sau verify_v3.py.
+
+Flow:
+  1. Nhận danh sách kết quả verify từ verify_v3.py
+  2. Với mỗi đài bị MISS: decision_engine.analyze() → quyết định
+  3. Nếu should_retrain: trigger train_xgb.py qua subprocess
+  4. Log tất cả quyết định vào agent_actions table
+  5. Gửi Telegram summary về hành động đã thực hiện
+
+Usage độc lập (dry-run):
+  python src/agent/master_retrain_agent.py --date 2026-02-28 --dry-run
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import subprocess
+import sys
+from datetime import date, datetime, timezone
+from typing import Optional
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from src.database.supabase_client import LotteryDB
+from src.bot.telegram_bot import LotteryNotifier
+from src.agent.decision_engine import DecisionEngine
+from src.agent.hyperparameter_strategy import get_params, build_train_args, describe_strategy
+
+
+# ─── Config ──────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR = os.path.dirname(os.path.dirname(__file__))  # src/
+TRAIN_SCRIPT = os.path.join(os.path.dirname(SCRIPT_DIR), "src", "scripts", "train_xgb.py")
+PYTHON_EXEC = sys.executable  # dùng cùng Python environment
+
+# Mapping province → weekday (từ verify_v3.py)
+# Dùng để biết weekday model nào cần retrain
+XSMN_WEEKDAY_MAP = {
+    0: ["tphcm", "dong_thap"],
+    1: ["ben_tre", "vung_tau"],
+    2: ["dong_nai", "can_tho"],
+    3: ["tay_ninh", "an_giang"],
+    4: ["vinh_long", "binh_duong"],
+    5: ["tphcm", "long_an"],
+    6: ["tien_giang", "kien_giang"],
+}
+
+
+def _get_weekday_for_province(province: str, target_weekday: int) -> Optional[int]:
+    """Trả về weekday model cần check/retrain cho tỉnh này."""
+    mapped = province.replace("-", "_").replace("tp_hcm", "tphcm")
+    stations = XSMN_WEEKDAY_MAP.get(target_weekday, [])
+    if mapped in stations:
+        return target_weekday
+    return None
+
+
+def _log_action(db: LotteryDB, action_date: date, region: str, province: Optional[str],
+                 weekday: Optional[int], action_type: str, reason: str,
+                 strategy: Optional[str], old_auc: Optional[float],
+                 old_hit_rate: Optional[float], old_params: dict, new_params: dict):
+    """Ghi hành động agent vào agent_actions table."""
+    try:
+        db.supabase.table("agent_actions").insert({
+            "action_date": action_date.isoformat(),
+            "region": region,
+            "province": province,
+            "weekday": weekday,
+            "action_type": action_type,
+            "reason": reason,
+            "strategy": strategy,
+            "old_metric_auc": old_auc,
+            "old_hit_rate": old_hit_rate,
+            "old_params": json.dumps(old_params) if old_params else None,
+            "new_params": json.dumps(new_params) if new_params else None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception as e:
+        print(f"  ⚠️  Không ghi được agent_actions: {e}")
+
+
+def _trigger_retrain(region: str, province: Optional[str], weekday: Optional[int],
+                     new_params: dict, dry_run: bool) -> bool:
+    """
+    Trigger train_xgb.py qua subprocess.
+    Returns True nếu thành công (hoặc dry_run).
+    """
+    args = build_train_args(region, province, weekday, new_params)
+    cmd = [PYTHON_EXEC, TRAIN_SCRIPT] + args
+
+    label = f"{region}/{province or 'all'}"
+    print(f"\n  🚀 Trigger retrain: {label}")
+    print(f"     CMD: {' '.join(cmd)}")
+
+    if dry_run:
+        print(f"  🔵 [DRY-RUN] Không thực sự chạy train")
+        return True
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 phút timeout
+        )
+        if result.returncode == 0:
+            print(f"  ✅ Train thành công: {label}")
+            print(result.stdout[-500:] if result.stdout else "")
+            return True
+        else:
+            print(f"  ❌ Train thất bại (code={result.returncode}): {label}")
+            print(result.stderr[-300:] if result.stderr else "")
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"  ❌ Train timeout (>10 phút): {label}")
+        return False
+    except Exception as e:
+        print(f"  ❌ Lỗi khi trigger train: {e}")
+        return False
+
+
+async def run_agent(
+    db: LotteryDB,
+    notifier: LotteryNotifier,
+    verify_results: list[dict],
+    target_date: date,
+    dry_run: bool = False,
+):
+    """
+    Entrypoint chính — gọi từ verify_v3.py sau khi verify xong.
+
+    Args:
+        verify_results: list của dict {"label", "hit", "pairs", "matched", "region", "province"}
+        target_date: ngày đã verify
+        dry_run: nếu True, chỉ in quyết định, không thực sự trigger train
+    """
+    if not verify_results:
+        return
+
+    engine = DecisionEngine()
+    weekday = target_date.weekday()
+
+    print(f"\n{'='*50}")
+    print(f"🤖 Master Retrain Agent — {target_date} {'[DRY-RUN]' if dry_run else ''}")
+    print(f"{'='*50}")
+
+    actions_summary = []
+
+    for r in verify_results:
+        region = r.get("region", "")
+        province = r.get("province")
+        hit = r.get("hit", False)
+        label = r.get("label", f"{region}/{province or 'all'}")
+
+        # Xác định weekday model cần check
+        if region.upper() == "XSMB":
+            station_weekday = None  # XSMB không dùng weekday-specific
+        else:
+            station_weekday = _get_weekday_for_province(province or "", weekday)
+
+        # Phân tích quyết định
+        decision = engine.analyze(
+            region=region,
+            province=province,
+            weekday=station_weekday,
+            hit_today=hit,
+            db=db,
+            target_date=target_date,
+        )
+
+        action_icon = {
+            "no_action": "✅",
+            "skipped": "⏭️",
+            "retrain_triggered": "🔁",
+        }.get(decision.action_type, "❓")
+
+        print(f"\n  {action_icon} {label}: {decision.reason}")
+
+        old_params = {}
+        new_params = {}
+        train_success = None
+
+        if decision.should_retrain:
+            old_params, new_params = get_params(decision.strategy)
+            strategy_desc = describe_strategy(decision.strategy, old_params, new_params)
+            print(f"     📊 Strategy: {strategy_desc}")
+
+            train_success = _trigger_retrain(
+                region=region,
+                province=province,
+                weekday=station_weekday,
+                new_params=new_params,
+                dry_run=dry_run,
+            )
+
+        # Ghi log vào DB
+        _log_action(
+            db=db,
+            action_date=target_date,
+            region=region,
+            province=province,
+            weekday=station_weekday,
+            action_type=decision.action_type,
+            reason=decision.reason,
+            strategy=decision.strategy,
+            old_auc=decision.old_metric_auc,
+            old_hit_rate=decision.old_hit_rate,
+            old_params=old_params,
+            new_params=new_params,
+        )
+
+        actions_summary.append({
+            "label": label,
+            "action_type": decision.action_type,
+            "reason": decision.reason,
+            "strategy": decision.strategy,
+            "train_success": train_success,
+            "consecutive_fails": decision.consecutive_fails,
+        })
+
+    # Gửi Telegram summary
+    await _send_agent_report(notifier, actions_summary, target_date, dry_run)
+
+
+async def _send_agent_report(
+    notifier: LotteryNotifier,
+    actions: list[dict],
+    target_date: date,
+    dry_run: bool,
+):
+    """Gửi Telegram report tổng hợp về hành động của agent."""
+    retrain_list = [a for a in actions if a["action_type"] == "retrain_triggered"]
+    skip_list    = [a for a in actions if a["action_type"] == "skipped"]
+
+    # Chỉ gửi nếu có hành động đáng chú ý (có retrain hoặc có skip với lý do)
+    if not retrain_list and not skip_list:
+        print("\n🤖 Agent: Tất cả đài đều trúng — không cần hành động.")
+        return
+
+    date_str = target_date.strftime("%d/%m/%Y")
+    dry_tag = " [DRY-RUN]" if dry_run else ""
+    msg = f"🤖 <b>AGENT RETRAIN REPORT{dry_tag} — {date_str}</b>\n\n"
+
+    if retrain_list:
+        msg += "🔁 <b>Đã trigger retrain:</b>\n"
+        for a in retrain_list:
+            status_icon = "✅" if a["train_success"] else "❌"
+            msg += (
+                f"  {status_icon} {a['label']}\n"
+                f"     Strategy: <code>{a['strategy']}</code> | "
+                f"Fail streak: {a['consecutive_fails']} kỳ\n"
+            )
+        msg += "\n"
+
+    if skip_list:
+        msg += "⏭️ <b>Đã bỏ qua (cooldown/metric OK):</b>\n"
+        for a in skip_list:
+            msg += f"  • {a['label']}: <i>{a['reason']}</i>\n"
+
+    await notifier.send_message(msg)
+
+
+# ─── Standalone entrypoint ───────────────────────────────────────────────────
+
+async def main():
+    """
+    Chạy agent độc lập (không cần verify_v3.py).
+    Đọc kết quả verify từ DB cho ngày chỉ định.
+    """
+    parser = argparse.ArgumentParser(description="Master Retrain Agent")
+    parser.add_argument("--date", type=str, help="Ngày target (YYYY-MM-DD). Mặc định = hôm nay")
+    parser.add_argument("--dry-run", action="store_true", help="Chỉ in quyết định, không thực sự retrain")
+    args = parser.parse_args()
+
+    target_date = date.fromisoformat(args.date) if args.date else date.today()
+
+    db = LotteryDB()
+    notifier = LotteryNotifier()
+
+    # Lấy kết quả verify từ DB
+    preds = (
+        db.supabase.table("prediction_results")
+        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs")
+        .eq("prediction_date", target_date.isoformat())
+        .not_.is_("hit", "null")  # chỉ lấy row đã verify xong
+        .execute()
+        .data
+    )
+
+    if not preds:
+        print(f"⚠️  Không có kết quả verify cho {target_date}")
+        return
+
+    # Chuẩn hóa format giống verify_results trong verify_v3.py
+    verify_results = [
+        {
+            "label": f"{p['region']}/{p['province'] or 'all'}",
+            "region": p["region"],
+            "province": p["province"],
+            "hit": p["hit"],
+            "pairs": [p["pair_1"], p["pair_2"], p["pair_3"]],
+            "matched": p.get("matched_pairs") or [],
+        }
+        for p in preds
+    ]
+
+    print(f"📋 Loaded {len(verify_results)} prediction results cho {target_date}")
+    await run_agent(db, notifier, verify_results, target_date, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
