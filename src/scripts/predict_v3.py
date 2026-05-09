@@ -265,7 +265,8 @@ async def main():
         r = all_results["XSMB"]
         pairs_str = f"<code>{r['pair_1']:02d}</code>, <code>{r['pair_2']:02d}</code>, <code>{r['pair_3']:02d}</code>"
         msg = (
-            f"🎯 <b>DỰ ĐOÁN XSMB — {date_str}</b>\n\n"
+            f"🎯 <b>DỰ ĐOÁN XSMB — {date_str}</b>\n"
+            f"<i>🤖 Single Model [XGBoost v3]</i>\n\n"
             f"🔮 3 cặp số: {pairs_str}\n"
             f"📊 Xác suất: {int(r['prob_1']*100)}% | {int(r['prob_2']*100)}% | {int(r['prob_3']*100)}%\n\n"
             f"<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>\n"
@@ -273,16 +274,19 @@ async def main():
         )
         await notifier.send_message(msg)
 
-    # XSMN (gộp 1 message)
+    # XSMN (gộp 1 message) — Single XGBoost model (preview sáng)
     if all_results["XSMN"]:
         province_map = XSMNCrawler().PROVINCE_MAP
-        xsmn_msg = f"🎯 <b>DỰ ĐOÁN XSMN — {date_str}</b>\n\n"
+        xsmn_msg = (
+            f"🎯 <b>DỰ ĐOÁN XSMN — {date_str}</b>\n"
+            f"<i>🤖 Single Model [XGBoost v3] — Preview 7:00</i>\n\n"
+        )
         for r in all_results["XSMN"]:
             pname = province_map.get(r["province"], r["province"])
             pairs_str = f"<code>{r['pair_1']:02d}</code>, <code>{r['pair_2']:02d}</code>, <code>{r['pair_3']:02d}</code>"
             xsmn_msg += f"📍 <b>{pname}</b>: {pairs_str}\n"
             xsmn_msg += f"   <i>Model: {r['model_version']}</i>\n"
-        xsmn_msg += f"\n<i>Tổng: {len(all_results['XSMN'])} đài</i>"
+        xsmn_msg += f"\n<i>⏰ Ensemble 3-model sẽ gửi lúc 20:00 — {len(all_results['XSMN'])} đài</i>"
         await notifier.send_message(xsmn_msg)
 
 

@@ -221,6 +221,48 @@ CREATE INDEX IF NOT EXISTS idx_tq_created  ON training_queue(created_at DESC);
 
 
 -- =====================================================
+-- 8. TABLE: model_predictions (V3.1 — XSMN Ensemble)
+-- Log Top-N output từ mỗi sub-model trong ensemble pipeline
+-- =====================================================
+CREATE TABLE IF NOT EXISTS model_predictions (
+  id              SERIAL PRIMARY KEY,
+  prediction_date DATE NOT NULL,
+  region          VARCHAR(10) NOT NULL,     -- 'XSMN'
+  province        VARCHAR(50),              -- slug tỉnh
+
+  model_name      VARCHAR(50) NOT NULL,     -- 'freq_gap' | 'markov' | 'xgboost_core'
+  model_type      VARCHAR(30),              -- 'rule_based' | 'ml'
+
+  -- Top 5 pairs + scores
+  pair_1          SMALLINT,
+  pair_2          SMALLINT,
+  pair_3          SMALLINT,
+  pair_4          SMALLINT,
+  pair_5          SMALLINT,
+
+  score_1         FLOAT,
+  score_2         FLOAT,
+  score_3         FLOAT,
+  score_4         FLOAT,
+  score_5         FLOAT,
+
+  -- Metadata
+  execution_time_ms INT,
+  error_message   TEXT,
+  status          VARCHAR(20) DEFAULT 'success',
+
+  created_at      TIMESTAMP DEFAULT NOW(),
+
+  CONSTRAINT model_predictions_unique UNIQUE (prediction_date, region, province, model_name)
+);
+
+COMMENT ON TABLE model_predictions IS 'Log Top-5 output từ mỗi sub-model trong XSMN ensemble pipeline';
+CREATE INDEX IF NOT EXISTS idx_mp_date    ON model_predictions(prediction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_mp_region  ON model_predictions(region, province);
+CREATE INDEX IF NOT EXISTS idx_mp_model   ON model_predictions(model_name);
+
+
+-- =====================================================
 -- ROW LEVEL SECURITY (RLS)
 -- =====================================================
 
@@ -232,6 +274,7 @@ ALTER TABLE pair_features ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_registry ENABLE ROW LEVEL SECURITY;
 ALTER TABLE prediction_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE training_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE model_predictions ENABLE ROW LEVEL SECURITY;
 
 -- Policies: Public Read
 CREATE POLICY "Public read access" ON lottery_draws FOR SELECT USING (true);
@@ -241,6 +284,7 @@ CREATE POLICY "Public read access" ON pair_features FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON model_registry FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON prediction_results FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON training_queue FOR SELECT USING (true);
+CREATE POLICY "Public read access" ON model_predictions FOR SELECT USING (true);
 
 -- Policies: Service Write Only
 CREATE POLICY "Service write access" ON lottery_draws FOR INSERT WITH CHECK (auth.role() = 'service_role');
@@ -254,3 +298,6 @@ CREATE POLICY "Service write access" ON prediction_results FOR INSERT WITH CHECK
 CREATE POLICY "Service write access" ON prediction_results FOR UPDATE USING (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON training_queue FOR INSERT WITH CHECK (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON training_queue FOR UPDATE USING (auth.role() = 'service_role');
+CREATE POLICY "Service write access" ON model_predictions FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service write access" ON model_predictions FOR UPDATE USING (auth.role() = 'service_role');
+

@@ -102,6 +102,10 @@ async def main():
     parser.add_argument("--n_estimators", type=int, default=300, help="XGBoost n_estimators (default: 300)")
     parser.add_argument("--max_depth", type=int, default=4, help="XGBoost max_depth (default: 4)")
     parser.add_argument("--learning_rate", type=float, default=0.05, help="XGBoost learning_rate (default: 0.05)")
+    parser.add_argument("--subsample", type=float, default=0.8, help="XGBoost subsample (default: 0.8)")
+    parser.add_argument("--colsample_bytree", type=float, default=0.8, help="XGBoost colsample_bytree (default: 0.8)")
+    parser.add_argument("--scale_pos_weight", type=float, default=1.0,
+                        help="XGBoost scale_pos_weight để xử lý class imbalance (default: 1.0; khuyến nghị 3.2 cho hit~24%)")
     args = parser.parse_args()
 
     province = None if args.province in (None, "all", "") else args.province
@@ -135,11 +139,14 @@ async def main():
 
     # 3. Train
     print("\n🏋️ Training XGBoost...")
-    print(f"   Params: n_estimators={args.n_estimators}, max_depth={args.max_depth}, learning_rate={args.learning_rate}")
+    print(f"   Params: n_estimators={args.n_estimators}, max_depth={args.max_depth}, learning_rate={args.learning_rate}, subsample={args.subsample}, colsample_bytree={args.colsample_bytree}, scale_pos_weight={args.scale_pos_weight}")
     model = LotteryXGB(
         n_estimators=args.n_estimators,
         max_depth=args.max_depth,
         learning_rate=args.learning_rate,
+        subsample=args.subsample,
+        colsample_bytree=args.colsample_bytree,
+        scale_pos_weight=args.scale_pos_weight,
     )
     metrics = model.train(X_train, y_train, X_val, y_val)
     print(f"  AUC: {metrics.get('auc', 'N/A')} | Hit@3: {metrics.get('hit_rate_top3', 'N/A')}")

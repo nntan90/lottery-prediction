@@ -67,6 +67,10 @@ class LotteryNotifier:
         Returns:
             True nếu gửi thành công
         """
+        if not self.bot:
+            print(f"[MOCK] Error Alert: {error_message[:100]}...")
+            return True
+
         try:
             message = f"⚠️ *System Alert*\n\n{error_message}"
             

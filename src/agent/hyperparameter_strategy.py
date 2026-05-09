@@ -1,11 +1,13 @@
 """
 hyperparameter_strategy.py
 Quyết định hyperparameters mới cho XGBoost dựa vào số lần fail liên tiếp.
+Áp dụng cho cả XSMB (weekday models) và XSMN (province models).
 
-3 chiến lược (theo thứ tự leo thang):
-  boost_estimators : Tăng n_estimators + giảm learning_rate nhẹ → phù hợp khi mới bắt đầu miss
-  conservative     : Regularization mạnh (giảm max_depth) → khi fail kéo dài
-  full_reset       : Quay về defaults ổn định, dùng --force để train nhiều data hơn
+4 chiến lược (theo thứ tự leo thang):
+  boost_estimators : Tăng n_estimators + giảm lr → mới bắt đầu miss
+  conservative     : Regularization mạnh (giảm max_depth) → fail kéo dài
+  scale_weight     : Điều chỉnh scale_pos_weight để xử lý class imbalance → khi AUC ~0.5 lặp lại
+  full_reset       : Quay về defaults + --force → reset hoàn toàn
 """
 
 from typing import Tuple
@@ -19,42 +21,61 @@ DEFAULT_PARAMS = {
     "learning_rate": 0.05,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
+    "scale_pos_weight": 1.0,
 }
 
 # Strategy 1: 1-4 kỳ fail liên tiếp
-# → Tăng nhẹ số cây, giảm learning_rate để model "cẩn thận" hơn
+# → Tăng nhẹ số cây, giảm learning_rate để model "học kỹ hơn"
 BOOST_ESTIMATORS_PARAMS = {
     "n_estimators": 500,
     "max_depth": 4,
     "learning_rate": 0.03,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
+    "scale_pos_weight": 1.0,
 }
 
 # Strategy 2: 5-6 kỳ fail liên tiếp
-# → Regularization mạnh hơn: giảm max_depth + tăng subsample sampling
+# → Regularization mạnh hơn: giảm max_depth, subsample để tránh overfit
 CONSERVATIVE_PARAMS = {
     "n_estimators": 400,
     "max_depth": 3,
     "learning_rate": 0.03,
     "subsample": 0.7,
     "colsample_bytree": 0.7,
+    "scale_pos_weight": 1.0,
 }
 
-# Strategy 3: 7+ kỳ fail liên tiếp
-# → Full reset: quay về params ổn định, nhưng train với nhiều data hơn (--force)
+# Strategy 3: AUC vẫn ~0.5 sau nhiều lần retrain (no_improve >= 2)
+# → Điều chỉnh class weight: hit=True ~24%, hit=False ~76%
+#   scale_pos_weight = 76/24 ≈ 3.2 → model tập trung hơn vào minority class (hit=True)
+# Áp dụng cho cả XSMB weekday và XSMN province (đều có class imbalance tương tự)
+SCALE_WEIGHT_PARAMS = {
+    "n_estimators": 500,
+    "max_depth": 4,
+    "learning_rate": 0.03,
+    "subsample": 0.75,
+    "colsample_bytree": 0.75,
+    "scale_pos_weight": 3.2,
+    "_force": True,
+}
+
+# Strategy 4: 7+ kỳ fail liên tiếp HOẶC no_improve >= 3
+# → Full reset: quay về params ổn định, train với toàn bộ data (--force)
 FULL_RESET_PARAMS = {
     "n_estimators": 300,
     "max_depth": 4,
     "learning_rate": 0.05,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
+    "scale_pos_weight": 1.0,
     "_force": True,   # Cờ đặc biệt: truyền --force vào train_xgb.py
 }
 
 STRATEGY_MAP = {
     "boost_estimators": BOOST_ESTIMATORS_PARAMS,
     "conservative":     CONSERVATIVE_PARAMS,
+    "scale_weight":     SCALE_WEIGHT_PARAMS,
     "full_reset":       FULL_RESET_PARAMS,
 }
 
@@ -64,7 +85,7 @@ def get_params(strategy: str) -> Tuple[dict, dict]:
     Trả về (old_params, new_params) cho strategy đã chọn.
 
     Args:
-        strategy: 'boost_estimators' | 'conservative' | 'full_reset'
+        strategy: 'boost_estimators' | 'conservative' | 'scale_weight' | 'full_reset'
 
     Returns:
         (old_params, new_params) - old_params luôn là DEFAULT_PARAMS
@@ -76,29 +97,31 @@ def get_params(strategy: str) -> Tuple[dict, dict]:
 def build_train_args(region: str, province: str | None, weekday: int | None, new_params: dict) -> list[str]:
     """
     Xây dựng danh sách arguments để truyền vào train_xgb.py thông qua subprocess.
+    Áp dụng cho cả XSMB và XSMN (province models).
 
     Args:
         region: 'XSMB' | 'XSMN'
-        province: tỉnh slug hoặc None
+        province: tỉnh slug hoặc None (None = XSMB all)
         weekday: 0-6 hoặc None
         new_params: dict hyperparameters (output từ get_params)
 
     Returns:
         List[str] — args để truyền vào subprocess
     """
-    DOW_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-    wd_suffix = f"_wd{weekday}" if weekday is not None else ""
-    
     from datetime import date
+    wd_suffix = f"_wd{weekday}" if weekday is not None else ""
     version = f"v3_agent_{date.today().strftime('%Y%m%d')}{wd_suffix}"
 
     args = [
         "--region", region,
         "--province", province or "all",
         "--version", version,
-        "--n_estimators", str(new_params.get("n_estimators", DEFAULT_PARAMS["n_estimators"])),
-        "--max_depth", str(new_params.get("max_depth", DEFAULT_PARAMS["max_depth"])),
-        "--learning_rate", str(new_params.get("learning_rate", DEFAULT_PARAMS["learning_rate"])),
+        "--n_estimators",      str(new_params.get("n_estimators",      DEFAULT_PARAMS["n_estimators"])),
+        "--max_depth",         str(new_params.get("max_depth",         DEFAULT_PARAMS["max_depth"])),
+        "--learning_rate",     str(new_params.get("learning_rate",     DEFAULT_PARAMS["learning_rate"])),
+        "--subsample",         str(new_params.get("subsample",         DEFAULT_PARAMS["subsample"])),
+        "--colsample_bytree",  str(new_params.get("colsample_bytree",  DEFAULT_PARAMS["colsample_bytree"])),
+        "--scale_pos_weight",  str(new_params.get("scale_pos_weight",  DEFAULT_PARAMS["scale_pos_weight"])),
     ]
 
     if weekday is not None:
@@ -113,7 +136,7 @@ def build_train_args(region: str, province: str | None, weekday: int | None, new
 def describe_strategy(strategy: str, old_params: dict, new_params: dict) -> str:
     """Tạo mô tả human-readable về thay đổi hyperparameters."""
     changes = []
-    for key in ["n_estimators", "max_depth", "learning_rate", "subsample", "colsample_bytree"]:
+    for key in ["n_estimators", "max_depth", "learning_rate", "subsample", "colsample_bytree", "scale_pos_weight"]:
         old_val = old_params.get(key)
         new_val = new_params.get(key)
         if old_val is not None and new_val is not None and old_val != new_val:
@@ -121,6 +144,6 @@ def describe_strategy(strategy: str, old_params: dict, new_params: dict) -> str:
             changes.append(f"{key}: {old_val}→{new_val}{direction}")
 
     if new_params.get("_force"):
-        changes.append("force=True (train với nhiều data hơn)")
+        changes.append("force=True")
 
     return f"[{strategy}] " + (", ".join(changes) if changes else "Không thay đổi")

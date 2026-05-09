@@ -22,10 +22,22 @@ except ImportError:
 
 
 FEATURE_COLS = [
+    # v1: frequency features
     "freq_30", "freq_60", "freq_100",
+    # v1: gap features
     "gap_since_last", "avg_gap_100", "std_gap_100", "gap_zscore",
+    # v1: pair characteristics
     "is_even", "is_high", "sum_digits",
+    # v1: context
     "day_of_week",
+    # v2 NEW: short-term momentum
+    "freq_7",
+    "consecutive_miss",
+    "is_hot_3",
+    # v2 NEW: structural features
+    "decade_freq_30",
+    "mirror_freq_30",
+    "month_freq",
 ]
 
 
@@ -39,6 +51,7 @@ class LotteryXGB:
         learning_rate: float = 0.05,
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
+        scale_pos_weight: float = 1.0,
         random_state: int = 42,
     ):
         self.params = dict(
@@ -47,6 +60,7 @@ class LotteryXGB:
             learning_rate=learning_rate,
             subsample=subsample,
             colsample_bytree=colsample_bytree,
+            scale_pos_weight=scale_pos_weight,
             random_state=random_state,
             eval_metric="auc",
             use_label_encoder=False,

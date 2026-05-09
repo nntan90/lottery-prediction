@@ -6,8 +6,10 @@ Logic:
   1. Nếu đài hôm nay HIT (hit=True) → NO_ACTION
   2. Lấy model active của đài từ model_registry → metric_auc, metric_hit_rate, trained_at
   3. Kiểm tra metric per-station: AUC < 0.55 HOẶC hit_rate < 0.40
-  4. Kiểm tra cooldown: chưa retrain trong 7 ngày
+  4. Kiểm tra cooldown: chưa retrain trong 14 ngày (2-3 kỳ/weekday)
   5. Nếu MISS + metric kém + cooldown OK → RETRAIN với strategy phù hợp
+     - Strategy được chọn dựa trên consecutive_fails VÀ lịch sử AUC improvement
+     - Nếu AUC không cải thiện sau nhiều lần retrain → leo thang strategy nhanh hơn
 """
 
 from dataclasses import dataclass, field
@@ -18,7 +20,8 @@ from typing import Optional
 # Thresholds — có thể override khi khởi tạo
 DEFAULT_AUC_THRESHOLD = 0.55
 DEFAULT_HIT_RATE_THRESHOLD = 0.40
-DEFAULT_MIN_DAYS_SINCE_RETRAIN = 7  # cooldown ngày
+DEFAULT_MIN_DAYS_SINCE_RETRAIN = 14  # cooldown ngày (2-3 kỳ/weekday cho XSMB weekday)
+DEFAULT_MAX_RETRAIN_NO_IMPROVE = 3   # số lần retrain không cải thiện AUC → leo thang strategy
 
 
 @dataclass
@@ -128,14 +131,24 @@ class DecisionEngine:
             )
 
         # Bước 5: Đếm consecutive fails gần nhất để chọn strategy
-        consecutive_fails = self._count_consecutive_fails(db, region, province, target_date)
-        strategy = self._pick_strategy(consecutive_fails)
+        # → Với XSMB weekday model, chỉ đếm kỳ cùng weekday
+        consecutive_fails = self._count_consecutive_fails(db, region, province, target_date, weekday)
+
+        # Bước 6: Kiểm tra lịch sử AUC improvement sau các lần retrain trước
+        # Nếu đã retrain nhiều lần mà AUC vẫn không cải thiện → leo thang strategy nhanh hơn
+        retrain_no_improve_count = self._count_retrain_without_auc_improvement(
+            db, region, province, weekday, old_auc
+        )
+
+        strategy = self._pick_strategy(consecutive_fails, retrain_no_improve_count)
 
         reason_parts = [f"Miss hôm nay"]
         if old_auc is not None and old_auc < self.auc_threshold:
             reason_parts.append(f"AUC={old_auc:.3f}<{self.auc_threshold}")
         if old_hit_rate is not None and old_hit_rate < self.hit_rate_threshold:
             reason_parts.append(f"hit_rate={old_hit_rate:.0%}<{self.hit_rate_threshold:.0%}")
+        if retrain_no_improve_count > 0:
+            reason_parts.append(f"no_improve={retrain_no_improve_count}lần")
         reason_parts.append(f"strategy={strategy}")
 
         return DecisionResult(
@@ -228,20 +241,23 @@ class DecisionEngine:
 
 
     def _count_consecutive_fails(
-        self, db, region: str, province: Optional[str], target_date: date
+        self, db, region: str, province: Optional[str], target_date: date,
+        weekday: Optional[int] = None,
     ) -> int:
         """
-        Đếm bao nhiêu ngày liên tiếp (kể cả hôm nay) đài này bị miss.
-        Đọc từ prediction_results ORDER BY date DESC, dừng khi gặp hit=True.
+        Đếm bao nhiêu kỳ liên tiếp (kể cả hôm nay) đài này bị miss.
+        - Với XSMB weekday model: chỉ đếm các ngày có cùng weekday (mỗi 7 ngày xổ 1 kỳ)
+        - Với XSMN province: đếm theo gap <= 7 ngày
+        - Dừng khi gặp kỳ hit=True
         """
         q = (
             db.supabase.table("prediction_results")
             .select("prediction_date,hit")
             .eq("region", region)
-            .eq("hit", False)
+            .not_.is_("hit", "null")   # chỉ kỳ đã verify
             .lte("prediction_date", target_date.isoformat())
             .order("prediction_date", desc=True)
-            .limit(30)  # chỉ cần check 30 ngày gần nhất
+            .limit(60)  # lấy 60 kỳ, chọn lọc sau
         )
         if province:
             q = q.eq("province", province)
@@ -252,35 +268,101 @@ class DecisionEngine:
         if not rows:
             return 1  # chính ngày hôm nay
 
-        # Đếm chuỗi fail liên tục (ngày kề nhau)
-        count = 0
-        prev_date = None
-        for row in rows:
-            row_date = date.fromisoformat(row["prediction_date"])
-            if prev_date is None:
-                prev_date = row_date
-                count = 1
-            else:
-                # Kiểm tra có phải ngày liền kề không
-                # (XSMN tỉnh chỉ mở hàng tuần → gap có thể 7 ngày)
-                gap = (prev_date - row_date).days
-                if gap <= 7:  # cho phép gap tối đa 7 ngày (1 tuần = 1 kỳ tỉnh XSMN)
-                    count += 1
-                    prev_date = row_date
-                else:
-                    break
+        # Nếu XSMB weekday: lọc chỉ lấy ngày cùng weekday
+        if region.upper() == "XSMB" and weekday is not None:
+            rows = [
+                r for r in rows
+                if date.fromisoformat(r["prediction_date"]).weekday() == weekday
+            ]
 
-        return count
+        count = 0
+        for row in rows:
+            if not row["hit"]:
+                count += 1
+            else:
+                break  # gặp kỳ trúng → dừng chuỗi
+
+        return max(count, 1)
+
+    def _count_retrain_without_auc_improvement(
+        self, db, region: str, province: Optional[str],
+        weekday: Optional[int], current_auc: Optional[float]
+    ) -> int:
+        """
+        Đếm số lần retrain gần nhất mà AUC không cải thiện so với trước đó.
+        Đọc từ agent_actions table, lấy 5 lần retrain gần nhất.
+        Nếu AUC liên tục <= current_auc (không có tiến bộ) → trả về số lần đó.
+        Mục đích: giúp agent leo thang strategy nhanh hơn khi retrain nhiều lần
+        mà AUC vẫn không tăng vượt threshold.
+        """
+        if current_auc is None:
+            return 0
+        try:
+            q = (
+                db.supabase.table("agent_actions")
+                .select("action_date,old_metric_auc,new_params")
+                .eq("region", region)
+                .eq("action_type", "retrain_triggered")
+                .order("action_date", desc=True)
+                .limit(5)
+            )
+            if province:
+                q = q.eq("province", province)
+            else:
+                q = q.is_("province", "null")
+            if weekday is not None:
+                q = q.eq("weekday", weekday)
+            else:
+                q = q.is_("weekday", "null")
+
+            rows = q.execute().data
+            if not rows:
+                return 0
+
+            # Đếm bao nhiêu lần retrain mà AUC lúc đó cũng không vượt threshold
+            no_improve_count = 0
+            for r in rows:
+                auc_then = r.get("old_metric_auc")
+                if auc_then is not None and auc_then < self.auc_threshold:
+                    no_improve_count += 1
+                else:
+                    break  # gặp lần retrain mà AUC từng tốt → dừng
+
+            return no_improve_count
+        except Exception:
+            return 0
 
     @staticmethod
-    def _pick_strategy(consecutive_fails: int) -> str:
+    def _pick_strategy(consecutive_fails: int, retrain_no_improve: int = 0) -> str:
         """
-        Chọn strategy dựa vào số ngày/kỳ fail liên tiếp.
-        
-        - 1-4 lần: boost_estimators (tăng nhẹ complexity)
-        - 5-6 lần: conservative (regularization mạnh hơn)
-        - 7+ lần:  full_reset (quay về default + train nhiều data hơn)
+        Chọn strategy dựa vào số kỳ fail liên tiếp VÀ lịch sử AUC improvement.
+
+        consecutive_fails (normal escalation):
+          1-4:  boost_estimators  (tăng số cây + giảm lr)
+          5-6:  conservative      (regularization mạnh, giảm max_depth)
+          7+:   full_reset        (default + --force train toàn bộ data)
+
+        retrain_no_improve (số lần retrain AUC vẫn <0.55, leo thang nhanh):
+          1:   → conservative     (tăng regularization)
+          2:   → scale_weight     (giải quyết class imbalance hit~24%)
+          3+:  → full_reset       (đổi hoàn toàn chiến lược)
+
+        Áp dụng cho cả XSMB weekday models và XSMN province models.
         """
+        # Leo thang nhanh dựa trên lịch sử AUC không cải thiện
+        if retrain_no_improve >= DEFAULT_MAX_RETRAIN_NO_IMPROVE:
+            # Đã thử đủ kiểu mà AUC vẫn ~0.5 → full reset
+            return "full_reset"
+        elif retrain_no_improve == 2:
+            # Đã thử boost + conservative → giờ thử scale class weight
+            return "scale_weight"
+        elif retrain_no_improve == 1:
+            # Lần retrain trước không cải thiện → conservative
+            if consecutive_fails >= 5:
+                return "full_reset"
+            return "conservative"
+
+        # Normal escalation theo consecutive_fails (retrain_no_improve == 0)
         if consecutive_fails >= 7:
             return "full_reset"
         elif consecutive_fails >= 5:

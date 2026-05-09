@@ -174,12 +174,3 @@ Nếu gặp vấn đề ở bất kỳ bước nào:
 ---
 
 **Chúc bạn thành công! 🚀**
-
-
-https://islcxaqdqhwgcqkdozeq.supabase.co
-sb_publishable_UoAFhuDaaImQS3lA4O7_mw_xgPpCjyw
-
-{"ok":true,"result":[{"update_id":110750190,
-"message":{"message_id":922,"from":{"id":1185662651,"is_bot":false,"first_name":"TaN","username":"tannguyen1000","language_code":"vi"},"chat":{"id":1185662651,"first_name":"TaN","username":"tannguyen1000","type":"private"},"date":1770828913,"text":"/history","entities":[{"offset":0,"length":8,"type":"bot_command"}]}}]}
-
-7541610102:AAHA-yKQwGv9pbeVsXWuZsi-cPX7AkI3d80

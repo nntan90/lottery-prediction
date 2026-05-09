@@ -194,10 +194,11 @@ async def main():
         msg = f"🔔 <b>Auto Training Triggered — {date.today()}</b>\n\n"
         for t in triggered_list:
             reason_icon = {"new_data": "📦", "perf_drop": "📉", "manual": "👤"}.get(t["reason"], "🔔")
+            recent_str = f"{t['hit_recent']:.0%}" if t['hit_recent'] is not None else "N/A"
             msg += (
                 f"{reason_icon} <b>{t['label']}</b> — {t['reason']}\n"
                 f"   Kỳ mới: {t['new_draws']} | "
-                f"Hit: {t['hit_train']:.0%} → {t['hit_recent']:.0%}\n\n"
+                f"Hit: {t['hit_train']:.0%} → {recent_str}\n\n"
             )
         msg += "⏳ Training đang chạy trên GitHub Actions..."
         await notifier.send_message(msg)

@@ -1,0 +1,58 @@
+name: 07 - XSMN Daily Ensemble Prediction
+
+# Chạy hàng ngày lúc 7:00 GMT+7 (00:00 UTC)
+# TARGET_PROVINCES được tự động phân giải qua env var dựa trên DOW hiện tại
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 7:00 GMT+7 (00:00 UTC) hằng ngày
+  workflow_dispatch:         # Cho phép chạy thủ công
+
+jobs:
+  predict-xsmn-ensemble:
+    name: XSMN Multi-Model Ensemble
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run XSMN Ensemble Prediction
+        id: predict
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
+          # TARGET_PROVINCES: Auto-resolved by resolve_provinces.py based on DOW
+        run: |
+          python src/scripts/predict_xsmn_ensemble.py
+
+      # Gửi Telegram nếu workflow fail
+      - name: "🚨 Notify Telegram - XSMN Ensemble Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>07 - XSMN Ensemble Prediction FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Pipeline ensemble XSMN bị lỗi. Kiểm tra GitHub Actions."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"

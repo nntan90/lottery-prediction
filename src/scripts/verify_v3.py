@@ -116,8 +116,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
         if province:
             tail_query = tail_query.eq("province", province)
-        else:
-            tail_query = tail_query.is_("province", "null")
+        # Nếu province là None -> Lấy tất cả province của region đó trong ngày
 
         tail_rows = tail_query.execute().data
         if not tail_rows:
@@ -148,11 +147,13 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
         if region_lower == "xsmb":
             is_tracking_enabled = True # XSMB always tracked
-        elif region_lower == "xsmn" and province:
-            # Tên province trong DB hiện tại (từ crawler) có dạng "tp_hcm", "ben-tre", sửa lại cho khớp với list:
-            mapped_prov = province.replace("-", "_").replace("tp_hcm", "tphcm")
-            if mapped_prov in VALID_XSMN_STATIONS.get(weekday, []):
-                is_tracking_enabled = True
+        elif region_lower == "xsmn":
+            if province:
+                mapped_prov = province.replace("-", "_").replace("tp_hcm", "tphcm")
+                if mapped_prov in VALID_XSMN_STATIONS.get(weekday, []):
+                    is_tracking_enabled = True
+            else:
+                is_tracking_enabled = True # Global ensemble XSMN luôn tracking
 
         if is_tracking_enabled:
             pair_results = calculate_station_profit(region, pairs, tail_rows)
