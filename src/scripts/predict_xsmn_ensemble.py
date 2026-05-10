@@ -271,13 +271,29 @@ async def run_ensemble_for_region(
         msg += f"🔥 <b>TOP 3 VIP:</b> {pairs_str}\n"
         msg += f"   <i>Score: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
         msg += f"   <i>Models Active: {len(ensemble_output['contributing_models'])}/{(len(provs_to_run)*3)}</i>\n\n"
-
-        if scoring_log_msg:
-            msg += f"{scoring_log_msg}\n\n"
-
         msg += f"<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>"
 
         await notifier.send_message(msg)
+
+        # Gửi scoring log riêng nếu có (tránh exceed Telegram 4096 char limit)
+        if scoring_log_msg:
+            max_len = 4000
+            if len(scoring_log_msg) <= max_len:
+                await notifier.send_message(scoring_log_msg)
+            else:
+                # Chunk scoring log
+                chunks = scoring_log_msg.split('\n\n')
+                current_chunk = ""
+                for chunk in chunks:
+                    if len(current_chunk) + len(chunk) + 2 > max_len:
+                        if current_chunk:
+                            await notifier.send_message(current_chunk)
+                        current_chunk = chunk
+                    else:
+                        current_chunk += ("\n\n" + chunk) if current_chunk else chunk
+                if current_chunk:
+                    await notifier.send_message(current_chunk)
+
         print(f"\n📱 Telegram notification sent for {region}!")
 
     print(f"\n✅ {region} Ensemble Prediction complete!")
@@ -300,10 +316,10 @@ async def main():
     notifier = LotteryNotifier()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Chạy XSMB
-        await run_ensemble_for_region("XSMB", target_date, [], db, storage, notifier, tmpdir)
-        
-        # 2. Chạy XSMN
+        # XSMB pipeline giữ nguyên 100% tại predict_v3.py / 02-predict.yml
+        # Script này CHỈ xử lý XSMN theo agents.md rule
+
+        # Chạy XSMN
         xsmn_provinces = get_target_provinces(target_date)
         if xsmn_provinces:
             await run_ensemble_for_region("XSMN", target_date, xsmn_provinces, db, storage, notifier, tmpdir)

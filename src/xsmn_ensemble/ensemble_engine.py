@@ -29,11 +29,11 @@ from typing import List, Dict, Tuple, Optional
 # Borda points by rank position (1-indexed)
 BORDA_POINTS = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
 
-# Default weights (Phase 1)
+# Default expert weights (v3.1)
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "freq_gap": 0.25,
-    "markov": 0.25,
-    "xgboost_core": 0.50,
+    "freq_gap": 1.0,
+    "markov": 1.0,
+    "xgboost_core": 2.0,  # AI weighted heavily
 }
 
 # Consensus and History rules
@@ -66,11 +66,7 @@ def compute_global_borda(
     Returns:
         Dict chứa top 3 global pairs và scoring log.
     """
-    w = {
-        'freq_gap': 1.0,
-        'markov': 1.0,
-        'xgboost_core': 2.0,  # AI is weighted heavily
-    }
+    w = weights if weights else DEFAULT_WEIGHTS
 
     # Filter thành công
     valid_results = [r for r in model_results if r.get("status") == "success" and r.get("top_pairs")]

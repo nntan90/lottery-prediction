@@ -263,6 +263,56 @@ CREATE INDEX IF NOT EXISTS idx_mp_model   ON model_predictions(model_name);
 
 
 -- =====================================================
+-- 9. TABLE: profit_tracking (V3 — Migration 01)
+-- Lưu lợi nhuận tính toán hàng ngày theo từng đài và cặp số
+-- =====================================================
+CREATE TABLE IF NOT EXISTS profit_tracking (
+  id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  prediction_date DATE NOT NULL,
+  region          TEXT NOT NULL CHECK (region IN ('xsmn', 'xsmb')),
+  province        TEXT,
+  pair            INTEGER NOT NULL,
+  hit_count       INTEGER NOT NULL DEFAULT 0,
+  cost            INTEGER NOT NULL,
+  revenue         INTEGER NOT NULL,
+  profit          INTEGER NOT NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Unique per date + region + province + pair
+  UNIQUE(prediction_date, region, province, pair)
+);
+
+COMMENT ON TABLE profit_tracking IS 'Lưu lợi nhuận tính toán hàng ngày theo từng đài và cặp số';
+CREATE INDEX IF NOT EXISTS idx_pt_date    ON profit_tracking(prediction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_pt_region  ON profit_tracking(region, province);
+
+
+-- =====================================================
+-- 10. TABLE: agent_actions (V3 — Migration 03)
+-- Lịch sử hành động của Master Retrain Agent
+-- =====================================================
+CREATE TABLE IF NOT EXISTS agent_actions (
+  id              BIGSERIAL PRIMARY KEY,
+  action_date     DATE NOT NULL,
+  region          TEXT NOT NULL,
+  province        TEXT,                   -- NULL = XSMB (all)
+  weekday         INT,                    -- Weekday model (0=Mon..6=Sun), NULL = non-weekday
+  action_type     TEXT NOT NULL,          -- 'retrain_triggered' | 'skipped' | 'no_action'
+  reason          TEXT,
+  strategy        TEXT,                   -- 'boost_estimators' | 'conservative' | 'full_reset'
+  old_metric_auc  FLOAT,
+  old_hit_rate    FLOAT,
+  old_params      JSONB,
+  new_params      JSONB,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+COMMENT ON TABLE agent_actions IS 'Lịch sử hành động của Master Retrain Agent';
+CREATE INDEX IF NOT EXISTS idx_agent_actions_station ON agent_actions(region, province, action_date DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_date    ON agent_actions(action_date DESC);
+
+
+-- =====================================================
 -- ROW LEVEL SECURITY (RLS)
 -- =====================================================
 
@@ -275,6 +325,8 @@ ALTER TABLE model_registry ENABLE ROW LEVEL SECURITY;
 ALTER TABLE prediction_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE training_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_predictions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE profit_tracking ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_actions ENABLE ROW LEVEL SECURITY;
 
 -- Policies: Public Read
 CREATE POLICY "Public read access" ON lottery_draws FOR SELECT USING (true);
@@ -285,6 +337,8 @@ CREATE POLICY "Public read access" ON model_registry FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON prediction_results FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON training_queue FOR SELECT USING (true);
 CREATE POLICY "Public read access" ON model_predictions FOR SELECT USING (true);
+CREATE POLICY "Public read access" ON profit_tracking FOR SELECT USING (true);
+CREATE POLICY "Public read access" ON agent_actions FOR SELECT USING (true);
 
 -- Policies: Service Write Only
 CREATE POLICY "Service write access" ON lottery_draws FOR INSERT WITH CHECK (auth.role() = 'service_role');
@@ -300,4 +354,7 @@ CREATE POLICY "Service write access" ON training_queue FOR INSERT WITH CHECK (au
 CREATE POLICY "Service write access" ON training_queue FOR UPDATE USING (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON model_predictions FOR INSERT WITH CHECK (auth.role() = 'service_role');
 CREATE POLICY "Service write access" ON model_predictions FOR UPDATE USING (auth.role() = 'service_role');
-
+CREATE POLICY "Service write access" ON profit_tracking FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service write access" ON profit_tracking FOR UPDATE USING (auth.role() = 'service_role');
+CREATE POLICY "Service write access" ON agent_actions FOR INSERT WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "Service write access" ON agent_actions FOR UPDATE USING (auth.role() = 'service_role');
