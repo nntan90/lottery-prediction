@@ -1,0 +1,34 @@
+# =============================================================================
+# scoring.yaml — Expert Borda Scoring Configuration (v3.1)
+# Externalized from ensemble_engine.py for A/B testing without code changes
+# =============================================================================
+
+# --- Model Weights ---
+# Higher weight = more influence on final score
+weights:
+  freq_gap: 1.0          # Rule-based frequency/gap
+  markov: 1.0            # Markov Chain transition
+  xgboost_core: 2.0      # XGBoost ML (AI weighted heavily)
+
+# --- Borda Points by Rank (1-indexed) ---
+borda_points:
+  1: 5
+  2: 4
+  3: 3
+  4: 2
+  5: 1
+
+# --- Consensus Rules ---
+# Bonus when multiple models agree on the same pair
+consensus:
+  gold_threshold: 3       # Number of models for Gold consensus
+  silver_threshold: 2     # Number of models for Silver consensus
+  gold_bonus: 5.0         # Score bonus for Gold consensus
+  silver_bonus: 2.0       # Score bonus for Silver consensus
+
+# --- Historical Frequency Rules ---
+# Based on 3-week same-weekday lookback
+history:
+  overdue_penalty: -2.0   # Appeared >= 2 times in last 3 weeks (likely cooling down)
+  sweetspot_bonus: 2.0    # Appeared exactly 1 time (riding the rhythm)
+  potential_bonus: 1.0    # Never appeared (building pressure, likely due)

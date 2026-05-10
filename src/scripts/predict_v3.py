@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import pandas as pd
 
 from src.database.supabase_client import LotteryDB
+from src.database.prediction_repo import save_prediction
 from src.models.xgb_model import LotteryXGB, FEATURE_COLS
 from src.utils.storage import LotteryStorage
 from src.bot.telegram_bot import LotteryNotifier
@@ -195,26 +196,7 @@ async def predict_station(
     }
 
 
-def _save_prediction(db: LotteryDB, result: dict) -> None:
-    """Save hoặc update prediction_results, xử lý NULL province đúng cách.
-    Dùng check-then-update/insert thay vì upsert on_conflict vì
-    Supabase không hỗ trợ COALESCE trong on_conflict parameter.
-    """
-    region    = result["region"]
-    province  = result.get("province")
-    pred_date = result["prediction_date"]
-
-    q = db.supabase.table("prediction_results").select("id") \
-        .eq("prediction_date", pred_date).eq("region", region)
-    q = q.is_("province", "null") if province is None else q.eq("province", province)
-    existing = q.execute().data
-
-    if existing:
-        db.supabase.table("prediction_results").update(result) \
-            .eq("id", existing[0]["id"]).execute()
-        print(f"  ↩️  Updated prediction: {region}/{province or 'all'}")
-    else:
-        db.supabase.table("prediction_results").insert(result).execute()
+# _save_prediction is now in src/database/prediction_repo.py
 
 
 async def main():
@@ -246,7 +228,7 @@ async def main():
         xsmb_result = await predict_station(db, storage, "XSMB", None, target_date, tmpdir)
         if xsmb_result:
             all_results["XSMB"] = xsmb_result
-            _save_prediction(db, xsmb_result)
+            save_prediction(db, xsmb_result)
 
         # 2. XSMN — các đài hôm nay
         crawler = XSMNCrawler()
@@ -257,7 +239,7 @@ async def main():
             result = await predict_station(db, storage, "XSMN", province, target_date, tmpdir)
             if result:
                 all_results["XSMN"].append(result)
-                _save_prediction(db, result)
+                save_prediction(db, result)
 
     # 3. Gửi Telegram
     # XSMB

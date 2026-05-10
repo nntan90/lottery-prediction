@@ -1,6 +1,7 @@
 """
 XSMB Crawler - MINH NGOC VERSION
 Crawl lottery results from minhngoc.net.vn (mien=2)
+With retry/backoff for transient network failures.
 """
 
 import requests
@@ -8,6 +9,8 @@ from bs4 import BeautifulSoup
 from datetime import date
 from typing import Optional, Dict
 import time
+
+from src.utils.retry import retry_with_backoff
 
 class XSMBCrawler:
     """Crawler for XSMB (Northern Vietnam Lottery) results from Minh Ngoc"""
@@ -29,6 +32,11 @@ class XSMBCrawler:
                          'AppleWebKit/537.36 (KHTML, like Gecko) '
                          'Chrome/120.0.0.0 Safari/537.36'
         }
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(requests.RequestException,))
+    def _fetch_page(self, url: str) -> requests.Response:
+        """Fetch page with retry on network errors."""
+        return requests.get(url, headers=self.headers, timeout=15)
     
     def fetch_results(self, target_date: date) -> Optional[Dict]:
         """
@@ -81,7 +89,7 @@ class XSMBCrawler:
         print(f"🔍 Crawling XSMB: {url}")
         
         try:
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self._fetch_page(url)
             # Check if successful
             if response.status_code != 200:
                 print(f"  ❌ Failed to fetch: {response.status_code}")

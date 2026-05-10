@@ -41,52 +41,10 @@ from src.xsmn_ensemble.ensemble_engine import (
     format_ensemble_result,
     format_model_prediction_log,
 )
+from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-def _save_prediction(db: LotteryDB, result: dict) -> None:
-    """Save hoặc update prediction_results, xử lý NULL province."""
-    region    = result["region"]
-    province  = result.get("province")
-    pred_date = result["prediction_date"]
-
-    db_record = result.copy()
-    db_record.pop("ensemble_method", None)
-    db_record.pop("contributing_models", None)
-    db_record.pop("final_scores", None)
-
-    q = db.supabase.table("prediction_results").select("id") \
-        .eq("prediction_date", pred_date).eq("region", region)
-    q = q.is_("province", "null") if province is None else q.eq("province", province)
-    existing = q.execute().data
-
-    if existing:
-        db.supabase.table("prediction_results").update(db_record) \
-            .eq("id", existing[0]["id"]).execute()
-        print(f"  ↩️  Updated prediction: {region}/{province or 'all'}")
-    else:
-        db.supabase.table("prediction_results").insert(db_record).execute()
-        print(f"  ✅ Inserted prediction: {region}/{province or 'all'}")
-
-
-def _save_model_prediction(db: LotteryDB, log: dict) -> None:
-    """Save model_predictions log (upsert)."""
-    pred_date = log["prediction_date"]
-    region    = log["region"]
-    province  = log.get("province")
-    model_name = log["model_name"]
-
-    q = db.supabase.table("model_predictions").select("id") \
-        .eq("prediction_date", pred_date) \
-        .eq("region", region) \
-        .eq("model_name", model_name)
-    q = q.is_("province", "null") if province is None else q.eq("province", province)
-    existing = q.execute().data
-
-    if existing:
-        db.supabase.table("model_predictions").update(log) \
-            .eq("id", existing[0]["id"]).execute()
-    else:
-        db.supabase.table("model_predictions").insert(log).execute()
+# _save_prediction and _save_model_prediction are now in src/database/prediction_repo.py
 
 
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
@@ -187,7 +145,7 @@ async def run_models_for_target(
     for mr in model_results:
         log = format_model_prediction_log(region, province, mr, target_date)
         try:
-            _save_model_prediction(db, log)
+            save_model_prediction(db, log)
         except Exception as e:
             print(f"     ⚠️  Log save failed ({mr['model_name']}): {e}")
 
@@ -246,7 +204,7 @@ async def run_ensemble_for_region(
     
     scoring_log_msg = prediction.pop('scoring_log', '')
     
-    _save_prediction(db, prediction)
+    save_prediction(db, prediction)
 
     # Telegram notification
     if prediction:

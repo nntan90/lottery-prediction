@@ -1,6 +1,7 @@
 """
 XSMN Crawler - MINH NGOC VERSION
 Crawl lottery results from minhngoc.net.vn (Search Interface)
+With retry/backoff for transient network failures.
 """
 
 import requests
@@ -8,6 +9,8 @@ from bs4 import BeautifulSoup
 from datetime import date
 from typing import Optional, Dict
 import time
+
+from src.utils.retry import retry_with_backoff
 
 class XSMNCrawler:
     """Crawler for XSMN (Southern Vietnam Lottery) results from Minh Ngoc"""
@@ -54,6 +57,11 @@ class XSMNCrawler:
                          'AppleWebKit/537.36 (KHTML, like Gecko) '
                          'Chrome/120.0.0.0 Safari/537.36'
         }
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(requests.RequestException,))
+    def _fetch_page(self, url: str) -> requests.Response:
+        """Fetch page with retry on network errors."""
+        return requests.get(url, headers=self.headers, timeout=15)
     
     def get_provinces_for_date(self, target_date: date) -> list:
         """Get list of provinces for a specific date based on schedule"""
@@ -105,7 +113,7 @@ class XSMNCrawler:
         print(f"🔍 Crawling XSMN ({target_province_slug}): {url}")
         
         try:
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self._fetch_page(url)
             # Check if successful
             if response.status_code != 200:
                 print(f"  ❌ Failed to fetch: {response.status_code}")
@@ -231,7 +239,7 @@ class XSMNCrawler:
         print(f"🔍 Crawling Batch XSMN: {url}")
         
         try:
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self._fetch_page(url)
             if response.status_code != 200:
                 print(f"  ❌ Failed to fetch: {response.status_code}")
                 return []

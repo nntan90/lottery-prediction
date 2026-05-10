@@ -2,49 +2,57 @@
 ensemble_engine.py — Weighted Borda Count Aggregation Engine
 Kết hợp output từ 3 sub-models (freq_gap, markov, xgboost_core) thành Top 3 cuối cùng.
 
-Borda Score:
-  Rank 1 → 5 điểm
-  Rank 2 → 4 điểm
-  Rank 3 → 3 điểm
-  Rank 4 → 2 điểm
-  Rank 5 → 1 điểm
-  Ngoài Top 5 → 0 điểm
-
-Final Score:
-  Borda(pair) = Σ_m (w_m × pts_m(pair))
-
-Trọng số Phase 1:
-  freq_gap:     0.25
-  markov:       0.25
-  xgboost_core: 0.50
+Scoring config loaded from config/scoring.yaml (falls back to hardcoded defaults).
 
 Guardrails:
   - Ưu tiên consensus (≥2/3 model cùng chọn)
   - 1 model lỗi → ensemble vẫn chạy với 2 model còn lại
+  - Dynamic consensus threshold scales with model count
 """
 
+import os
 from typing import List, Dict, Tuple, Optional
 
 
+# ─── Load config from YAML (with hardcoded fallback) ───────────────────────
+def _load_scoring_config() -> dict:
+    """Load scoring config from config/scoring.yaml, fallback to defaults."""
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "config", "scoring.yaml"
+    )
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    except Exception:
+        return {}  # Use hardcoded defaults
+
+_CFG = _load_scoring_config()
+
 # Borda points by rank position (1-indexed)
-BORDA_POINTS = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
+BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}).items()}
 
 # Default expert weights (v3.1)
+_w_cfg = _CFG.get("weights", {})
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "freq_gap": 1.0,
-    "markov": 1.0,
-    "xgboost_core": 2.0,  # AI weighted heavily
+    "freq_gap": _w_cfg.get("freq_gap", 1.0),
+    "markov": _w_cfg.get("markov", 1.0),
+    "xgboost_core": _w_cfg.get("xgboost_core", 2.0),
 }
 
-# Consensus and History rules
-CONSENSUS_THRESHOLD_GOLD = 3
-CONSENSUS_THRESHOLD_SILVER = 2
-BONUS_GOLD = 5.0
-BONUS_SILVER = 2.0
+# Consensus rules
+_cons_cfg = _CFG.get("consensus", {})
+CONSENSUS_THRESHOLD_GOLD = _cons_cfg.get("gold_threshold", 3)
+CONSENSUS_THRESHOLD_SILVER = _cons_cfg.get("silver_threshold", 2)
+BONUS_GOLD = _cons_cfg.get("gold_bonus", 5.0)
+BONUS_SILVER = _cons_cfg.get("silver_bonus", 2.0)
 
-HISTORY_PENALTY_OVERDUE = -2.0  # Nổ >= 2 lần trong 3 tuần
-HISTORY_BONUS_SWEETSPOT = 2.0   # Nổ đúng 1 lần
-HISTORY_BONUS_POTENTIAL = 1.0   # Chưa nổ lần nào
+# History rules
+_hist_cfg = _CFG.get("history", {})
+HISTORY_PENALTY_OVERDUE = _hist_cfg.get("overdue_penalty", -2.0)
+HISTORY_BONUS_SWEETSPOT = _hist_cfg.get("sweetspot_bonus", 2.0)
+HISTORY_BONUS_POTENTIAL = _hist_cfg.get("potential_bonus", 1.0)
 
 
 def compute_global_borda(

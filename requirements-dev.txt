@@ -1,0 +1,22 @@
+# Development dependencies — NOT needed in CI/CD pipelines
+# Install: pip install -r requirements-dev.txt
+
+# Include production deps
+-r requirements.txt
+
+# ==================== Data Analysis & Visualization ====================
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+openpyxl>=3.1.0
+
+# ==================== Notebooks ====================
+jupyter>=1.0.0
+notebook>=7.0.0
+
+# ==================== Testing ====================
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# ==================== Optional ML Models ====================
+lightgbm>=4.0.0
