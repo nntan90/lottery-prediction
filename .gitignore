@@ -57,6 +57,9 @@ logs/
 temp/
 tmp/
 
+# Weekly report XML files (local + GH artifact, not committed)
+reports/*.xml
+
 # Data files (optional - uncomment nếu không muốn commit data)
 # data/*.csv
 # data/*.json
