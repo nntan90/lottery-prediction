@@ -90,32 +90,43 @@ def _save_model_prediction(db: LotteryDB, log: dict) -> None:
 
 
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
-    """Lấy lịch sử 2 số cuối trong N kỳ quay gần nhất."""
+    """Lấy lịch sử 2 số cuối trong N kỳ quay gần nhất CÙNG THỨ (cùng ngày trong tuần)."""
     tails = []
     # If no provinces (XSMB), we use [None] to iterate once
     provs_to_check = provinces if provinces else [None]
+    target_weekday = target_date.weekday()
     
     for prov in provs_to_check:
-        # Lấy N kỳ gần nhất
+        # Lấy 30 kỳ gần nhất để lọc ra 3 kỳ cùng thứ
         q1 = db.supabase.table("lottery_draws") \
             .select("draw_date") \
             .eq("region", region) \
             .lt("draw_date", str(target_date)) \
             .order("draw_date", desc=True) \
-            .limit(limit_per_province)
+            .limit(30)
         q1 = q1.eq("province", prov) if prov else q1.is_("province", "null")
         draws = q1.execute()
         
         if not draws.data:
             continue
             
-        draw_dates = [d["draw_date"] for d in draws.data]
+        # Lọc cùng thứ
+        same_weekday_dates = []
+        for d in draws.data:
+            d_date = date.fromisoformat(d["draw_date"])
+            if d_date.weekday() == target_weekday:
+                same_weekday_dates.append(d["draw_date"])
+                if len(same_weekday_dates) == limit_per_province:
+                    break
         
+        if not same_weekday_dates:
+            continue
+            
         # Lấy tails của các kỳ này
         q2 = db.supabase.table("tails_2d") \
             .select("tail_2d") \
             .eq("region", region) \
-            .in_("draw_date", draw_dates)
+            .in_("draw_date", same_weekday_dates)
         q2 = q2.eq("province", prov) if prov else q2.is_("province", "null")
         t_data = q2.execute()
             
@@ -232,6 +243,9 @@ async def run_ensemble_for_region(
     # Lưu prediction chung với province="all" (hoặc None cho XSMB)
     save_province = "all" if region == "XSMN" else None
     prediction = format_ensemble_result(region, save_province, ensemble_output, target_date)
+    
+    scoring_log_msg = prediction.pop('scoring_log', '')
+    
     _save_prediction(db, prediction)
 
     # Telegram notification
@@ -257,6 +271,9 @@ async def run_ensemble_for_region(
         msg += f"🔥 <b>TOP 3 VIP:</b> {pairs_str}\n"
         msg += f"   <i>Score: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
         msg += f"   <i>Models Active: {len(ensemble_output['contributing_models'])}/{(len(provs_to_run)*3)}</i>\n\n"
+
+        if scoring_log_msg:
+            msg += f"{scoring_log_msg}\n\n"
 
         msg += f"<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>"
 

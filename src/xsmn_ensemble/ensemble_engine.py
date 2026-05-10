@@ -36,9 +36,15 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "xgboost_core": 0.50,
 }
 
-# Consensus bonus: cặp được ≥ 2 model cùng chọn → bonus thêm
-CONSENSUS_THRESHOLD = 2
-CONSENSUS_BONUS = 1.5  # nhân thêm 1.5× nếu đạt consensus
+# Consensus and History rules
+CONSENSUS_THRESHOLD_GOLD = 3
+CONSENSUS_THRESHOLD_SILVER = 2
+BONUS_GOLD = 5.0
+BONUS_SILVER = 2.0
+
+HISTORY_PENALTY_OVERDUE = -2.0  # Nổ >= 2 lần trong 3 tuần
+HISTORY_BONUS_SWEETSPOT = 2.0   # Nổ đúng 1 lần
+HISTORY_BONUS_POTENTIAL = 1.0   # Chưa nổ lần nào
 
 
 def compute_global_borda(
@@ -58,9 +64,13 @@ def compute_global_borda(
         top_n_output: số cặp cuối cùng output (default 3)
 
     Returns:
-        Dict chứa top 3 global pairs.
+        Dict chứa top 3 global pairs và scoring log.
     """
-    w = weights or DEFAULT_WEIGHTS
+    w = {
+        'freq_gap': 1.0,
+        'markov': 1.0,
+        'xgboost_core': 2.0,  # AI is weighted heavily
+    }
 
     # Filter thành công
     valid_results = [r for r in model_results if r.get("status") == "success" and r.get("top_pairs")]
@@ -96,14 +106,13 @@ def compute_global_borda(
                 pair_model_count[pair] = pair_model_count.get(pair, 0) + 1
 
     # Consensus bonus
-    consensus_pairs = [p for p, count in pair_model_count.items() if count >= CONSENSUS_THRESHOLD]
+    for pair, count in pair_model_count.items():
+        if count >= CONSENSUS_THRESHOLD_GOLD:
+            pair_scores[pair] += BONUS_GOLD
+        elif count >= CONSENSUS_THRESHOLD_SILVER:
+            pair_scores[pair] += BONUS_SILVER
 
-    for pair in consensus_pairs:
-        if pair in pair_scores:
-            pair_scores[pair] *= CONSENSUS_BONUS
-
-    # --- Thuật toán kết hợp lịch sử 3 kỳ gần nhất ---
-    # Đếm số lần xuất hiện của các cặp trong recent_tails
+    # --- Thuật toán kết hợp lịch sử 3 kỳ gần nhất CÙNG THỨ ---
     recent_counts = {}
     for t in recent_tails:
         recent_counts[t] = recent_counts.get(t, 0) + 1
@@ -111,25 +120,65 @@ def compute_global_borda(
     for pair in pair_scores:
         count = recent_counts.get(pair, 0)
         if count >= 2:
-            # Đã nổ nhiều trong 3 kỳ gần nhất -> Penalty 30% (Khó rớt lại liên tục)
-            pair_scores[pair] *= 0.7
+            # Nổ >= 2 lần trong 3 tuần cùng thứ -> Phạt
+            pair_scores[pair] += HISTORY_PENALTY_OVERDUE
         elif count == 1:
-            # Đã nổ 1 lần -> Bonus 10% (Chu kỳ đang rơi)
-            pair_scores[pair] *= 1.1
+            # Nổ đúng 1 lần -> Rơi đúng nhịp chuẩn -> Thưởng
+            pair_scores[pair] += HISTORY_BONUS_SWEETSPOT
         else:
-            # Chưa nổ -> Bonus 20% (Gan ngắn dễ nổ)
-            pair_scores[pair] *= 1.2
+            # Chưa nổ -> Tiềm năng (Gan ngắn) -> Thưởng
+            pair_scores[pair] += HISTORY_BONUS_POTENTIAL
 
     # Sort & pick top N
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
 
+    # Tạo Telegram Log cho Top 3
+    scoring_log = ['📝 <b>CHI TIẾT CHẤM ĐIỂM (EXPERT SCORING):</b>']
+    for pair, score in top_pairs:
+        log_lines = []
+        # 1. Base Score
+        base_points = 0
+        models_hit = []
+        for result in valid_results:
+            for r_idx, (p, _) in enumerate(result.get('top_pairs', [])):
+                if p == pair:
+                    weight = w.get(result['model_name'], 1.0)
+                    pts = BORDA_POINTS.get(r_idx + 1, 0) * weight
+                    base_points += pts
+                    m_name = 'XGB' if 'xgboost' in result['model_name'] else ('Freq' if 'freq' in result['model_name'] else 'Markov')
+                    models_hit.append(f"{m_name}(Top{r_idx+1})")
+        
+        log_lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ")
+        log_lines.append(f"   ├ Cơ sở: {base_points}đ từ {', '.join(models_hit)}")
+        
+        # 2. Consensus Bonus
+        c_count = pair_model_count.get(pair, 0)
+        if c_count >= CONSENSUS_THRESHOLD_GOLD:
+            log_lines.append(f"   ├ Đồng thuận: +{BONUS_GOLD}đ (Cả {c_count} model chốt)")
+        elif c_count >= CONSENSUS_THRESHOLD_SILVER:
+            log_lines.append(f"   ├ Đồng thuận: +{BONUS_SILVER}đ ({c_count} model chốt)")
+            
+        # 3. History Bonus
+        h_count = recent_counts.get(pair, 0)
+        if h_count >= 2:
+            log_lines.append(f"   └ Lịch sử: {HISTORY_PENALTY_OVERDUE}đ (Nổ {h_count} lần/3 tuần)")
+        elif h_count == 1:
+            log_lines.append(f"   └ Lịch sử: +{HISTORY_BONUS_SWEETSPOT}đ (Nổ đúng 1 nhịp/3 tuần)")
+        else:
+            log_lines.append(f"   └ Lịch sử: +{HISTORY_BONUS_POTENTIAL}đ (Đang nén 3 tuần chưa ra)")
+            
+        scoring_log.append('\n'.join(log_lines))
+
+    consensus_pairs_list = [p for p, count in pair_model_count.items() if count >= CONSENSUS_THRESHOLD_SILVER]
+
     return {
-        "top_pairs": top_pairs,
-        "contributing_models": list(set(contributing)),
-        "ensemble_method": "global_borda_with_history",
-        "borda_details": {p: round(s, 4) for p, s in sorted_pairs},
-        "consensus_pairs": consensus_pairs,
+        'top_pairs': top_pairs,
+        'contributing_models': list(set(contributing)),
+        'ensemble_method': 'expert_borda_history_v2',
+        'borda_details': {p: round(s, 4) for p, s in sorted_pairs},
+        'consensus_pairs': consensus_pairs_list,
+        'scoring_log': '\n\n'.join(scoring_log)
     }
 
 
@@ -169,6 +218,7 @@ def format_ensemble_result(
         "hit": None,
         "matched_pairs": None,
         "tail_set": None,
+        "scoring_log": ensemble_output.get('scoring_log', '')
     }
 
 
