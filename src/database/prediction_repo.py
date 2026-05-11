@@ -1,7 +1,7 @@
 """
 prediction_repo.py — Shared prediction save/upsert logic.
 
-Extracted from predict_v3.py and predict_xsmn_ensemble.py to eliminate
+Extracted from prediction scripts to eliminate code duplication.
 duplicated _save_prediction implementations (DRY principle).
 
 All prediction scripts should use this single repository for DB writes.
@@ -30,11 +30,10 @@ def save_prediction(db: LotteryDB, result: dict) -> None:
     province  = result.get("province")
     pred_date = result["prediction_date"]
 
-    # Strip non-DB fields before save
+    # Strip runtime-only fields before save. Ensemble audit fields are real DB
+    # columns added by migration 06 and must be persisted for backtesting.
     db_record = result.copy()
-    NON_DB_FIELDS = [
-        "ensemble_method", "contributing_models", "final_scores", "scoring_log",
-    ]
+    NON_DB_FIELDS = ["scoring_log"]
     for field in NON_DB_FIELDS:
         db_record.pop(field, None)
 

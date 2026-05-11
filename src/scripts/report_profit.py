@@ -186,7 +186,7 @@ async def main():
         sys.exit(1)
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="profit_report")
     await generate_report(db, notifier, from_date, to_date)
 
 

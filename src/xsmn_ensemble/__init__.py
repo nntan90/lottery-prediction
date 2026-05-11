@@ -9,6 +9,4 @@ Modules:
   - model_xgboost:    Model 4 — XGBoost classifier wrapper
   - model_lstm:       Model 5 — LSTM/GRU sequence model (PyTorch)
   - ensemble_engine:  Weighted Borda Count + CombSUM aggregation
-
-  - model_freq_gap:   [LEGACY v3.1] Combined Freq+Gap (kept for backward compat)
 """

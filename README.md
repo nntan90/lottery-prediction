@@ -1,29 +1,30 @@
-# 🎲 Lottery Random Number Generator (XSMB & XSMN)
+# 🤖 VietlottAI (Analysis Lottery)
+**Hệ thống AI tự động hóa cào dữ liệu, phân tích và xếp hạng tín hiệu thống kê 2 số cuối bằng Ensemble Machine Learning.**
 
-**Hệ thống tạo số ngẫu nhiên tự động dựa trên Random.org cho Xổ số Kiến thiết.**
-
-> ⚠️ **EDUCATIONAL PURPOSE ONLY**: Dự án này được xây dựng **hoàn toàn cho mục đích học tập** về lập trình tự động hóa (GitHub Actions) và xử lý dữ liệu. Các con số được tạo ra là **ngẫu nhiên** và chỉ mang tính chất tham khảo vui vẻ.
+> ⚠️ **EDUCATIONAL PURPOSE ONLY**: Dự án này được xây dựng **hoàn toàn cho mục đích học tập** về lập trình tự động hóa (GitHub Actions), xử lý dữ liệu và Machine Learning (XGBoost, LSTM, Markov Chain). Các con số được tạo ra chỉ mang tính chất tham khảo vui vẻ.
 
 ---
 
 ## ✨ Tính Năng Chính
-- 🎲 **Random Number Generation**: Tạo dãy số may mắn ngẫu nhiên mỗi ngày cho XSMB và 21 tỉnh XSMN.
-- 🤖 **Automated Workflow**: Tự động chạy hàng ngày hoàn toàn miễn phí trên GitHub Actions.
-- 📱 **Telegram Notifications**: Gửi kết quả ngẫu nhiên về điện thoại của bạn mỗi sáng.
-- ☁️ **Cloud Database**: Lưu trữ lịch sử tạo số trên Supabase để tiện theo dõi.
+- 🧠 **Multi-Model Ensemble v3.2**: Xếp hạng Top 3 tín hiệu thống kê 2 số cuối từ 5 mô hình song song (Frequency, Gap, Markov, XGBoost, LSTM).
+- 🤖 **Master Retrain Agent**: Hệ thống tự đánh giá hiệu năng (Hit Rate, AUC) và quyết định retrain mô hình XGBoost với các chiến lược linh hoạt.
+- 📈 **Walk-forward Backtest**: Đo Hit@1, Hit@3, lift so với random baseline, ROI và đóng góp từng sub-model.
+- ⚙️ **Automated Workflow**: Tự động chạy hàng ngày hoàn toàn miễn phí trên Serverless GitHub Actions.
+- 📱 **Telegram Notifications**: Gửi báo cáo kết quả và Top 3 tín hiệu qua Telegram Bot.
+- ☁️ **Cloud Database**: Lưu trữ lịch sử tạo số và model registry trên Supabase.
 
 ---
 
 ## 🏗️ Cách Hoạt Động
 
 ```
-[GitHub Actions] --> [Daily Trigger] --> [Fetch Random Numbers] --> [Save to DB] --> [Notify Telegram]
+[GitHub Actions] --> [Daily Crawl] --> [Feature Engineering] --> [Predict Ensemble] --> [Telegram Notify] --> [Verify & Retrain]
 ```
 
-Hệ thống hoạt động đơn giản như một cron-job:
-1. **16:30**: Tự động lấy kết quả xổ số mới nhất để cập nhật dữ liệu.
-2. **17:00**: Chạy thuật toán random để tạo bộ số cho ngày mai.
-3. **07:00**: Gửi thông báo kết quả qua Telegram Bot.
+Hệ thống hoạt động đơn giản như một chuỗi cron-job:
+1. **19:00**: Tự động lấy kết quả xổ số thực tế của XSMB và XSMN hôm nay.
+2. **19:30**: Đánh giá kết quả Top 3 tín hiệu của ngày hôm qua, kích hoạt Master Agent nếu mô hình có dấu hiệu suy giảm hiệu năng (Perf Drop).
+3. **07:00 (Sáng hôm sau)**: Chạy pipeline Ensemble (5 mô hình) để tạo Top 3 tín hiệu thống kê và gửi Telegram.
 
 ---
 
@@ -33,6 +34,7 @@ Hệ thống hoạt động đơn giản như một cron-job:
 1. Tạo project miễn phí tại [supabase.com](https://supabase.com).
 2. Vào **SQL Editor**, chạy file `database/schema_final.sql` để tạo bảng.
 3. Vào **Settings → API**, lưu lại `Project URL` và `service_role key`.
+4. Bảng `notification_configs` cho phép bật/tắt từng nhóm Telegram message và lưu metadata cron/job để dễ điều chỉnh lịch vận hành.
 
 ### 2. Tạo Telegram Bot
 1. Chat với `@BotFather` trên Telegram để tạo bot mới.
@@ -58,13 +60,15 @@ Hệ thống hoạt động đơn giản như một cron-job:
 ## 🛠️ Công Cụ Hỗ Trợ
 
 - **Kiểm tra Database**: File `database/analyze_db_size.sql` giúp bạn xem dung lượng lưu trữ.
+- **Cấu hình Telegram**: Sửa bảng `notification_configs` để bật/tắt từng job, đổi `chat_id`, `parse_mode`, prefix/suffix hoặc ghi chú cron hiện hành.
+- **Backtest walk-forward**: Chạy `python src/scripts/backtest_walk_forward.py --from-date YYYY-MM-DD --to-date YYYY-MM-DD` để đo lift so với random baseline.
 - **Dọn dẹp**: Workflow tự động dọn dẹp dữ liệu cũ mỗi tháng để tiết kiệm tài nguyên.
 
 ---
 
 ## 📜 Disclaimer
 
-Dự án này sử dụng các thuật toán tạo số ngẫu nhiên (Pseudo-random number generation) và data từ các nguồn công khai. 
+Dự án này dùng dữ liệu công khai và các mô hình thống kê để xếp hạng tín hiệu xác suất tương đối, không tạo ra cam kết chắc thắng.
 **Tác giả không chịu trách nhiệm về việc sử dụng các con số này vào mục đích cá cược hay cờ bạc.** Vui lòng tuân thủ pháp luật sở tại.
 
 ---

@@ -149,7 +149,7 @@ class LotteryDB:
     
     # ==================== PREDICTION RESULTS ====================
     # V3 uses 'prediction_results' table accessed directly via self.supabase.table(...)
-    # in scripts/predict_v3.py and scripts/verify_v3.py
+    # in scripts/predict_ensemble.py and scripts/verify_v3.py
     
     # ==================== CRAWLER LOGS ====================
     

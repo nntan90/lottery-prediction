@@ -91,7 +91,7 @@ async def main():
     args = parser.parse_args()
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="retrain_weekday_models")
     triggered = []
     failed = []
 

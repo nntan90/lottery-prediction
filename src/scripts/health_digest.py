@@ -187,7 +187,7 @@ async def main():
         target_date = vn_now.date()
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="health_digest")
 
     print(f"📋 Building health digest for {target_date}...")
     msg = await build_digest(db, target_date)

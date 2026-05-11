@@ -20,7 +20,7 @@ import time
 from datetime import date
 from typing import Dict, Optional
 
-from src.xsmn_ensemble.model_freq_gap import _load_tails_by_draws
+from src.xsmn_ensemble.data_utils import _load_tails_by_draws
 
 
 def predict_gap(

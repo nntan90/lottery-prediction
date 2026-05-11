@@ -27,7 +27,7 @@ from typing import Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from src.xsmn_ensemble.model_freq_gap import _load_tails_by_draws
+from src.xsmn_ensemble.data_utils import _load_tails_by_draws
 
 
 # ── Lazy import torch (chỉ import khi cần) ──────────────────────────────────

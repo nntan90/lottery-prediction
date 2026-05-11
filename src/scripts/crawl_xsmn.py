@@ -19,7 +19,7 @@ async def main():
     crawler = XSMNCrawler()
     db = LotteryDB()
     try:
-        bot = LotteryNotifier()
+        bot = LotteryNotifier(db, default_config_key="crawl_xsmn")
     except Exception as e:
         print(f'⚠️ Could not init bot: {e}')
         bot = None

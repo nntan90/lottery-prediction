@@ -1,7 +1,7 @@
 """
-predict_xsmn_ensemble.py — v3.2 (5-Model Ensemble)
-Orchestration script cho XSMN Multi-Model Ensemble pipeline.
-Chạy bởi GitHub Actions workflow: 07-predict-xsmn-ensemble.yml
+predict_ensemble.py — v3.2 (5-Model Ensemble)
+Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
+Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
 Models (v3.2):
   1. Frequency/Hot-Cool  → Top 5
@@ -19,8 +19,8 @@ Flow mỗi ngày:
   5. Gửi Telegram notification
 
 Usage:
-  python src/scripts/predict_xsmn_ensemble.py
-  python src/scripts/predict_xsmn_ensemble.py --date 2026-05-07
+  python src/scripts/predict_ensemble.py
+  python src/scripts/predict_ensemble.py --date 2026-05-07
 """
 
 import argparse
@@ -222,14 +222,15 @@ async def run_ensemble_for_region(
     ensemble_output = compute_global_borda(all_model_results, recent_tails, top_n_output=3)
 
     if not ensemble_output["top_pairs"]:
-        print(f"     ❌ Ensemble failed: tất cả model đều lỗi")
-        return
+        raise RuntimeError(
+            f"{region} ensemble produced no candidates; all sub-models failed or returned empty output"
+        )
 
     top3_str = ", ".join(f"{p:02d}({s:.2f})" for p, s in ensemble_output["top_pairs"])
     consensus_str = ", ".join(f"{p:02d}" for p in ensemble_output.get("consensus_pairs", []))
     contributing = ", ".join(ensemble_output["contributing_models"])
 
-    print(f"     ✅ Top 3 VIP: [{top3_str}]")
+    print(f"     ✅ Top 3 statistical signals: [{top3_str}]")
     print(f"     📊 Contributing Models: {len(ensemble_output['contributing_models'])}")
     if consensus_str:
         print(f"     🤝 Consensus: [{consensus_str}]")
@@ -251,8 +252,8 @@ async def run_ensemble_for_region(
         total_expected = len(provs_to_run) * TOTAL_MODELS_PER_PROVINCE
         active_count = len(ensemble_output['contributing_models'])
 
-        msg = f"🎯 <b>DỰ ĐOÁN {region} — {date_str} ({dow_str})</b>\n"
-        msg += f"<i>🤖 Multi-Model Ensemble v3.2 (5 Models)</i>\n\n"
+        msg = f"🎯 <b>TÍN HIỆU THỐNG KÊ {region} — {date_str} ({dow_str})</b>\n"
+        msg += f"<i>🤖 Multi-Model Ensemble v3.2 — xếp hạng xác suất tương đối</i>\n\n"
 
         if region == "XSMN":
             province_map = XSMNCrawler().PROVINCE_MAP
@@ -266,8 +267,8 @@ async def run_ensemble_for_region(
 
         pairs_str = f"<code>{p1:02d}</code>, <code>{p2:02d}</code>, <code>{p3:02d}</code>"
 
-        msg += f"🔥 <b>TOP 3 VIP:</b> {pairs_str}\n"
-        msg += f"   <i>Score: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
+        msg += f"📊 <b>Top 3 tín hiệu:</b> {pairs_str}\n"
+        msg += f"   <i>Score tương đối: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
         msg += f"   <i>Models Active: {active_count}/{total_expected}</i>\n\n"
 
         # Model details per province
@@ -285,15 +286,15 @@ async def run_ensemble_for_region(
                     pairs = ", ".join(f"{p:02d}" for p, _ in r["top_pairs"][:3])
                     msg += f"   🔹 {m_short}: [{pairs}]\n"
 
-        msg += f"\n<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>"
+        msg += f"\n<i>Hit khi 2 số cuối bất kỳ giải có mặt trong 3 cặp trên. Không phải cam kết chắc thắng.</i>"
 
-        await notifier.send_message(msg)
+        await notifier.send_message(msg, config_key=f"predict_ensemble_{region.lower()}")
 
         # Gửi scoring log riêng nếu có (tránh exceed Telegram 4096 char limit)
         if scoring_log_msg:
             max_len = 4000
             if len(scoring_log_msg) <= max_len:
-                await notifier.send_message(scoring_log_msg)
+                await notifier.send_message(scoring_log_msg, config_key="predict_ensemble_scoring_log")
             else:
                 # Chunk scoring log
                 chunks = scoring_log_msg.split('\n\n')
@@ -301,12 +302,12 @@ async def run_ensemble_for_region(
                 for chunk in chunks:
                     if len(current_chunk) + len(chunk) + 2 > max_len:
                         if current_chunk:
-                            await notifier.send_message(current_chunk)
+                            await notifier.send_message(current_chunk, config_key="predict_ensemble_scoring_log")
                         current_chunk = chunk
                     else:
                         current_chunk += ("\n\n" + chunk) if current_chunk else chunk
                 if current_chunk:
-                    await notifier.send_message(current_chunk)
+                    await notifier.send_message(current_chunk, config_key="predict_ensemble_scoring_log")
 
         print(f"\n📱 Telegram notification sent for {region}!")
 
@@ -315,7 +316,7 @@ async def run_ensemble_for_region(
 
 async def main():
     parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (v3.2 — 5 Models)")
-    parser.add_argument("--date", type=str, help="Ngày dự đoán (YYYY-MM-DD). Mặc định = hôm nay")
+    parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 
     # Target date
@@ -327,7 +328,7 @@ async def main():
 
     db = LotteryDB()
     storage = LotteryStorage()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="predict_ensemble")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Chạy XSMB

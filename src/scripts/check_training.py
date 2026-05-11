@@ -105,7 +105,7 @@ def trigger_training(region: str, province: str | None, weekday: int | None = No
 
 async def main():
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="check_training")
 
     # Lấy tất cả model active (bao gồm cả weekday)
     models = db.supabase.table("model_registry")\

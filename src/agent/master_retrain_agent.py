@@ -263,7 +263,7 @@ async def _send_agent_report(
         for a in skip_list:
             msg += f"  • {a['label']}: <i>{a['reason']}</i>\n"
 
-    await notifier.send_message(msg)
+    await notifier.send_message(msg, config_key="master_retrain_agent")
 
 
 # ─── Standalone entrypoint ───────────────────────────────────────────────────
@@ -281,7 +281,7 @@ async def main():
     target_date = date.fromisoformat(args.date) if args.date else date.today()
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="master_retrain_agent")
 
     # Lấy kết quả verify từ DB
     preds = (

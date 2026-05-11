@@ -1,0 +1,72 @@
+name: 11 - Walk-forward Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: 'Start date (YYYY-MM-DD). Blank = use --days'
+        required: false
+        type: string
+      to_date:
+        description: 'End date (YYYY-MM-DD). Blank = today'
+        required: false
+        type: string
+      days:
+        description: 'Lookback days when from_date is blank'
+        required: false
+        default: '90'
+        type: string
+      region:
+        description: 'Optional region filter (XSMB or XSMN)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  backtest:
+    name: Walk-forward Backtest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PYTHONPATH: .
+        run: |
+          mkdir -p reports
+          DAYS="${{ inputs.days }}"
+          if [ -z "$DAYS" ]; then
+            DAYS="90"
+          fi
+          CMD=(python src/scripts/backtest_walk_forward.py --days "$DAYS" --output-json "reports/backtest_${{ github.run_id }}.json")
+          if [ -n "${{ inputs.from_date }}" ]; then
+            CMD+=(--from-date "${{ inputs.from_date }}")
+          fi
+          if [ -n "${{ inputs.to_date }}" ]; then
+            CMD+=(--to-date "${{ inputs.to_date }}")
+          fi
+          if [ -n "${{ inputs.region }}" ]; then
+            CMD+=(--region "${{ inputs.region }}")
+          fi
+          "${CMD[@]}"
+
+      - name: Upload backtest report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report-${{ github.run_id }}
+          path: reports/backtest_*.json

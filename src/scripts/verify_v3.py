@@ -240,7 +240,7 @@ async def main():
     target_date = date.fromisoformat(args.date) if args.date else date.today()
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="verify_summary")
     await verify_date(db, notifier, target_date)
 
 

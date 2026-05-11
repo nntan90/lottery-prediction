@@ -20,13 +20,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class MockQueryChain:
     """Fluent mock for Supabase query builder."""
-    def __init__(self, data=None):
+    def __init__(self, db, table_name, data=None):
+        self._db = db
+        self._table_name = table_name
         self._data = data or []
     def select(self, *a, **kw): return self
     def eq(self, *a, **kw): return self
     def is_(self, *a, **kw): return self
-    def insert(self, *a, **kw): return self
-    def update(self, *a, **kw): return self
+    def insert(self, payload, *a, **kw):
+        self._db.inserted.setdefault(self._table_name, []).append(payload)
+        return self
+    def update(self, payload, *a, **kw):
+        self._db.updated.setdefault(self._table_name, []).append(payload)
+        return self
     def execute(self):
         result = MagicMock()
         result.data = self._data
@@ -38,13 +44,15 @@ class MockDB:
     def __init__(self, table_responses=None):
         self._responses = table_responses or {}
         self._calls = []
+        self.inserted = {}
+        self.updated = {}
         self.supabase = MagicMock()
         self.supabase.table = self._mock_table
 
     def _mock_table(self, name):
         self._calls.append(name)
         data = self._responses.get(name, [])
-        return MockQueryChain(data)
+        return MockQueryChain(self, name, data)
 
     @property
     def tables_called(self):
@@ -82,14 +90,20 @@ class TestSavePrediction(unittest.TestCase):
         # Should have called prediction_results table
         self.assertIn("prediction_results", db.tables_called)
 
-    def test_strips_non_db_fields(self):
-        """ensemble_method, contributing_models, final_scores, scoring_log should be stripped."""
+    def test_preserves_ensemble_metadata_and_strips_runtime_log(self):
+        """Ensemble metadata should persist; only scoring_log should be stripped."""
         db = MockDB({"prediction_results": []})
         from src.database.prediction_repo import save_prediction
         pred = self._make_prediction()
-        # We verify the logic by checking the function runs without error
         save_prediction(db, pred)
-        # Original dict should still have these fields (no mutation)
+
+        inserted = db.inserted["prediction_results"][0]
+        self.assertEqual(inserted["ensemble_method"], "expert_borda_history_v2")
+        self.assertEqual(inserted["contributing_models"], ["freq_gap", "markov", "xgboost"])
+        self.assertEqual(inserted["final_scores"], [5.36, 3.00, 2.75])
+        self.assertNotIn("scoring_log", inserted)
+
+        # Original dict should still have these fields (no mutation).
         self.assertIn("ensemble_method", pred)
         self.assertIn("scoring_log", pred)
 

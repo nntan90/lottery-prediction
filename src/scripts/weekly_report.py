@@ -620,7 +620,7 @@ async def main():
             week_end = today - timedelta(days=(today.weekday() + 1) % 7)
 
     db = LotteryDB()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="weekly_report")
     await generate_weekly_report(db, notifier, week_end, args.output_dir)
 
 

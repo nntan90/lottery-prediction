@@ -298,6 +298,8 @@ def format_ensemble_result(
         "pair_1": top[0][0],
         "pair_2": top[1][0],
         "pair_3": top[2][0],
+        # Legacy DB columns keep the old prob_* names; ensemble values are
+        # relative scores unless a calibrated model explicitly writes probs.
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],

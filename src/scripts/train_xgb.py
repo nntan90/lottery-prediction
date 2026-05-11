@@ -119,7 +119,7 @@ async def main():
 
     db = LotteryDB()
     storage = LotteryStorage()
-    notifier = LotteryNotifier()
+    notifier = LotteryNotifier(db, default_config_key="train_model")
 
     print(f"\n🚀 Training XGBoost V3: {label} | version={version}")
     print("=" * 60)
