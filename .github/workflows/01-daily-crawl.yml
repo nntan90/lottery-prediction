@@ -3,7 +3,7 @@ name: 01 - Daily Lottery Crawl
 # Chạy hàng ngày lúc 19:00 GMT+7 (12:00 UTC)
 on:
   schedule:
-    - cron: '0 12 * * *'  # 19:00 GMT+7
+    - cron: '0 13 * * *'  # 20:00 GMT+7 (13:00 UTC)
   workflow_dispatch:  # Cho phép chạy thủ công
 
 jobs:

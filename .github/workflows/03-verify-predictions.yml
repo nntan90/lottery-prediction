@@ -1,11 +1,9 @@
 name: 03 - Verify Predictions
 
-# Trigger SAU KHI workflow 01-Daily Crawl hoàn tất
-# Đảm bảo data đã crawl trước khi verify, thay vì dùng cron timing cứng
+# Chạy lúc 20:30 VN (13:30 UTC) sau khi Crawl data hoàn tất lúc 20:00 VN
 on:
-  workflow_run:
-    workflows: ["01 - Daily Lottery Crawl"]
-    types: [completed]
+  schedule:
+    - cron: '30 13 * * *'  # 20:30 GMT+7 (13:30 UTC)
   workflow_dispatch:
 
 jobs:

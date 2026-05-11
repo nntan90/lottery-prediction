@@ -1,9 +1,9 @@
 name: 10 - Weekly System Report
 
 on:
-  # Sáng Thứ 2 hàng tuần lúc 8:00 VNT = 01:00 UTC
+  # Sáng Thứ 2 hàng tuần lúc 6:00 VNT = 23:00 UTC (Chủ Nhật)
   schedule:
-    - cron: '0 1 * * 1'
+    - cron: '0 23 * * 0'
   workflow_dispatch:
     inputs:
       week_end:

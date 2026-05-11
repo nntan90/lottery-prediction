@@ -1,9 +1,9 @@
 name: 04 - Check Training Conditions
 
-# Chạy mỗi Chủ Nhật 21:00 VN (14:00 UTC)
+# Chạy mỗi ngày lúc 22:00 VN (15:00 UTC)
 on:
   schedule:
-    - cron: '0 14 * * 0'
+    - cron: '0 15 * * *'  # 22:00 GMT+7 (15:00 UTC)
   workflow_dispatch:  # Cho phép trigger thủ công
 
 jobs:
