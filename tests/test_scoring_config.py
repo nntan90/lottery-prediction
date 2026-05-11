@@ -41,10 +41,16 @@ class TestScoringConfigValues(unittest.TestCase):
         self.assertEqual(len(BORDA_POINTS), 5)
 
     def test_default_weights(self):
-        """XGBoost should have 2x weight vs rule-based models."""
-        self.assertEqual(DEFAULT_WEIGHTS["freq_gap"], 1.0)
-        self.assertEqual(DEFAULT_WEIGHTS["markov"], 1.0)
-        self.assertEqual(DEFAULT_WEIGHTS["xgboost_core"], 2.0)
+        """All 5 models should have defined weights."""
+        self.assertIn("frequency", DEFAULT_WEIGHTS)
+        self.assertIn("gap_overdue", DEFAULT_WEIGHTS)
+        self.assertIn("markov", DEFAULT_WEIGHTS)
+        self.assertIn("xgboost_core", DEFAULT_WEIGHTS)
+        self.assertIn("lstm", DEFAULT_WEIGHTS)
+        # XGBoost should have highest weight (0.25) — mature ML model
+        self.assertEqual(DEFAULT_WEIGHTS["xgboost_core"], 0.25)
+        # LSTM on-the-fly has lowest weight (0.15) — upgrade after pre-trained deployed
+        self.assertEqual(DEFAULT_WEIGHTS["lstm"], 0.15)
 
     def test_consensus_thresholds(self):
         """Gold=3 models, Silver=2 models."""
@@ -92,13 +98,14 @@ class TestScoringConfigLoader(unittest.TestCase):
 class TestWeightInvariants(unittest.TestCase):
     """Business rule invariants that should never be broken."""
 
-    def test_xgboost_weight_gte_rule_based(self):
-        """XGBoost weight should be >= any rule-based model weight."""
+    def test_ml_weights_gte_rule_based(self):
+        """XGBoost (mature ML) should be >= any rule-based model."""
         xgb_w = DEFAULT_WEIGHTS.get("xgboost_core", 0)
-        for name, w in DEFAULT_WEIGHTS.items():
-            if name != "xgboost_core":
-                self.assertGreaterEqual(xgb_w, w,
-                    f"XGBoost weight ({xgb_w}) should be >= {name} weight ({w})")
+        rule_models = ["frequency", "gap_overdue", "markov"]
+        for rule in rule_models:
+            rule_w = DEFAULT_WEIGHTS.get(rule, 0)
+            self.assertGreaterEqual(xgb_w, rule_w,
+                f"xgboost_core weight ({xgb_w}) should be >= {rule} weight ({rule_w})")
 
     def test_all_weights_positive(self):
         """All model weights must be positive."""

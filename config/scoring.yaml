@@ -1,14 +1,34 @@
 # =============================================================================
-# scoring.yaml — Expert Borda Scoring Configuration (v3.1)
+# scoring.yaml — Expert Borda Scoring Configuration (v3.2 — 5 Models)
 # Externalized from ensemble_engine.py for A/B testing without code changes
 # =============================================================================
+#
+# v3.2 Upgrade: 5 models thay vì 3
+#   - Model 1 (frequency): Pure frequency/hot-cool
+#   - Model 2 (gap_overdue): Pure gap/overdue
+#   - Model 3 (markov): Markov Chain transition
+#   - Model 4 (xgboost_core): XGBoost ML classifier
+#   - Model 5 (lstm): LSTM/GRU sequence model
+#
+# Trọng số khởi đầu (v3.2.1 — calibrated):
+#   Frequency=0.20, Gap=0.20, Markov=0.20, XGBoost=0.25, LSTM=0.15
+# Sau 60-90 ngày backtest, cập nhật lại theo hiệu suất thật.
+# =============================================================================
 
-# --- Model Weights ---
+# --- Model Weights (Starting Weights) ---
 # Higher weight = more influence on final score
+# Tổng không cần = 1.0 (sẽ được normalize trong ensemble engine)
 weights:
-  freq_gap: 1.0          # Rule-based frequency/gap
-  markov: 1.0            # Markov Chain transition
-  xgboost_core: 2.0      # XGBoost ML (AI weighted heavily)
+  frequency: 0.20          # Model 1: Pure frequency/hot-cool
+  gap_overdue: 0.20        # Model 2: Pure gap/overdue
+  markov: 0.20             # Model 3: Markov Chain transition (stable, no training needed)
+  xgboost_core: 0.25       # Model 4: XGBoost ML classifier (mature, 17 features)
+  lstm: 0.15               # Model 5: LSTM/GRU (on-the-fly quality low — increase after pre-trained model deployed)
+
+# --- DEPRECATED v3.1 weights (kept for reference) ---
+# freq_gap: 1.0   ← replaced by frequency + gap_overdue
+# markov: 1.0     ← kept, weight adjusted
+# xgboost_core: 2.0 ← kept, weight adjusted
 
 # --- Borda Points by Rank (1-indexed) ---
 borda_points:
@@ -20,6 +40,7 @@ borda_points:
 
 # --- Consensus Rules ---
 # Bonus when multiple models agree on the same pair
+# With 5 models × N provinces, consensus thresholds scale dynamically
 consensus:
   gold_threshold: 3       # Number of models for Gold consensus
   silver_threshold: 2     # Number of models for Silver consensus
@@ -32,3 +53,15 @@ history:
   overdue_penalty: -2.0   # Appeared >= 2 times in last 3 weeks (likely cooling down)
   sweetspot_bonus: 2.0    # Appeared exactly 1 time (riding the rhythm)
   potential_bonus: 1.0    # Never appeared (building pressure, likely due)
+
+# --- CombSUM Normalization ---
+# If true, normalize each model's scores to [0,1] before aggregation
+# This implements: FinalScore(n) = Σ w_m · s_m(n) where s_m is normalized
+combsum:
+  enabled: true            # Use CombSUM normalization (recommended for mixed score scales)
+  method: "minmax"         # Normalization method: "minmax" or "zscore"
+
+# --- Minimum Model Agreement ---
+# Pair must be selected by at least min_models_agree models to be considered
+# Set to 1 to disable (any model can nominate)
+min_models_agree: 1        # After 60-90 days, consider setting to 2 for robustness

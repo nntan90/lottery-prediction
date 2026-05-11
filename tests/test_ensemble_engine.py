@@ -47,15 +47,15 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertEqual(top_pairs[1], 17)  # Rank 2
         self.assertEqual(top_pairs[2], 88)  # Rank 3
 
-    def test_xgboost_weight_dominates(self):
-        """XGBoost (weight=2.0) should outweigh freq_gap (weight=1.0)."""
+    def test_xgboost_weight_dominates_over_markov(self):
+        """XGBoost (weight=0.25) should outweigh markov (weight=0.20) for same rank."""
         results = [
-            self._make_result("freq_gap", "tp-hcm", [10, 20, 30, 40, 50]),
+            self._make_result("markov", "tp-hcm", [10, 20, 30, 40, 50]),
             self._make_result("xgboost_core", "tp-hcm", [99, 88, 77, 66, 55]),
         ]
         out = compute_global_borda(results, [], top_n_output=3)
         top_pairs = [p for p, _ in out["top_pairs"]]
-        # XGBoost's #1 (99) gets 2.0*5=10, freq_gap's #1 (10) gets 1.0*5=5
+        # CombSUM: XGB #1 (99) gets 0.25*5.0=1.25, Markov #1 (10) gets 0.20*5.0=1.0
         self.assertEqual(top_pairs[0], 99)
 
     def test_consensus_bonus(self):
@@ -100,14 +100,14 @@ class TestComputeGlobalBorda(unittest.TestCase):
     def test_custom_weights_override(self):
         """Custom weights should override defaults."""
         results = [
-            self._make_result("freq_gap", "tp-hcm", [10, 20, 30, 40, 50]),
+            self._make_result("frequency", "tp-hcm", [10, 20, 30, 40, 50]),
             self._make_result("xgboost_core", "tp-hcm", [99, 88, 77, 66, 55]),
         ]
-        # Give freq_gap massive weight
-        custom_w = {"freq_gap": 10.0, "xgboost_core": 0.1}
+        # Give frequency massive weight
+        custom_w = {"frequency": 10.0, "xgboost_core": 0.1}
         out = compute_global_borda(results, [], weights=custom_w, top_n_output=3)
         top_pairs = [p for p, _ in out["top_pairs"]]
-        # freq_gap's #1 (10) gets 10*5=50, xgboost's #1 (99) gets 0.1*5=0.5
+        # CombSUM: frequency #1 (10) gets 10.0*5.0=50, xgboost #1 (99) gets 0.1*5.0=0.5
         self.assertEqual(top_pairs[0], 10)
 
     def test_fault_tolerance_partial_failure(self):

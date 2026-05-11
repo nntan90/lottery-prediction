@@ -1,17 +1,22 @@
 """
-predict_xsmn_ensemble.py
+predict_xsmn_ensemble.py — v3.2 (5-Model Ensemble)
 Orchestration script cho XSMN Multi-Model Ensemble pipeline.
 Chạy bởi GitHub Actions workflow: 07-predict-xsmn-ensemble.yml
 
+Models (v3.2):
+  1. Frequency/Hot-Cool  → Top 5
+  2. Gap/Overdue          → Top 5
+  3. Markov Chain         → Top 5
+  4. XGBoost              → Top 5
+  5. LSTM/GRU             → Top 5
+  → Ensemble (Borda + CombSUM) → Top 3
+
 Flow mỗi ngày:
-  1. Resolve TARGET_PROVINCES (2 đài theo thứ)
-  2. Với mỗi province:
-     a. Model A: Freq/Gap  → Top 5
-     b. Model B: Markov    → Top 5
-     c. Model C: XGBoost   → Top 5
-     d. Ensemble (Borda)   → Top 3
-  3. Ghi prediction_results + model_predictions
-  4. Gửi Telegram notification
+  1. Resolve TARGET_PROVINCES (2-4 đài theo thứ)
+  2. Với mỗi province: chạy 5 models
+  3. Global Ensemble aggregation
+  4. Ghi prediction_results + model_predictions
+  5. Gửi Telegram notification
 
 Usage:
   python src/scripts/predict_xsmn_ensemble.py
@@ -33,9 +38,11 @@ from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces, get_dow_label
-from src.xsmn_ensemble.model_freq_gap import predict_freq_gap
+from src.xsmn_ensemble.model_frequency import predict_frequency
+from src.xsmn_ensemble.model_gap import predict_gap
 from src.xsmn_ensemble.model_markov import predict_markov
 from src.xsmn_ensemble.model_xgboost import predict_xgboost
+from src.xsmn_ensemble.model_lstm import predict_lstm
 from src.xsmn_ensemble.ensemble_engine import (
     compute_global_borda,
     format_ensemble_result,
@@ -44,7 +51,7 @@ from src.xsmn_ensemble.ensemble_engine import (
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-# _save_prediction and _save_model_prediction are now in src/database/prediction_repo.py
+TOTAL_MODELS_PER_PROVINCE = 5  # 5 models per province
 
 
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
@@ -53,7 +60,7 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
     # If no provinces (XSMB), we use [None] to iterate once
     provs_to_check = provinces if provinces else [None]
     target_weekday = target_date.weekday()
-    
+
     for prov in provs_to_check:
         # Lấy 30 kỳ gần nhất để lọc ra 3 kỳ cùng thứ
         q1 = db.supabase.table("lottery_draws") \
@@ -64,10 +71,10 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
             .limit(30)
         q1 = q1.eq("province", prov) if prov else q1.is_("province", "null")
         draws = q1.execute()
-        
+
         if not draws.data:
             continue
-            
+
         # Lọc cùng thứ
         same_weekday_dates = []
         for d in draws.data:
@@ -76,10 +83,10 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
                 same_weekday_dates.append(d["draw_date"])
                 if len(same_weekday_dates) == limit_per_province:
                     break
-        
+
         if not same_weekday_dates:
             continue
-            
+
         # Lấy tails của các kỳ này
         q2 = db.supabase.table("tails_2d") \
             .select("tail_2d") \
@@ -87,10 +94,10 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
             .in_("draw_date", same_weekday_dates)
         q2 = q2.eq("province", prov) if prov else q2.is_("province", "null")
         t_data = q2.execute()
-            
+
         if t_data.data:
             tails.extend([int(row["tail_2d"]) for row in t_data.data])
-            
+
     return tails
 
 
@@ -103,7 +110,8 @@ async def run_models_for_target(
     tmpdir: str,
 ) -> list:
     """
-    Chạy 3 models cho region/province và lưu logs. Trả về list model_results.
+    Chạy 5 models cho region/province và lưu logs. Trả về list model_results.
+    Fault-tolerant: 1-2 model lỗi → ensemble vẫn chạy.
     """
     print(f"\n  {'='*50}")
     print(f"  📍 Region: {region} | Province: {province or 'ALL'}")
@@ -111,35 +119,63 @@ async def run_models_for_target(
 
     model_results = []
 
-    # Model A: Freq/Gap
-    print(f"  🔹 Model A (Freq/Gap)...")
-    result_a = predict_freq_gap(db, province, target_date, region=region, n_draws=100, top_n=5)
-    model_results.append(result_a)
-    if result_a["status"] == "success":
-        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_a["top_pairs"])
-        print(f"     ✅ Top 5: [{pairs_str}] (n={result_a['n_draws_used']} kỳ, {result_a['execution_time_ms']}ms)")
+    # ── Model 1: Frequency/Hot-Cool ──
+    print(f"  🔹 Model 1 (Frequency/Hot-Cool)...")
+    result_1 = predict_frequency(db, province, target_date, region=region, n_draws=100, top_n=5)
+    model_results.append(result_1)
+    if result_1["status"] == "success":
+        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_1["top_pairs"])
+        print(f"     ✅ Top 5: [{pairs_str}] (n={result_1['n_draws_used']} kỳ, {result_1['execution_time_ms']}ms)")
     else:
-        print(f"     ❌ Error: {result_a['error_message']}")
+        print(f"     ❌ Error: {result_1['error_message']}")
 
-    # Model B: Markov
-    print(f"  🔹 Model B (Markov)...")
-    result_b = predict_markov(db, province, target_date, region=region, n_draws=100, top_n=5)
-    model_results.append(result_b)
-    if result_b["status"] == "success":
-        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_b["top_pairs"])
-        print(f"     ✅ Top 5: [{pairs_str}] (n={result_b['n_draws_used']} kỳ, {result_b['execution_time_ms']}ms)")
+    # ── Model 2: Gap/Overdue ──
+    print(f"  🔹 Model 2 (Gap/Overdue)...")
+    result_2 = predict_gap(db, province, target_date, region=region, n_draws=100, top_n=5)
+    model_results.append(result_2)
+    if result_2["status"] == "success":
+        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_2["top_pairs"])
+        print(f"     ✅ Top 5: [{pairs_str}] (n={result_2['n_draws_used']} kỳ, {result_2['execution_time_ms']}ms)")
     else:
-        print(f"     ❌ Error: {result_b['error_message']}")
+        print(f"     ❌ Error: {result_2['error_message']}")
 
-    # Model C: XGBoost
-    print(f"  🔹 Model C (XGBoost)...")
-    result_c = predict_xgboost(db, storage, province, target_date, region=region, n_draws=120, top_n=5, tmpdir=tmpdir)
-    model_results.append(result_c)
-    if result_c["status"] == "success":
-        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_c["top_pairs"])
-        print(f"     ✅ Top 5: [{pairs_str}] ({result_c['execution_time_ms']}ms)")
+    # ── Model 3: Markov ──
+    print(f"  🔹 Model 3 (Markov)...")
+    result_3 = predict_markov(db, province, target_date, region=region, n_draws=100, top_n=5)
+    model_results.append(result_3)
+    if result_3["status"] == "success":
+        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_3["top_pairs"])
+        print(f"     ✅ Top 5: [{pairs_str}] (n={result_3['n_draws_used']} kỳ, {result_3['execution_time_ms']}ms)")
     else:
-        print(f"     ⚠️  XGBoost skipped: {result_c['error_message']}")
+        print(f"     ❌ Error: {result_3['error_message']}")
+
+    # ── Model 4: XGBoost ──
+    print(f"  🔹 Model 4 (XGBoost)...")
+    result_4 = predict_xgboost(db, storage, province, target_date, region=region, n_draws=120, top_n=5, tmpdir=tmpdir)
+    model_results.append(result_4)
+    if result_4["status"] == "success":
+        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_4["top_pairs"])
+        print(f"     ✅ Top 5: [{pairs_str}] ({result_4['execution_time_ms']}ms)")
+    else:
+        print(f"     ⚠️  XGBoost skipped: {result_4['error_message']}")
+
+    # ── Model 5: LSTM/GRU ──
+    print(f"  🔹 Model 5 (LSTM/GRU)...")
+    result_5 = predict_lstm(
+        db, storage=storage, province=province, target_date=target_date,
+        region=region, n_draws=100, seq_len=30, top_n=5, tmpdir=tmpdir,
+    )
+    model_results.append(result_5)
+    if result_5["status"] == "success":
+        pairs_str = ", ".join(f"{p:02d}" for p, _ in result_5["top_pairs"])
+        version_str = f" [{result_5.get('model_version', '')}]" if result_5.get('model_version') else ""
+        print(f"     ✅ Top 5: [{pairs_str}]{version_str} ({result_5['execution_time_ms']}ms)")
+    else:
+        print(f"     ⚠️  LSTM skipped: {result_5['error_message']}")
+
+    # ── Summary ──
+    success_count = sum(1 for r in model_results if r["status"] == "success")
+    print(f"\n  📊 Models Active: {success_count}/{TOTAL_MODELS_PER_PROVINCE}")
 
     # Save model_predictions logs
     for mr in model_results:
@@ -162,14 +198,14 @@ async def run_ensemble_for_region(
     tmpdir: str,
 ):
     print(f"\n{'='*60}")
-    print(f"🎯 {region} MULTI-MODEL ENSEMBLE PREDICTION")
+    print(f"🎯 {region} MULTI-MODEL ENSEMBLE PREDICTION (v3.2 — 5 Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     if region == "XSMN":
         print(f"🏢 Target provinces ({len(provinces)}): {provinces}")
     print(f"{'='*60}")
 
     all_model_results = []
-    
+
     # Run models per province (or just once if provinces is empty, e.g. XSMB)
     provs_to_run = provinces if provinces else [None]
     for province in provs_to_run:
@@ -192,7 +228,7 @@ async def run_ensemble_for_region(
     top3_str = ", ".join(f"{p:02d}({s:.2f})" for p, s in ensemble_output["top_pairs"])
     consensus_str = ", ".join(f"{p:02d}" for p in ensemble_output.get("consensus_pairs", []))
     contributing = ", ".join(ensemble_output["contributing_models"])
-    
+
     print(f"     ✅ Top 3 VIP: [{top3_str}]")
     print(f"     📊 Contributing Models: {len(ensemble_output['contributing_models'])}")
     if consensus_str:
@@ -201,9 +237,9 @@ async def run_ensemble_for_region(
     # Lưu prediction chung với province="all" (hoặc None cho XSMB)
     save_province = "all" if region == "XSMN" else None
     prediction = format_ensemble_result(region, save_province, ensemble_output, target_date)
-    
+
     scoring_log_msg = prediction.pop('scoring_log', '')
-    
+
     save_prediction(db, prediction)
 
     # Telegram notification
@@ -211,8 +247,12 @@ async def run_ensemble_for_region(
         date_str = target_date.strftime("%d/%m/%Y")
         dow_str = get_dow_label(target_date)
 
+        # Count active models
+        total_expected = len(provs_to_run) * TOTAL_MODELS_PER_PROVINCE
+        active_count = len(ensemble_output['contributing_models'])
+
         msg = f"🎯 <b>DỰ ĐOÁN {region} — {date_str} ({dow_str})</b>\n"
-        msg += f"<i>🤖 Multi-Model Ensemble</i>\n\n"
+        msg += f"<i>🤖 Multi-Model Ensemble v3.2 (5 Models)</i>\n\n"
 
         if region == "XSMN":
             province_map = XSMNCrawler().PROVINCE_MAP
@@ -228,8 +268,24 @@ async def run_ensemble_for_region(
 
         msg += f"🔥 <b>TOP 3 VIP:</b> {pairs_str}\n"
         msg += f"   <i>Score: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
-        msg += f"   <i>Models Active: {len(ensemble_output['contributing_models'])}/{(len(provs_to_run)*3)}</i>\n\n"
-        msg += f"<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>"
+        msg += f"   <i>Models Active: {active_count}/{total_expected}</i>\n\n"
+
+        # Model details per province
+        for prov in provs_to_run:
+            prov_results = [r for r in all_model_results
+                           if r.get("province") == prov and r.get("status") == "success"]
+            if prov_results:
+                prov_name = prov or "ALL"
+                msg += f"📍 <b>{prov_name}:</b>\n"
+                for r in prov_results:
+                    m_short = {
+                        "frequency": "Freq", "gap_overdue": "Gap",
+                        "markov": "Markov", "xgboost_core": "XGB", "lstm": "LSTM",
+                    }.get(r["model_name"], r["model_name"])
+                    pairs = ", ".join(f"{p:02d}" for p, _ in r["top_pairs"][:3])
+                    msg += f"   🔹 {m_short}: [{pairs}]\n"
+
+        msg += f"\n<i>Trúng nếu 2 số cuối bất kỳ giải ≡ 1 trong 3 cặp trên</i>"
 
         await notifier.send_message(msg)
 
@@ -258,7 +314,7 @@ async def run_ensemble_for_region(
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction")
+    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (v3.2 — 5 Models)")
     parser.add_argument("--date", type=str, help="Ngày dự đoán (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 

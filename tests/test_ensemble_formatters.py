@@ -44,7 +44,7 @@ class TestFormatEnsembleResult(unittest.TestCase):
         self.assertEqual(result["pair_2"], 17)
         self.assertEqual(result["pair_3"], 88)
         self.assertAlmostEqual(result["prob_1"], 5.36)
-        self.assertEqual(result["model_version"], "ensemble_v3.1")
+        self.assertEqual(result["model_version"], "ensemble_v3.2")
         self.assertIsNone(result["hit"])  # Not verified yet
         self.assertIn("scoring_log", result)
 
@@ -105,17 +105,18 @@ class TestFormatModelPredictionLog(unittest.TestCase):
         self.assertEqual(log["status"], "success")
 
     def test_model_type_rule_based(self):
-        """freq_gap and markov should be classified as rule_based."""
-        for name in ("freq_gap", "markov"):
+        """frequency, gap_overdue, freq_gap, and markov should be classified as rule_based."""
+        for name in ("frequency", "gap_overdue", "freq_gap", "markov"):
             mr = self._make_model_result(name, [1, 2, 3, 4, 5])
             log = format_model_prediction_log("XSMN", None, mr, date(2026, 5, 10))
             self.assertEqual(log["model_type"], "rule_based", f"{name} should be rule_based")
 
     def test_model_type_ml(self):
-        """xgboost_core should be classified as ml."""
-        mr = self._make_model_result("xgboost_core", [1, 2, 3, 4, 5])
-        log = format_model_prediction_log("XSMN", None, mr, date(2026, 5, 10))
-        self.assertEqual(log["model_type"], "ml")
+        """xgboost_core and lstm should be classified as ml."""
+        for name in ("xgboost_core", "lstm"):
+            mr = self._make_model_result(name, [1, 2, 3, 4, 5])
+            log = format_model_prediction_log("XSMN", None, mr, date(2026, 5, 10))
+            self.assertEqual(log["model_type"], "ml", f"{name} should be ml")
 
     def test_fewer_than_5_pairs_padded(self):
         """Should pad to 5 with None when fewer pairs."""
