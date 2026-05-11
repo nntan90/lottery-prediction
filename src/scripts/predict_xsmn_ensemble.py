@@ -330,8 +330,10 @@ async def main():
     notifier = LotteryNotifier()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # XSMB pipeline giữ nguyên 100% tại predict_v3.py / 02-predict.yml
-        # Script này CHỈ xử lý XSMN theo agents.md rule
+        # Chạy XSMB
+        print(f"\n{'='*60}")
+        print("🎯 BẮT ĐẦU CHẠY ENSEMBLE CHO XSMB")
+        await run_ensemble_for_region("XSMB", target_date, [], db, storage, notifier, tmpdir)
 
         # Chạy XSMN
         xsmn_provinces = get_target_provinces(target_date)
