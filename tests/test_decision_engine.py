@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from datetime import date
 from src.agent.decision_engine import DecisionEngine, DecisionResult
+from src.agent.hyperparameter_strategy import build_train_args, recommend_params
 
 
 class MockQueryBuilder:
@@ -65,6 +66,52 @@ class TestDecisionEngine(unittest.TestCase):
         self.assertFalse(result.should_retrain)
         self.assertEqual(result.action_type, "skipped")
 
+    def test_three_recent_misses_trigger_retrain_even_when_metric_ok(self):
+        """3 kỳ gần nhất đều miss → retrain dù validation metric cũ vẫn OK."""
+        engine = DecisionEngine(auc_threshold=0.55, hit_rate_threshold=0.40)
+        db = MockDB({
+            "model_registry": [{
+                "metric_auc": 0.65,
+                "metric_hit_rate": 0.50,
+                "trained_at": "2026-05-01T00:00:00Z",
+                "version": "v3",
+            }],
+            "prediction_results": [
+                {"prediction_date": "2026-05-10", "hit": False},
+                {"prediction_date": "2026-05-09", "hit": False},
+                {"prediction_date": "2026-05-08", "hit": False},
+            ],
+            "agent_actions": [],
+        })
+        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 10))
+
+        self.assertTrue(result.should_retrain)
+        self.assertEqual(result.action_type, "retrain_triggered")
+        self.assertEqual(result.consecutive_fails, 3)
+        self.assertIn("3_miss_streak", result.reason)
+
+    def test_three_recent_misses_override_cooldown(self):
+        """3-miss streak là hard trigger để sửa model sai ngay."""
+        engine = DecisionEngine(min_days_since_retrain=14)
+        db = MockDB({
+            "model_registry": [{
+                "metric_auc": 0.66,
+                "metric_hit_rate": 0.55,
+                "trained_at": "2026-05-01T00:00:00Z",
+                "version": "v3",
+            }],
+            "prediction_results": [
+                {"prediction_date": "2026-05-10", "hit": False},
+                {"prediction_date": "2026-05-09", "hit": False},
+                {"prediction_date": "2026-05-08", "hit": False},
+            ],
+            "agent_actions": [{"action_date": "2026-05-09", "old_metric_auc": 0.66}],
+        })
+        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 10))
+
+        self.assertTrue(result.should_retrain)
+        self.assertIn("cooldown_override", result.reason)
+
     def test_miss_metric_bad_no_model_retrain(self):
         """Miss + no model found (no metrics) → retrain triggered."""
         engine = DecisionEngine()
@@ -102,6 +149,27 @@ class TestPickStrategy(unittest.TestCase):
     def test_no_improve_1_high_fails(self):
         """no_improve=1 + consecutive_fails>=5 → full_reset."""
         self.assertEqual(DecisionEngine._pick_strategy(5, 1), "full_reset")
+
+
+class TestRecommendParams(unittest.TestCase):
+    """Tests for context-aware hyperparameter recommendation."""
+
+    def test_three_miss_streak_forces_retrain_and_tunes_params(self):
+        old_params, new_params = recommend_params(
+            "boost_estimators",
+            consecutive_fails=3,
+            old_auc=0.51,
+            old_hit_rate=0.20,
+        )
+        args = build_train_args("XSMN", "tp-hcm", 5, new_params)
+
+        self.assertEqual(old_params["n_estimators"], 300)
+        self.assertTrue(new_params["_force"])
+        self.assertGreaterEqual(new_params["n_estimators"], 500)
+        self.assertLessEqual(new_params["learning_rate"], 0.03)
+        self.assertGreaterEqual(new_params["scale_pos_weight"], 2.5)
+        self.assertLessEqual(new_params["max_depth"], 3)
+        self.assertIn("--force", args)
 
 
 if __name__ == "__main__":

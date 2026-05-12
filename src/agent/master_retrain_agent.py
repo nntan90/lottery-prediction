@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.agent.decision_engine import DecisionEngine
-from src.agent.hyperparameter_strategy import get_params, build_train_args, describe_strategy
+from src.agent.hyperparameter_strategy import recommend_params, build_train_args, describe_strategy
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -187,7 +187,12 @@ async def run_agent(
         train_success = None
 
         if decision.should_retrain:
-            old_params, new_params = get_params(decision.strategy)
+            old_params, new_params = recommend_params(
+                decision.strategy,
+                consecutive_fails=decision.consecutive_fails,
+                old_auc=decision.old_metric_auc,
+                old_hit_rate=decision.old_hit_rate,
+            )
             strategy_desc = describe_strategy(decision.strategy, old_params, new_params)
             print(f"     📊 Strategy: {strategy_desc}")
 

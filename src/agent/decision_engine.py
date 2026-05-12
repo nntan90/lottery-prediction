@@ -4,10 +4,10 @@ Rule-based decision engine cho Master Retrain Agent.
 
 Logic:
   1. Nếu đài hôm nay HIT (hit=True) → NO_ACTION
-  2. Lấy model active của đài từ model_registry → metric_auc, metric_hit_rate, trained_at
-  3. Kiểm tra metric per-station: AUC < 0.55 HOẶC hit_rate < 0.40
-  4. Kiểm tra cooldown: chưa retrain trong 14 ngày (2-3 kỳ/weekday)
-  5. Nếu MISS + metric kém + cooldown OK → RETRAIN với strategy phù hợp
+  2. Đếm chuỗi miss gần nhất của đúng model/station đó
+  3. Nếu MISS 3 kỳ gần nhất → RETRAIN, kể cả metric cũ vẫn OK
+  4. Nếu chưa đủ 3 miss, dùng metric gate: AUC < 0.55 HOẶC hit_rate < 0.40
+  5. Kiểm tra cooldown cho retrain do metric kém; 3-miss streak là hard trigger
      - Strategy được chọn dựa trên consecutive_fails VÀ lịch sử AUC improvement
      - Nếu AUC không cải thiện sau nhiều lần retrain → leo thang strategy nhanh hơn
 """
@@ -22,6 +22,7 @@ DEFAULT_AUC_THRESHOLD = 0.55
 DEFAULT_HIT_RATE_THRESHOLD = 0.40
 DEFAULT_MIN_DAYS_SINCE_RETRAIN = 14  # cooldown ngày (2-3 kỳ/weekday cho XSMB weekday)
 DEFAULT_MAX_RETRAIN_NO_IMPROVE = 3   # số lần retrain không cải thiện AUC → leo thang strategy
+DEFAULT_FAIL_STREAK_RETRAIN_THRESHOLD = 3
 
 
 @dataclass
@@ -47,10 +48,12 @@ class DecisionEngine:
         auc_threshold: float = DEFAULT_AUC_THRESHOLD,
         hit_rate_threshold: float = DEFAULT_HIT_RATE_THRESHOLD,
         min_days_since_retrain: int = DEFAULT_MIN_DAYS_SINCE_RETRAIN,
+        fail_streak_retrain_threshold: int = DEFAULT_FAIL_STREAK_RETRAIN_THRESHOLD,
     ):
         self.auc_threshold = auc_threshold
         self.hit_rate_threshold = hit_rate_threshold
         self.min_days_since_retrain = min_days_since_retrain
+        self.fail_streak_retrain_threshold = fail_streak_retrain_threshold
 
     def analyze(
         self,
@@ -98,25 +101,39 @@ class DecisionEngine:
         old_hit_rate = registry.get("metric_hit_rate") if registry else None
         trained_at_str = registry.get("trained_at") if registry else None
 
-        # Bước 3: Kiểm tra metric per-station
+        # Bước 3: Đếm consecutive fails gần nhất.
+        # Với XSMB weekday model, chỉ đếm kỳ cùng weekday; với XSMN province,
+        # query đã giới hạn đúng province nên đây là các kỳ quay gần nhất của tỉnh.
+        consecutive_fails = self._count_consecutive_fails(db, region, province, target_date, weekday)
+        fail_streak_trigger = consecutive_fails >= self.fail_streak_retrain_threshold
+
+        # Bước 4: Kiểm tra metric per-station. Metric OK vẫn bị override nếu
+        # model đã miss đủ 3 kỳ gần nhất, đúng mục tiêu agent tự sửa model sai.
         metric_bad = self._is_metric_bad(old_auc, old_hit_rate)
-        if not metric_bad:
+        if not metric_bad and not fail_streak_trigger:
+            hit_rate_text = f"{old_hit_rate:.0%}" if old_hit_rate is not None else "N/A"
             return DecisionResult(
                 should_retrain=False,
                 action_type="skipped",
                 reason=(
                     f"Miss hôm nay nhưng metric vẫn OK "
-                    f"(AUC={old_auc}, hit_rate={old_hit_rate:.0%} nếu có)"
+                    f"(AUC={old_auc}, hit_rate={hit_rate_text}, "
+                    f"fail_streak={consecutive_fails}/{self.fail_streak_retrain_threshold})"
                 ),
                 strategy=None,
-                consecutive_fails=1,
+                consecutive_fails=consecutive_fails,
                 old_metric_auc=old_auc,
                 old_hit_rate=old_hit_rate,
             )
 
-        # Bước 4: Cooldown — đã retrain gần đây chưa?
+        # Bước 5: Cooldown — đã retrain gần đây chưa?
+        # 3-miss streak là hard trigger nên được phép override cooldown.
         days_since_retrain = self._days_since_last_retrain(db, region, province, target_date, weekday=weekday)
-        if days_since_retrain is not None and days_since_retrain < self.min_days_since_retrain:
+        if (
+            days_since_retrain is not None
+            and days_since_retrain < self.min_days_since_retrain
+            and not fail_streak_trigger
+        ):
             return DecisionResult(
                 should_retrain=False,
                 action_type="skipped",
@@ -130,10 +147,6 @@ class DecisionEngine:
                 old_hit_rate=old_hit_rate,
             )
 
-        # Bước 5: Đếm consecutive fails gần nhất để chọn strategy
-        # → Với XSMB weekday model, chỉ đếm kỳ cùng weekday
-        consecutive_fails = self._count_consecutive_fails(db, region, province, target_date, weekday)
-
         # Bước 6: Kiểm tra lịch sử AUC improvement sau các lần retrain trước
         # Nếu đã retrain nhiều lần mà AUC vẫn không cải thiện → leo thang strategy nhanh hơn
         retrain_no_improve_count = self._count_retrain_without_auc_improvement(
@@ -143,10 +156,16 @@ class DecisionEngine:
         strategy = self._pick_strategy(consecutive_fails, retrain_no_improve_count)
 
         reason_parts = [f"Miss hôm nay"]
+        if fail_streak_trigger:
+            reason_parts.append(
+                f"3_miss_streak={consecutive_fails}>={self.fail_streak_retrain_threshold}"
+            )
         if old_auc is not None and old_auc < self.auc_threshold:
             reason_parts.append(f"AUC={old_auc:.3f}<{self.auc_threshold}")
         if old_hit_rate is not None and old_hit_rate < self.hit_rate_threshold:
             reason_parts.append(f"hit_rate={old_hit_rate:.0%}<{self.hit_rate_threshold:.0%}")
+        if days_since_retrain is not None and days_since_retrain < self.min_days_since_retrain:
+            reason_parts.append(f"cooldown_override={days_since_retrain}d")
         if retrain_no_improve_count > 0:
             reason_parts.append(f"no_improve={retrain_no_improve_count}lần")
         reason_parts.append(f"strategy={strategy}")

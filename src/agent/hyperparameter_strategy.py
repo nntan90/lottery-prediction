@@ -94,6 +94,43 @@ def get_params(strategy: str) -> Tuple[dict, dict]:
     return DEFAULT_PARAMS.copy(), new_params
 
 
+def recommend_params(
+    strategy: str,
+    *,
+    consecutive_fails: int = 0,
+    old_auc: float | None = None,
+    old_hit_rate: float | None = None,
+    fail_streak_threshold: int = 3,
+) -> Tuple[dict, dict]:
+    """
+    Đề xuất hyperparameters theo ngữ cảnh model vừa fail.
+
+    Agent vẫn dùng strategy làm khung chính, nhưng tự tinh chỉnh thêm theo:
+      - fail_streak >= 3: bắt buộc retrain, bật --force cho model ít data
+      - AUC sát random: tăng scale_pos_weight để model chú ý class hit=True
+      - hit_rate thấp: tăng regularization để giảm overfit vào nhiễu ngắn hạn
+
+    Returns:
+        (old_params, new_params) để truyền tiếp vào build_train_args().
+    """
+    old_params, new_params = get_params(strategy)
+
+    if consecutive_fails >= fail_streak_threshold:
+        new_params["_force"] = True
+        new_params["n_estimators"] = max(int(new_params.get("n_estimators", 0)), 500)
+        new_params["learning_rate"] = min(float(new_params.get("learning_rate", 0.05)), 0.03)
+
+    if old_auc is not None and old_auc <= 0.52:
+        new_params["scale_pos_weight"] = max(float(new_params.get("scale_pos_weight", 1.0)), 2.5)
+
+    if old_hit_rate is not None and old_hit_rate <= 0.25:
+        new_params["max_depth"] = min(int(new_params.get("max_depth", 4)), 3)
+        new_params["subsample"] = min(float(new_params.get("subsample", 0.8)), 0.75)
+        new_params["colsample_bytree"] = min(float(new_params.get("colsample_bytree", 0.8)), 0.75)
+
+    return old_params, new_params
+
+
 def build_train_args(region: str, province: str | None, weekday: int | None, new_params: dict) -> list[str]:
     """
     Xây dựng danh sách arguments để truyền vào train_xgb.py thông qua subprocess.
