@@ -1,9 +1,10 @@
 name: 01 - Daily Lottery Crawl
 
-# Chạy hàng ngày lúc 21:30 GMT+7 (14:30 UTC)
+# Chạy hàng ngày lúc 21:47 GMT+7 (14:47 UTC).
+# Dùng phút lẻ để giảm rủi ro GitHub Actions schedule bị delay/drop ở mốc :00/:30.
 on:
   schedule:
-    - cron: '30 14 * * *'  # 21:30 GMT+7 (14:30 UTC)
+    - cron: '47 14 * * *'  # 21:47 GMT+7 (14:47 UTC)
   workflow_dispatch:  # Cho phép chạy thủ công
 
 jobs:
