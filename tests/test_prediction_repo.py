@@ -24,16 +24,30 @@ class MockQueryChain:
         self._db = db
         self._table_name = table_name
         self._data = data or []
+        self._action = None
+        self._payload = None
     def select(self, *a, **kw): return self
     def eq(self, *a, **kw): return self
     def is_(self, *a, **kw): return self
     def insert(self, payload, *a, **kw):
-        self._db.inserted.setdefault(self._table_name, []).append(payload)
+        self._action = "insert"
+        self._payload = payload
         return self
     def update(self, payload, *a, **kw):
-        self._db.updated.setdefault(self._table_name, []).append(payload)
+        self._action = "update"
+        self._payload = payload
         return self
     def execute(self):
+        if self._db.should_raise_schema_cache_error(self._table_name, self._payload):
+            raise Exception(
+                "Could not find the 'contributing_models' column of "
+                "'prediction_results' in the schema cache PGRST204"
+            )
+        if self._action == "insert":
+            self._db.inserted.setdefault(self._table_name, []).append(self._payload)
+        elif self._action == "update":
+            self._db.updated.setdefault(self._table_name, []).append(self._payload)
+
         result = MagicMock()
         result.data = self._data
         return result
@@ -41,9 +55,11 @@ class MockQueryChain:
 
 class MockDB:
     """Mock LotteryDB with per-table data and call tracking."""
-    def __init__(self, table_responses=None):
+    def __init__(self, table_responses=None, fail_prediction_metadata_once=False):
         self._responses = table_responses or {}
         self._calls = []
+        self._fail_prediction_metadata_once = fail_prediction_metadata_once
+        self._schema_cache_failed = False
         self.inserted = {}
         self.updated = {}
         self.supabase = MagicMock()
@@ -57,6 +73,23 @@ class MockDB:
     @property
     def tables_called(self):
         return self._calls
+
+    def should_raise_schema_cache_error(self, table_name, payload):
+        if (
+            table_name != "prediction_results"
+            or not self._fail_prediction_metadata_once
+            or self._schema_cache_failed
+            or not payload
+        ):
+            return False
+        has_metadata = any(
+            field in payload
+            for field in ("ensemble_method", "contributing_models", "final_scores")
+        )
+        if has_metadata:
+            self._schema_cache_failed = True
+            return True
+        return False
 
 
 class TestSavePrediction(unittest.TestCase):
@@ -114,6 +147,24 @@ class TestSavePrediction(unittest.TestCase):
         pred = self._make_prediction(region="XSMB", province=None)
         # Should not raise
         save_prediction(db, pred)
+
+    def test_retries_without_metadata_when_production_schema_is_old(self):
+        """Old production DB missing migration 06 should not fail prediction."""
+        db = MockDB(
+            {"prediction_results": []},
+            fail_prediction_metadata_once=True,
+        )
+        from src.database.prediction_repo import save_prediction
+        pred = self._make_prediction()
+        save_prediction(db, pred)
+
+        inserted = db.inserted["prediction_results"][0]
+        self.assertEqual(inserted["pair_1"], 42)
+        self.assertNotIn("ensemble_method", inserted)
+        self.assertNotIn("contributing_models", inserted)
+        self.assertNotIn("final_scores", inserted)
+        self.assertNotIn("scoring_log", inserted)
+        self.assertTrue(db._schema_cache_failed)
 
 
 class TestSaveModelPrediction(unittest.TestCase):
