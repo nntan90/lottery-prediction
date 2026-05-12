@@ -52,6 +52,9 @@ from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
 TOTAL_MODELS_PER_PROVINCE = 5  # 5 models per province
+RULE_MODEL_LOOKBACK_DRAWS = 180
+XGB_FEATURE_LOOKBACK_DRAWS = 240
+LSTM_LOOKBACK_DRAWS = 180
 
 
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
@@ -121,7 +124,10 @@ async def run_models_for_target(
 
     # ── Model 1: Frequency/Hot-Cool ──
     print(f"  🔹 Model 1 (Frequency/Hot-Cool)...")
-    result_1 = predict_frequency(db, province, target_date, region=region, n_draws=100, top_n=5)
+    result_1 = predict_frequency(
+        db, province, target_date, region=region,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+    )
     model_results.append(result_1)
     if result_1["status"] == "success":
         pairs_str = ", ".join(f"{p:02d}" for p, _ in result_1["top_pairs"])
@@ -131,7 +137,10 @@ async def run_models_for_target(
 
     # ── Model 2: Gap/Overdue ──
     print(f"  🔹 Model 2 (Gap/Overdue)...")
-    result_2 = predict_gap(db, province, target_date, region=region, n_draws=100, top_n=5)
+    result_2 = predict_gap(
+        db, province, target_date, region=region,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+    )
     model_results.append(result_2)
     if result_2["status"] == "success":
         pairs_str = ", ".join(f"{p:02d}" for p, _ in result_2["top_pairs"])
@@ -141,7 +150,10 @@ async def run_models_for_target(
 
     # ── Model 3: Markov ──
     print(f"  🔹 Model 3 (Markov)...")
-    result_3 = predict_markov(db, province, target_date, region=region, n_draws=100, top_n=5)
+    result_3 = predict_markov(
+        db, province, target_date, region=region,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+    )
     model_results.append(result_3)
     if result_3["status"] == "success":
         pairs_str = ", ".join(f"{p:02d}" for p, _ in result_3["top_pairs"])
@@ -151,7 +163,10 @@ async def run_models_for_target(
 
     # ── Model 4: XGBoost ──
     print(f"  🔹 Model 4 (XGBoost)...")
-    result_4 = predict_xgboost(db, storage, province, target_date, region=region, n_draws=120, top_n=5, tmpdir=tmpdir)
+    result_4 = predict_xgboost(
+        db, storage, province, target_date, region=region,
+        n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=5, tmpdir=tmpdir,
+    )
     model_results.append(result_4)
     if result_4["status"] == "success":
         pairs_str = ", ".join(f"{p:02d}" for p, _ in result_4["top_pairs"])
@@ -163,7 +178,7 @@ async def run_models_for_target(
     print(f"  🔹 Model 5 (LSTM/GRU)...")
     result_5 = predict_lstm(
         db, storage=storage, province=province, target_date=target_date,
-        region=region, n_draws=100, seq_len=30, top_n=5, tmpdir=tmpdir,
+        region=region, n_draws=LSTM_LOOKBACK_DRAWS, seq_len=30, top_n=5, tmpdir=tmpdir,
     )
     model_results.append(result_5)
     if result_5["status"] == "success":

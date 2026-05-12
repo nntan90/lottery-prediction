@@ -97,6 +97,7 @@ def get_params(strategy: str) -> Tuple[dict, dict]:
 def recommend_params(
     strategy: str,
     *,
+    region: str | None = None,
     consecutive_fails: int = 0,
     old_auc: float | None = None,
     old_hit_rate: float | None = None,
@@ -116,7 +117,9 @@ def recommend_params(
     old_params, new_params = get_params(strategy)
 
     if consecutive_fails >= fail_streak_threshold:
+        region_key = (region or "").upper()
         new_params["_force"] = True
+        new_params["_min_draws"] = 60 if region_key == "XSMB" else 36
         new_params["n_estimators"] = max(int(new_params.get("n_estimators", 0)), 500)
         new_params["learning_rate"] = min(float(new_params.get("learning_rate", 0.05)), 0.03)
 
@@ -167,6 +170,9 @@ def build_train_args(region: str, province: str | None, weekday: int | None, new
     if new_params.get("_force"):
         args.append("--force")
 
+    if new_params.get("_min_draws"):
+        args += ["--min_draws", str(new_params["_min_draws"])]
+
     return args
 
 
@@ -182,5 +188,7 @@ def describe_strategy(strategy: str, old_params: dict, new_params: dict) -> str:
 
     if new_params.get("_force"):
         changes.append("force=True")
+    if new_params.get("_min_draws"):
+        changes.append(f"min_draws={new_params['_min_draws']}")
 
     return f"[{strategy}] " + (", ".join(changes) if changes else "Không thay đổi")

@@ -157,6 +157,7 @@ class TestRecommendParams(unittest.TestCase):
     def test_three_miss_streak_forces_retrain_and_tunes_params(self):
         old_params, new_params = recommend_params(
             "boost_estimators",
+            region="XSMN",
             consecutive_fails=3,
             old_auc=0.51,
             old_hit_rate=0.20,
@@ -169,7 +170,22 @@ class TestRecommendParams(unittest.TestCase):
         self.assertLessEqual(new_params["learning_rate"], 0.03)
         self.assertGreaterEqual(new_params["scale_pos_weight"], 2.5)
         self.assertLessEqual(new_params["max_depth"], 3)
+        self.assertEqual(new_params["_min_draws"], 36)
         self.assertIn("--force", args)
+        self.assertIn("--min_draws", args)
+        self.assertIn("36", args)
+
+    def test_xsmb_three_miss_streak_uses_longer_training_window(self):
+        _, new_params = recommend_params(
+            "boost_estimators",
+            region="XSMB",
+            consecutive_fails=3,
+        )
+        args = build_train_args("XSMB", None, 1, new_params)
+
+        self.assertEqual(new_params["_min_draws"], 60)
+        self.assertIn("--min_draws", args)
+        self.assertIn("60", args)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ STATIONS = [
     ("XSMN", "da-lat"),
 ]
 
-HISTORY_DAYS = 120  # Lấy 120 kỳ lịch sử để tính features
+HISTORY_DRAWS = 240  # Lấy 240 kỳ lịch sử để giảm noise khi tính features
 MAX_RETRIES  = 5    # Số lần retry khi gặp lỗi kết nối
 RETRY_DELAY  = 3.0  # Giây chờ giữa mỗi retry (exponential backoff)
 
@@ -106,7 +106,7 @@ def build_features_for_station(
             .eq("region", region)\
             .lt("draw_date", target_date.isoformat())\
             .order("draw_date", desc=True)\
-            .limit(HISTORY_DAYS * 30)
+            .limit(HISTORY_DRAWS * 30)
         if province:
             query = query.eq("province", province)
         else:
@@ -114,7 +114,7 @@ def build_features_for_station(
         return query.execute().data
 
     history_rows = _execute_with_retry(_fetch_history, f"{label}/history")
-    history_df = _extract_history(history_rows, max_rows=HISTORY_DAYS)
+    history_df = _extract_history(history_rows, max_rows=HISTORY_DRAWS)
 
     if len(history_df) < 10:
         print(f"  ⚠️  {label}: không đủ lịch sử ({len(history_df)} kỳ) cho {target_date}")

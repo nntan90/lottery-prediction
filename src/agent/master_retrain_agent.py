@@ -189,6 +189,7 @@ async def run_agent(
         if decision.should_retrain:
             old_params, new_params = recommend_params(
                 decision.strategy,
+                region=region,
                 consecutive_fails=decision.consecutive_fails,
                 old_auc=decision.old_metric_auc,
                 old_hit_rate=decision.old_hit_rate,

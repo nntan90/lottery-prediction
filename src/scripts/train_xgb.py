@@ -74,6 +74,13 @@ def load_training_data(
     return df
 
 
+def count_training_draws(df: pd.DataFrame) -> int:
+    """Count distinct draw/feature dates available for training."""
+    if df.empty or "feature_date" not in df.columns:
+        return 0
+    return int(df["feature_date"].nunique())
+
+
 def time_based_split(df: pd.DataFrame, val_ratio: float = 0.2):
     """Split theo thời gian (không shuffle) để tránh leakage."""
     dates = sorted(df["feature_date"].unique())
@@ -96,6 +103,8 @@ async def main():
     parser.add_argument("--province", default=None, help="Slug tỉnh, hoặc 'all' cho XSMB")
     parser.add_argument("--version", default=None, help="Version string, mặc định = ngày hôm nay")
     parser.add_argument("--force", action="store_true", help="Force train dù ít dữ liệu (<1000 rows)")
+    parser.add_argument("--min_draws", type=int, default=None,
+                        help="Số kỳ quay tối thiểu để train. Mặc định: 60, hoặc 24 nếu --force")
     parser.add_argument("--weekday", type=int, default=None, choices=list(range(7)),
                         help="Ngày trong tuần để train riêng (0=T2..6=CN). Mặc định: train tất cả")
     # Hyperparameter overrides — dùng bởi Master Retrain Agent
@@ -127,12 +136,16 @@ async def main():
     # 1. Load data
     df = load_training_data(db, args.region, province, weekday)
 
-    min_rows = 100 if args.force else 1000
-    if len(df) < min_rows:
-        msg = f"❌ Không đủ data để train {label}: {len(df)} rows (cần ≥ {min_rows})"
+    min_draws = args.min_draws if args.min_draws is not None else (24 if args.force else 60)
+    draw_count = count_training_draws(df)
+    if draw_count < min_draws:
+        msg = (
+            f"❌ Không đủ data để train {label}: {draw_count} kỳ "
+            f"({len(df)} rows, cần ≥ {min_draws} kỳ)"
+        )
         print(msg)
         await notifier.send_error_alert(msg)
-        return
+        raise SystemExit(1)
 
     # 2. Split
     X_train, y_train, X_val, y_val = time_based_split(df)
@@ -150,6 +163,7 @@ async def main():
     )
     metrics = model.train(X_train, y_train, X_val, y_val)
     print(f"  AUC: {metrics.get('auc', 'N/A')} | Hit@3: {metrics.get('hit_rate_top3', 'N/A')}")
+    print(f"  Training draws used: {draw_count} kỳ (min={min_draws})")
 
     # 4. Save model locally
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,7 +185,7 @@ async def main():
             msg = f"❌ Upload thất bại cho {label}"
             print(msg)
             await notifier.send_error_alert(msg)
-            return
+            raise SystemExit(1)
 
     # 6. Deprecate model cũ (chỉ deprecate model cùng weekday)
     dep_query = db.supabase.table("model_registry")\
@@ -200,7 +214,7 @@ async def main():
         "file_path":        storage_path,
         "train_start_date": dates_used[0],
         "train_end_date":   dates_used[-1],
-        "train_draws":      len(df) // 100,
+        "train_draws":      draw_count,
         "metric_auc":       metrics.get("auc"),
         "metric_hit_rate":  metrics.get("hit_rate_top3"),
         "trained_at":       datetime.utcnow().isoformat(),
@@ -226,7 +240,7 @@ async def main():
         f"📊 AUC: <code>{auc}</code>\n"
         f"🎯 Hit@3: <code>{hit_pct}%</code>\n"
         f"📅 Data: {dates_used[0]} → {dates_used[-1]}{wd_info}\n"
-        f"🔢 Kỳ train: {len(df)//100} | Version: {version}\n\n"
+        f"🔢 Kỳ train: {draw_count} | Min: {min_draws} | Version: {version}\n\n"
         f"<i>Model đã được set active trong registry.</i>"
     )
     await notifier.send_message(msg)
