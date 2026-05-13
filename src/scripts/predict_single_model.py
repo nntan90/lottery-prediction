@@ -123,7 +123,7 @@ def _ensemble_prediction_exists(db: LotteryDB, target_date: date, region: str, p
     """Return True when the main ensemble row already exists for the same key."""
     q = (
         db.supabase.table("prediction_results")
-        .select("model_version,ensemble_method")
+        .select("model_version")
         .eq("prediction_date", target_date.isoformat())
         .eq("region", region)
     )
@@ -133,7 +133,7 @@ def _ensemble_prediction_exists(db: LotteryDB, target_date: date, region: str, p
     if not rows:
         return False
     row = rows[0]
-    return bool(row.get("ensemble_method")) or str(row.get("model_version", "")).startswith("ensemble")
+    return str(row.get("model_version", "")).startswith("ensemble")
 
 
 def _save_single_prediction(db: LotteryDB, prediction: dict) -> None:
