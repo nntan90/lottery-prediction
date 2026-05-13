@@ -1,10 +1,11 @@
 name: 08 - Daily Health Digest
 
-# Chạy mỗi ngày lúc 23:00 GMT+7 (16:00 UTC)
+# Chạy mỗi ngày lúc 23:47 GMT+7 (16:47 UTC)
 # Sau khi tất cả các pipeline khác đã chạy xong
+# Script tự lùi về ngày hôm qua nếu GitHub Actions delay qua sau 00:00 VN.
 on:
   schedule:
-    - cron: '0 16 * * *'  # 23:00 GMT+7
+    - cron: '47 16 * * *'  # 23:47 GMT+7
   workflow_dispatch:
 
 jobs:

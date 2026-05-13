@@ -26,6 +26,20 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 
 
+def resolve_default_target_date(vn_now: datetime | None = None) -> date:
+    """
+    Resolve the operational date for the digest.
+
+    GitHub scheduled workflows can be delayed. If the 23:00 VN digest slips past
+    midnight, the calendar date has changed but the operational day to report is
+    still the day that just ended. Before 06:00 VN, default to yesterday.
+    """
+    vn_now = vn_now or (datetime.utcnow() + timedelta(hours=7))
+    if vn_now.hour < 6:
+        return (vn_now.date() - timedelta(days=1))
+    return vn_now.date()
+
+
 async def build_digest(db: LotteryDB, target_date: date) -> str:
     """Build comprehensive health digest message."""
     date_str = target_date.strftime("%d/%m/%Y")
@@ -119,10 +133,12 @@ async def build_digest(db: LotteryDB, target_date: date) -> str:
         auc = f"AUC={m['metric_auc']:.3f}" if m.get("metric_auc") else "AUC=?"
         
         # Days since trained
+        days_old = None
         if m.get("trained_at"):
             try:
                 trained = datetime.fromisoformat(m["trained_at"].replace("Z", "+00:00"))
-                days_old = (datetime.now(trained.tzinfo) - trained).days if trained.tzinfo else "?"
+                now = datetime.now(trained.tzinfo) if trained.tzinfo else datetime.utcnow()
+                days_old = (now - trained).days
                 age = f"{days_old}d ago"
             except Exception:
                 age = "?"
@@ -132,9 +148,7 @@ async def build_digest(db: LotteryDB, target_date: date) -> str:
         model_lines.append(f"   {region}/{prov}{wd}: {m['version']} ({auc}, {age})")
         
         # Warn on old models
-        if isinstance(age, str) and age != "?":
-            pass
-        elif isinstance(days_old, int) and days_old > 30:
+        if isinstance(days_old, int) and days_old > 30:
             warnings.append(f"Model {region}/{prov}{wd} trained {days_old} days ago — consider retraining")
 
     sections.append(
@@ -183,8 +197,7 @@ async def main():
     if args.date:
         target_date = date.fromisoformat(args.date)
     else:
-        vn_now = datetime.utcnow() + timedelta(hours=7)
-        target_date = vn_now.date()
+        target_date = resolve_default_target_date()
 
     db = LotteryDB()
     notifier = LotteryNotifier(db, default_config_key="health_digest")
