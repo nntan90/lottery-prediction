@@ -6,6 +6,11 @@ on:
     workflows: ["01 - Daily Lottery Crawl"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Prediction date to verify (YYYY-MM-DD). Empty = auto'
+        required: false
+        default: ''
 
 jobs:
   verify-results:
@@ -37,8 +42,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
         run: |
-          python src/scripts/verify_v3.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/verify_v3.py "${DATE_ARG[@]}"
 
       - name: "🚨 Notify Telegram - 03 Verify Failed"
         if: failure()

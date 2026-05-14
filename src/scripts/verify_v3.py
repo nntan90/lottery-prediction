@@ -20,7 +20,7 @@ import argparse
 import asyncio
 import sys
 import os
-from datetime import date, timedelta
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
@@ -28,6 +28,7 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 from src.agent.master_retrain_agent import run_agent
+from src.utils.operational_date import resolve_operational_date
 
 # Constants for Profit Calculation
 XSMN_TIER_POINTS = [3, 2, 2]
@@ -234,10 +235,10 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", type=str, help="Ngày verify (YYYY-MM-DD). Mặc định = hôm nay")
+    parser.add_argument("--date", type=str, help="Ngày verify (YYYY-MM-DD). Mặc định = ngày vận hành")
     args = parser.parse_args()
 
-    target_date = date.fromisoformat(args.date) if args.date else date.today()
+    target_date = date.fromisoformat(args.date) if args.date else resolve_operational_date()
 
     db = LotteryDB()
     notifier = LotteryNotifier(db, default_config_key="verify_summary")

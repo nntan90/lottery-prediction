@@ -60,7 +60,7 @@ async def main():
             db.log_crawler_status({
                 'crawl_date': today,
                 'region': 'XSMB',
-                'status': 'success',
+                'status': 'failed',
                 'error_message': msg,
                 'records_inserted': 0
             })
@@ -69,6 +69,7 @@ async def main():
                 await bot.send_message(
                     f'⚠️ <b>XSMB: No data found</b>\n📅 {today}\n(Likely holiday/off)'
                 )
+            sys.exit(1)
 
     except Exception as e:
         error_msg = str(e)

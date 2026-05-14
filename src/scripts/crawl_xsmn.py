@@ -70,7 +70,7 @@ async def main():
         db.log_crawler_status({
             'crawl_date': today,
             'region': 'XSMN',
-            'status': 'success',
+            'status': 'failed',
             'error_message': msg,
             'records_inserted': 0
         })
@@ -79,6 +79,7 @@ async def main():
             await bot.send_message(
                 f'⚠️ <b>XSMN: No data found</b>\n📅 {today}\n(Likely holiday/off)'
             )
+        sys.exit(1)
 
 
 if __name__ == '__main__':
