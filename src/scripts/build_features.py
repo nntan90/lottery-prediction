@@ -25,6 +25,7 @@ from src.features.feature_builder import (
     build_features_for_day,
 )
 from src.features.tail_extractor import build_tail_set
+from src.utils.operational_date import resolve_operational_date
 
 # Danh sách (region, province) cần tính feature
 STATIONS = [
@@ -219,7 +220,7 @@ def main():
                     time.sleep(args.delay)
 
     else:
-        target = date.today()
+        target = resolve_operational_date()
         print(f"🌙 Nightly build features for {target}...")
         for region, province in STATIONS:
             total += build_features_for_station(region, province, target)

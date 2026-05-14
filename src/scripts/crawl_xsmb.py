@@ -1,19 +1,25 @@
 """
 Script crawl XSMB (Miền Bắc) - chạy bởi GitHub Actions job 01
 """
+import argparse
 import asyncio
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.crawler.xsmb_crawler import XSMBCrawler
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
+from src.utils.operational_date import resolve_operational_date, vietnam_now
 
 
 async def main():
+    parser = argparse.ArgumentParser(description="Crawl XSMB lottery results")
+    parser.add_argument("--date", type=str, help="Target draw date (YYYY-MM-DD)")
+    args = parser.parse_args()
+
     print('🚀 Starting XSMB crawler...')
 
     crawler = XSMBCrawler()
@@ -24,11 +30,12 @@ async def main():
         print(f'⚠️ Could not init bot: {e}')
         bot = None
 
-    # Use Vietnam Time (UTC+7)
-    vn_time = datetime.utcnow() + timedelta(hours=7)
-    today = vn_time.date()
+    vn_time = vietnam_now()
+    today = date.fromisoformat(args.date) if args.date else resolve_operational_date(vn_time)
     print(f'Current Vietnam Time: {vn_time}')
     print(f'Crawling for date: {today}')
+    if today != vn_time.date():
+        print(f'Operational date differs from calendar date due to rollover guard: {today}')
 
     try:
         results = crawler.fetch_results(today)

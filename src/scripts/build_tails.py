@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
 from src.features.tail_extractor import extract_tails_from_draw
+from src.utils.operational_date import resolve_operational_date
 
 
 def get_existing_draw_ids(db: LotteryDB, draw_ids: list) -> set:
@@ -115,8 +116,8 @@ def main():
             total += build_tails_for_date(db, date.fromisoformat(draw_date))
 
     else:
-        # Nightly: xử lý ngày hôm nay
-        target = date.today()
+        # Nightly: xử lý ngày vận hành, chống job schedule bị delay qua nửa đêm VN.
+        target = resolve_operational_date()
         print(f"🌙 Nightly build tails for {target}...")
         total = build_tails_for_date(db, target)
 

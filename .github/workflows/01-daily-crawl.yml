@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '47 14 * * *'  # 21:47 GMT+7 (14:47 UTC)
   workflow_dispatch:  # Cho phép chạy thủ công
+    inputs:
+      target_date:
+        description: 'Operational date to crawl/build (YYYY-MM-DD). Empty = auto'
+        required: false
+        default: ''
 
 jobs:
   # ─────────────────────────────────────────────
@@ -39,8 +44,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
         run: |
-          python src/scripts/crawl_xsmb.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/crawl_xsmb.py "${DATE_ARG[@]}"
 
       - name: "🚨 Notify Telegram - XSMB Failed"
         if: failure()
@@ -90,8 +100,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
         run: |
-          python src/scripts/crawl_xsmn.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/crawl_xsmn.py "${DATE_ARG[@]}"
 
       - name: "🚨 Notify Telegram - XSMN Failed"
         if: failure()
@@ -140,16 +155,26 @@ jobs:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
         run: |
-          python src/scripts/build_tails.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/build_tails.py "${DATE_ARG[@]}"
 
       - name: Build pair_features from tails_2d
         env:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
         run: |
-          python src/scripts/build_features.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/build_features.py "${DATE_ARG[@]}"
 
       - name: "🚨 Notify Telegram - Build Data Failed"
         if: failure()
