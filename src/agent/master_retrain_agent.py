@@ -64,7 +64,7 @@ def _get_weekday_for_province(province: str, target_weekday: int) -> Optional[in
 def _prediction_scope(prediction: dict) -> str:
     """Return 'multi' for ensemble rows, otherwise 'single'."""
     model_version = str(prediction.get("model_version") or "")
-    if model_version.startswith("ensemble") or prediction.get("ensemble_method"):
+    if model_version.startswith("ensemble"):
         return "multi"
     return "single"
 
@@ -357,7 +357,7 @@ async def main():
     # Lấy kết quả verify từ DB
     preds = (
         db.supabase.table("prediction_results")
-        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs,model_version,ensemble_method")
+        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs,model_version")
         .eq("prediction_date", target_date.isoformat())
         .not_.is_("hit", "null")  # chỉ lấy row đã verify xong
         .execute()
@@ -378,7 +378,6 @@ async def main():
             "pairs": [p["pair_1"], p["pair_2"], p["pair_3"]],
             "matched": p.get("matched_pairs") or [],
             "model_version": p.get("model_version"),
-            "ensemble_method": p.get("ensemble_method"),
             "model_scope": _prediction_scope(p),
         }
         for p in preds

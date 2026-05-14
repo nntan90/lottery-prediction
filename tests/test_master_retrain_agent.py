@@ -47,7 +47,6 @@ class FakeDB:
 
 def test_prediction_scope_detects_multi_ensemble():
     assert _prediction_scope({"model_version": "ensemble_v3.2"}) == "multi"
-    assert _prediction_scope({"ensemble_method": "expert_borda_combsum_v3.2"}) == "multi"
 
 
 def test_prediction_scope_defaults_to_single():
