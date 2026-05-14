@@ -187,3 +187,60 @@ jobs:
             -d "text=${MSG}" \
             -d "parse_mode=HTML" \
             -d "disable_web_page_preview=true"
+
+  # ─────────────────────────────────────────────
+  # Job 4: Verify predictions after crawl/build success
+  # Keeps workflow_dispatch target_date aligned for manual backfills.
+  # ─────────────────────────────────────────────
+  verify-predictions:
+    name: Verify Predictions vs Results
+    runs-on: ubuntu-latest
+    needs: [build-data]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Predictions vs Results
+        id: verify
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
+          TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
+        run: |
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/scripts/verify_v3.py "${DATE_ARG[@]}"
+
+      - name: "🚨 Notify Telegram - 01 Verify Failed"
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="🚨 <b>01 - Verify Predictions FAILED</b>%0A"
+          MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
+          MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>%0A"
+          MSG+="⚠️ Bước kiểm tra dự đoán sau crawl bị lỗi hoặc terminate."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${MSG}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"

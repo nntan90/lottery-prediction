@@ -98,10 +98,17 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         .execute().data
 
     if not preds:
+        msg = (
+            f"⚠️ <b>VERIFY PREDICTION SKIPPED</b>\n"
+            f"📅 {date_str}\n"
+            f"Không có prediction nào cần verify."
+        )
         print(f"  ⚠️  Không có prediction nào cần verify cho {target_date}")
+        await notifier.send_message(msg, config_key="verify_summary")
         return
 
     results_summary = []
+    skipped_no_result = []
 
     for pred in preds:
         region   = pred["region"]
@@ -121,6 +128,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         tail_rows = tail_query.execute().data
         if not tail_rows:
             print(f"  ⚠️  {label}: không có KQXS để verify (holiday?)")
+            skipped_no_result.append(label)
             continue
 
         tail_set = {r["tail_2d"] for r in tail_rows}
@@ -200,6 +208,13 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
     # Gửi Telegram report tổng hợp
     if not results_summary:
+        skipped = "\n".join(f"• {label}" for label in skipped_no_result) or "• Không rõ đài"
+        msg = (
+            f"⚠️ <b>VERIFY PREDICTION SKIPPED</b>\n"
+            f"📅 {date_str}\n"
+            f"Có prediction nhưng chưa có KQXS/tails_2d để verify:\n{skipped}"
+        )
+        await notifier.send_message(msg, config_key="verify_summary")
         return
 
     total = len(results_summary)
