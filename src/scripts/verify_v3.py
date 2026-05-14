@@ -27,7 +27,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
-from src.agent.master_retrain_agent import run_agent
 from src.utils.operational_date import resolve_operational_date
 
 # Constants for Profit Calculation
@@ -225,12 +224,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
     await notifier.send_message(msg)
     print(f"\n📊 Verify done: {hits}/{total} hit ({hit_rate:.0f}%)")
 
-    # 🤖 Master Retrain Agent — chạy sau khi verify xong
-    # Wrapped trong try/except: nếu agent crash, verify pipeline không bị ảnh hưởng
-    try:
-        await run_agent(db, notifier, results_summary, target_date)
-    except Exception as agent_err:
-        print(f"\n⚠️  Master Retrain Agent lỗi (không ảnh hưởng verify): {agent_err}")
+    print("\n🤖 Retrain evaluation is handled by workflow 04 at 10:30 VN.")
 
 
 async def main():

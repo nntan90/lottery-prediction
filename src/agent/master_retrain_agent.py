@@ -1,11 +1,12 @@
 """
 master_retrain_agent.py
-Bộ não chính (Master Retrain Agent) — chạy sau verify_v3.py.
+Bộ não chính (Master Retrain Agent) — chạy sau khi đã có verify report.
 
 Flow:
-  1. Nhận danh sách kết quả verify từ verify_v3.py
-  2. Với mỗi đài bị MISS: decision_engine.analyze() → quyết định
-  3. Nếu should_retrain: trigger train_xgb.py qua subprocess
+  1. Đọc prediction_results đã verify mới nhất hoặc ngày truyền vào.
+  2. Phân loại single vs multi/ensemble prediction.
+  3. Với mỗi đài bị MISS: decision_engine.analyze() → quyết định
+  4. Nếu should_retrain và prediction trainable: trigger train_xgb.py qua subprocess
   4. Log tất cả quyết định vào agent_actions table
   5. Gửi Telegram summary về hành động đã thực hiện
 
@@ -58,6 +59,44 @@ def _get_weekday_for_province(province: str, target_weekday: int) -> Optional[in
     if normalized in stations:
         return target_weekday
     return None
+
+
+def _prediction_scope(prediction: dict) -> str:
+    """Return 'multi' for ensemble rows, otherwise 'single'."""
+    model_version = str(prediction.get("model_version") or "")
+    if model_version.startswith("ensemble") or prediction.get("ensemble_method"):
+        return "multi"
+    return "single"
+
+
+def _is_directly_trainable_prediction(region: str, province: Optional[str], model_scope: str) -> bool:
+    """
+    Whether this verified prediction maps to one train_xgb.py target.
+
+    XSMN global ensemble rows use province='all' and combine many provinces plus
+    rule-based sub-models. They are evaluated here, but there is no direct
+    XSMN/all XGBoost training target in pair_features; per-province XSMN single
+    rows and XSMB rows remain trainable.
+    """
+    if region.upper() == "XSMN" and model_scope == "multi" and province in (None, "all"):
+        return False
+    return True
+
+
+def _latest_verified_date(db: LotteryDB) -> Optional[date]:
+    """Return the most recent prediction_date that has verified results."""
+    rows = (
+        db.supabase.table("prediction_results")
+        .select("prediction_date")
+        .not_.is_("hit", "null")
+        .order("prediction_date", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not rows:
+        return None
+    return date.fromisoformat(rows[0]["prediction_date"])
 
 
 def _log_action(db: LotteryDB, action_date: date, region: str, province: Optional[str],
@@ -132,7 +171,7 @@ async def run_agent(
     dry_run: bool = False,
 ):
     """
-    Entrypoint chính — gọi từ verify_v3.py sau khi verify xong.
+    Entrypoint chính — gọi bởi workflow 04 sau khi verify report đã có.
 
     Args:
         verify_results: list của dict {"label", "hit", "pairs", "matched", "region", "province"}
@@ -155,7 +194,10 @@ async def run_agent(
         region = r.get("region", "")
         province = r.get("province")
         hit = r.get("hit", False)
+        model_scope = r.get("model_scope") or _prediction_scope(r)
+        scope_label = "MULTI" if model_scope == "multi" else "SINGLE"
         label = r.get("label", f"{region}/{province or 'all'}")
+        display_label = f"{scope_label} {label}"
 
         # Xác định weekday model cần check
         if region.upper() == "XSMB":
@@ -180,30 +222,39 @@ async def run_agent(
             "retrain_triggered": "🔁",
         }.get(decision.action_type, "❓")
 
-        print(f"\n  {action_icon} {label}: {decision.reason}")
+        print(f"\n  {action_icon} {display_label}: {decision.reason}")
 
         old_params = {}
         new_params = {}
         train_success = None
+        action_type = decision.action_type
+        reason = f"[{model_scope}] {decision.reason}"
+        strategy = decision.strategy
 
         if decision.should_retrain:
-            old_params, new_params = recommend_params(
-                decision.strategy,
-                region=region,
-                consecutive_fails=decision.consecutive_fails,
-                old_auc=decision.old_metric_auc,
-                old_hit_rate=decision.old_hit_rate,
-            )
-            strategy_desc = describe_strategy(decision.strategy, old_params, new_params)
-            print(f"     📊 Strategy: {strategy_desc}")
+            if not _is_directly_trainable_prediction(region, province, model_scope):
+                action_type = "skipped"
+                reason += " | Global XSMN multi ensemble is evaluated but not directly trainable; province-level XGB rows handle retrain."
+                strategy = None
+                print("     ⏭️  Global XSMN ensemble row is monitor-only for direct retrain.")
+            else:
+                old_params, new_params = recommend_params(
+                    decision.strategy,
+                    region=region,
+                    consecutive_fails=decision.consecutive_fails,
+                    old_auc=decision.old_metric_auc,
+                    old_hit_rate=decision.old_hit_rate,
+                )
+                strategy_desc = describe_strategy(decision.strategy, old_params, new_params)
+                print(f"     📊 Strategy: {strategy_desc}")
 
-            train_success = _trigger_retrain(
-                region=region,
-                province=province,
-                weekday=station_weekday,
-                new_params=new_params,
-                dry_run=dry_run,
-            )
+                train_success = _trigger_retrain(
+                    region=region,
+                    province=province,
+                    weekday=station_weekday,
+                    new_params=new_params,
+                    dry_run=dry_run,
+                )
 
         # Ghi log vào DB
         _log_action(
@@ -212,9 +263,9 @@ async def run_agent(
             region=region,
             province=province,
             weekday=station_weekday,
-            action_type=decision.action_type,
-            reason=decision.reason,
-            strategy=decision.strategy,
+            action_type=action_type,
+            reason=reason,
+            strategy=strategy,
             old_auc=decision.old_metric_auc,
             old_hit_rate=decision.old_hit_rate,
             old_params=old_params,
@@ -222,10 +273,11 @@ async def run_agent(
         )
 
         actions_summary.append({
-            "label": label,
-            "action_type": decision.action_type,
-            "reason": decision.reason,
-            "strategy": decision.strategy,
+            "label": display_label,
+            "model_scope": model_scope,
+            "action_type": action_type,
+            "reason": reason,
+            "strategy": strategy,
             "train_success": train_success,
             "consecutive_fails": decision.consecutive_fails,
         })
@@ -243,6 +295,8 @@ async def _send_agent_report(
     """Gửi Telegram report tổng hợp về hành động của agent."""
     retrain_list = [a for a in actions if a["action_type"] == "retrain_triggered"]
     skip_list    = [a for a in actions if a["action_type"] == "skipped"]
+    single_count = sum(1 for a in actions if a.get("model_scope") == "single")
+    multi_count = sum(1 for a in actions if a.get("model_scope") == "multi")
 
     # Chỉ gửi nếu có hành động đáng chú ý (có retrain hoặc có skip với lý do)
     if not retrain_list and not skip_list:
@@ -252,6 +306,7 @@ async def _send_agent_report(
     date_str = target_date.strftime("%d/%m/%Y")
     dry_tag = " [DRY-RUN]" if dry_run else ""
     msg = f"🤖 <b>AGENT RETRAIN REPORT{dry_tag} — {date_str}</b>\n\n"
+    msg += f"Scope: <code>{single_count}</code> single | <code>{multi_count}</code> multi\n\n"
 
     if retrain_list:
         msg += "🔁 <b>Đã trigger retrain:</b>\n"
@@ -280,19 +335,26 @@ async def main():
     Đọc kết quả verify từ DB cho ngày chỉ định.
     """
     parser = argparse.ArgumentParser(description="Master Retrain Agent")
-    parser.add_argument("--date", type=str, help="Ngày target (YYYY-MM-DD). Mặc định = hôm nay")
+    parser.add_argument("--date", type=str, help="Ngày target (YYYY-MM-DD). Mặc định = latest verified")
     parser.add_argument("--dry-run", action="store_true", help="Chỉ in quyết định, không thực sự retrain")
     args = parser.parse_args()
-
-    target_date = date.fromisoformat(args.date) if args.date else date.today()
 
     db = LotteryDB()
     notifier = LotteryNotifier(db, default_config_key="master_retrain_agent")
 
+    if args.date:
+        target_date = date.fromisoformat(args.date)
+    else:
+        latest_date = _latest_verified_date(db)
+        if latest_date is None:
+            print("⚠️  Không có prediction đã verify để đánh giá retrain")
+            return
+        target_date = latest_date
+
     # Lấy kết quả verify từ DB
     preds = (
         db.supabase.table("prediction_results")
-        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs")
+        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs,model_version,ensemble_method")
         .eq("prediction_date", target_date.isoformat())
         .not_.is_("hit", "null")  # chỉ lấy row đã verify xong
         .execute()
@@ -312,6 +374,9 @@ async def main():
             "hit": p["hit"],
             "pairs": [p["pair_1"], p["pair_2"], p["pair_3"]],
             "matched": p.get("matched_pairs") or [],
+            "model_version": p.get("model_version"),
+            "ensemble_method": p.get("ensemble_method"),
+            "model_scope": _prediction_scope(p),
         }
         for p in preds
     ]

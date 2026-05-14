@@ -1,14 +1,24 @@
-name: 04 - Check Training Conditions
+name: 04 - Evaluate Retrain Models
 
-# Chạy mỗi ngày lúc 22:00 VN (15:00 UTC)
+# Chạy mỗi ngày lúc 10:30 VN (03:30 UTC), sau khi report verify prediction đã có.
+# Agent đọc prediction_results đã verify mới nhất và đánh giá cả single + multi model.
 on:
   schedule:
-    - cron: '0 15 * * *'  # 22:00 GMT+7 (15:00 UTC)
+    - cron: '30 3 * * *'  # 10:30 GMT+7 (03:30 UTC)
   workflow_dispatch:  # Cho phép trigger thủ công
+    inputs:
+      target_date:
+        description: 'Verified prediction date to evaluate (YYYY-MM-DD). Empty = latest verified'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Only evaluate decisions, do not retrain'
+        required: false
+        default: 'false'
 
 jobs:
-  check-and-trigger:
-    name: Check Training Conditions & Auto-Trigger
+  evaluate-retrain:
+    name: Evaluate Retrain Decisions (Single + Multi)
     runs-on: ubuntu-latest
 
     steps:
@@ -24,28 +34,37 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check training conditions
-        id: check
+      - name: Evaluate retrain decisions
+        id: evaluate
         env:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
-          GITHUB_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
-          # gh CLI cần GITHUB_TOKEN để trigger workflow
-          GH_TOKEN:            ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: .
+          TARGET_DATE:         ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
+          DRY_RUN:             ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
-          python src/scripts/check_training.py
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
 
-      - name: "🚨 Notify Telegram - 04 Check Training Failed"
+          DRY_ARG=()
+          if [ "${DRY_RUN}" = "true" ]; then
+            DRY_ARG=(--dry-run)
+          fi
+
+          python src/agent/master_retrain_agent.py "${DATE_ARG[@]}" "${DRY_ARG[@]}"
+
+      - name: "🚨 Notify Telegram - 04 Evaluate Retrain Failed"
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="🚨 <b>04 - Check Training FAILED</b>%0A"
+          MSG="🚨 <b>04 - Evaluate Retrain FAILED</b>%0A"
           MSG+="📅 $(date -u '+%Y-%m-%d %H:%M UTC')%0A"
           MSG+="🔗 <a href='${RUN_URL}'>View Logs</a>"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
