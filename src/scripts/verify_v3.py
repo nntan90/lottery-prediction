@@ -109,6 +109,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
     results_summary = []
     skipped_no_result = []
+    tail_set_cache = {}  # Cache tail_set để dùng cho việc verify sub-models
 
     for pred in preds:
         region   = pred["region"]
@@ -132,6 +133,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             continue
 
         tail_set = {r["tail_2d"] for r in tail_rows}
+        tail_set_cache[(region, province)] = tail_set
         pairs = [pred["pair_1"], pred["pair_2"], pred["pair_3"]]
         matched = [p for p in pairs if p in tail_set]
         hit = len(matched) > 0
@@ -206,6 +208,61 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             "matched": matched,
         })
 
+    # === VERIFY SUB-MODELS in model_predictions ===
+    sub_preds = db.supabase.table("model_predictions")\
+        .select("*")\
+        .eq("prediction_date", target_date.isoformat())\
+        .execute().data
+        
+    sub_model_stats = {}
+    
+    if sub_preds:
+        for pred in sub_preds:
+            region = pred["region"]
+            province = pred["province"]
+            label = f"{region}/{province or 'all'}"
+            model_name = pred["model_name"]
+            
+            # Lấy tail_set từ cache (nếu đã lấy cho prediction_results)
+            # Hoặc query bổ sung nếu chưa có (ví dụ prediction_results thiếu đài nhưng model_predictions có)
+            if (region, province) not in tail_set_cache:
+                t_query = db.supabase.table("tails_2d").select("tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
+                if province and province != "all":
+                    t_query = t_query.eq("province", province)
+                t_rows = t_query.execute().data
+                if t_rows:
+                    tail_set_cache[(region, province)] = {r["tail_2d"] for r in t_rows}
+                else:
+                    tail_set_cache[(region, province)] = set()
+            
+            tail_set = tail_set_cache.get((region, province), set())
+            if not tail_set:
+                continue
+                
+            # Lấy top 5 pairs của sub-model
+            pairs = [p for p in [pred.get("pair_1"), pred.get("pair_2"), pred.get("pair_3"), pred.get("pair_4"), pred.get("pair_5")] if p is not None]
+            matched = [p for p in pairs if p in tail_set]
+            hit = len(matched) > 0
+            
+            # Cập nhật db (bảng model_predictions)
+            db.supabase.table("model_predictions")\
+                .update({
+                    "hit": hit,
+                    "matched_pairs": matched
+                })\
+                .eq("id", pred["id"])\
+                .execute()
+                
+            if label not in sub_model_stats:
+                sub_model_stats[label] = []
+            
+            sub_model_stats[label].append({
+                "model_name": model_name,
+                "hit": hit,
+                "matched": matched,
+                "pairs": pairs
+            })
+
     # Gửi Telegram report tổng hợp
     if not results_summary:
         skipped = "\n".join(f"• {label}" for label in skipped_no_result) or "• Không rõ đài"
@@ -230,6 +287,13 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         match_str = " ".join(f"<b>{p:02d}</b>" for p in r["matched"]) if r["matched"] else "—"
         lbl = province_map.get(r["label"].split("/")[-1], r["label"])
         msg += f"{icon} {lbl}: {pairs_str} → <code>{match_str}</code>\n"
+        
+        # Thêm tracking history của sub-models
+        if r["label"] in sub_model_stats:
+            for sm in sub_model_stats[r["label"]]:
+                sm_icon = "🟢" if sm["hit"] else "🔴"
+                sm_match = ",".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
+                msg += f"  └ {sm_icon} {sm['model_name']}: trúng {sm_match}\n"
 
     msg += (
         f"\n📈 <b>Tỉ lệ: {hits}/{total} đài trúng ({hit_rate:.0f}%)</b>\n"

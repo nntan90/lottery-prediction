@@ -258,6 +258,10 @@ CREATE TABLE IF NOT EXISTS model_predictions (
   error_message   TEXT,
   status          VARCHAR(20) DEFAULT 'success',
 
+  -- Tracking history (Migration 08)
+  hit             BOOLEAN,
+  matched_pairs   SMALLINT[],
+
   created_at      TIMESTAMP DEFAULT NOW(),
 
   CONSTRAINT model_predictions_unique UNIQUE (prediction_date, region, province, model_name)
