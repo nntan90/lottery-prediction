@@ -310,7 +310,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
     await notifier.send_message(msg)
     print(f"\n📊 Verify done: {hits}/{total} hit ({hit_rate:.0f}%)")
 
-    print("\n🤖 Retrain evaluation is handled by workflow 04 at 10:30 VN.")
+    print("\n🤖 Retrain evaluation is handled by workflow 04 at 22:37 VN.")
 
 
 async def main():

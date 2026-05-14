@@ -40,18 +40,18 @@ CREATE INDEX IF NOT EXISTS idx_notification_configs_workflow ON notification_con
 INSERT INTO notification_configs (
   config_key, workflow_file, job_name, schedule_cron_utc, schedule_local_time, notes
 ) VALUES
-  ('crawl_xsmb', '01-daily-crawl.yml', 'crawl-xsmb', '0 13 * * *', '20:00 VN', 'XSMB crawl success/no-data/error messages'),
-  ('crawl_xsmn', '01-daily-crawl.yml', 'crawl-xsmn', '0 13 * * *', '20:00 VN', 'XSMN crawl success/no-data messages'),
-  ('predict_ensemble', '02-predict-ensemble.yml', 'predict-ensemble', '0 0 * * *', '07:00 VN', 'Generic predict ensemble fallback'),
-  ('predict_ensemble_xsmb', '02-predict-ensemble.yml', 'predict-ensemble', '0 0 * * *', '07:00 VN', 'XSMB Top 3 statistical-signal message'),
-  ('predict_ensemble_xsmn', '02-predict-ensemble.yml', 'predict-ensemble', '0 0 * * *', '07:00 VN', 'XSMN Top 3 statistical-signal message'),
-  ('predict_ensemble_scoring_log', '02-predict-ensemble.yml', 'predict-ensemble', '0 0 * * *', '07:00 VN', 'Detailed ensemble scoring log'),
-  ('verify_summary', '03-verify-predictions.yml', 'verify-predictions', '30 13 * * *', '20:30 VN', 'Daily hit/miss verification summary'),
-  ('master_retrain_agent', '03-verify-predictions.yml', 'verify-predictions', '30 13 * * *', '20:30 VN', 'Agent retrain/skip decision report'),
-  ('check_training', '04-check-training.yml', 'check-training', '0 15 * * *', '22:00 VN', 'Scheduled retrain trigger summary'),
+  ('crawl_xsmb', '01-daily-crawl.yml', 'crawl-xsmb', '16 11 * * *', '18:16 VN', 'XSMB crawl success/no-data/error messages'),
+  ('crawl_xsmn', '01-daily-crawl.yml', 'crawl-xsmn', '16 11 * * *', '18:16 VN', 'XSMN crawl success/no-data messages'),
+  ('predict_ensemble', '02-predict-ensemble.yml', 'predict-ensemble', '14 0 * * *', '07:14 VN', 'Generic predict ensemble fallback'),
+  ('predict_ensemble_xsmb', '02-predict-ensemble.yml', 'predict-ensemble', '14 0 * * *', '07:14 VN', 'XSMB Top 3 statistical-signal message'),
+  ('predict_ensemble_xsmn', '02-predict-ensemble.yml', 'predict-ensemble', '14 0 * * *', '07:14 VN', 'XSMN Top 3 statistical-signal message'),
+  ('predict_ensemble_scoring_log', '02-predict-ensemble.yml', 'predict-ensemble', '14 0 * * *', '07:14 VN', 'Detailed ensemble scoring log'),
+  ('verify_summary', '01-daily-crawl.yml', 'verify-predictions', '16 11 * * *', '18:16 VN (after crawl)', 'Daily hit/miss verification summary'),
+  ('master_retrain_agent', '01-daily-crawl.yml', 'verify-predictions', '16 11 * * *', '18:16 VN (after crawl)', 'Agent retrain/skip decision report'),
+  ('check_training', '04-check-training.yml', 'check-training', '37 15 * * *', '22:37 VN', 'Scheduled retrain trigger summary'),
   ('train_model', '05-train-model.yml', 'train-model', NULL, 'manual', 'Model training success/error messages'),
   ('profit_report', '06-query-report.yml', 'query-report', NULL, 'manual', 'Manual profit report'),
-  ('health_digest', '08-health-digest.yml', 'health-digest', '0 16 * * *', '23:00 VN', 'Daily pipeline health digest'),
+  ('health_digest', '08-health-digest.yml', 'health-digest', '33 18 * * *', '1:33 VN', 'Daily pipeline health digest'),
   ('weekly_report', '10-weekly-report.yml', 'weekly-report', '0 23 * * 0', '06:00 VN Monday', 'Weekly XML/Telegram system report'),
   ('retrain_weekday_models', NULL, 'retrain-weekday-models', NULL, 'manual', 'Manual weekday-model retrain orchestration'),
   ('system_error_alert', NULL, 'system-error-alert', NULL, 'on error', 'Fallback error alert key for standalone notifier usage')
