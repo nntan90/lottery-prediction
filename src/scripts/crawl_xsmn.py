@@ -34,7 +34,9 @@ async def main():
     today = date.fromisoformat(args.date) if args.date else resolve_operational_date(vn_time)
     print(f'Current Vietnam Time: {vn_time}')
     print(f'Crawling for date: {today}')
-    if today != vn_time.date():
+    if args.date:
+        print(f'Manual target date override: {today}')
+    elif today != vn_time.date():
         print(f'Operational date differs from calendar date due to rollover guard: {today}')
 
     print(f'Target: Fetching all provinces for {today} in one request...')
