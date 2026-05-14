@@ -1,9 +1,9 @@
 name: 01 - Daily Lottery Crawl
 
-# Chạy hàng ngày lúc 21:30 GMT+7 (14:30 UTC), sau khi kết quả xổ số đã có.
+# Chạy hàng ngày lúc 18:16 GMT+7 (11:16 UTC), sau khi kết quả xổ số đã có.
 on:
   schedule:
-    - cron: '30 14 * * *'  # 21:30 GMT+7 (14:30 UTC)
+    - cron: '16 11 * * *'  # 18:16 GMT+7 (11:16 UTC)
   workflow_dispatch:  # Cho phép chạy thủ công
     inputs:
       target_date:

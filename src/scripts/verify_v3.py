@@ -209,13 +209,20 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         })
 
     # === VERIFY SUB-MODELS in model_predictions ===
-    sub_preds = db.supabase.table("model_predictions")\
-        .select("*")\
-        .eq("prediction_date", target_date.isoformat())\
-        .execute().data
-        
     sub_model_stats = {}
-    
+    sub_preds = None
+    try:
+        sub_preds = db.supabase.table("model_predictions")\
+            .select("*")\
+            .eq("prediction_date", target_date.isoformat())\
+            .execute().data
+    except Exception as e:
+        error_str = str(e)
+        if "PGRST205" in error_str or "model_predictions" in error_str:
+            print(f"  ⚠️  Skipping sub-model verification: model_predictions table missing (run migration 06 & 08). Error: {e}")
+        else:
+            raise
+            
     if sub_preds:
         for pred in sub_preds:
             region = pred["region"]

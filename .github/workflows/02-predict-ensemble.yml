@@ -1,10 +1,10 @@
 name: 02 - Daily Ensemble Prediction
 
-# Chạy hàng ngày lúc 7:00 GMT+7 (00:00 UTC)
+# Chạy hàng ngày lúc 7:14 GMT+7 (00:14 UTC)
 # TARGET_PROVINCES được tự động phân giải qua env var dựa trên DOW hiện tại
 on:
   schedule:
-    - cron: '0 0 * * *'  # 7:00 GMT+7 (00:00 UTC) hằng ngày
+    - cron: '14 0 * * *'  # 7:14 GMT+7 (00:14 UTC) hằng ngày
   workflow_dispatch:         # Cho phép chạy thủ công
 
 jobs:
