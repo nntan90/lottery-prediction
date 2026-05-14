@@ -256,21 +256,24 @@ async def run_agent(
                     dry_run=dry_run,
                 )
 
-        # Ghi log vào DB
-        _log_action(
-            db=db,
-            action_date=target_date,
-            region=region,
-            province=province,
-            weekday=station_weekday,
-            action_type=action_type,
-            reason=reason,
-            strategy=strategy,
-            old_auc=decision.old_metric_auc,
-            old_hit_rate=decision.old_hit_rate,
-            old_params=old_params,
-            new_params=new_params,
-        )
+        # Ghi log vào DB. Dry-run là chế độ kiểm tra thủ công, không tạo audit action.
+        if dry_run:
+            print("     🔵 [DRY-RUN] Skip writing agent_actions")
+        else:
+            _log_action(
+                db=db,
+                action_date=target_date,
+                region=region,
+                province=province,
+                weekday=station_weekday,
+                action_type=action_type,
+                reason=reason,
+                strategy=strategy,
+                old_auc=decision.old_metric_auc,
+                old_hit_rate=decision.old_hit_rate,
+                old_params=old_params,
+                new_params=new_params,
+            )
 
         actions_summary.append({
             "label": display_label,
