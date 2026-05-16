@@ -206,6 +206,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             "hit": hit,
             "pairs": pairs,
             "matched": matched,
+            "model_version": pred.get("model_version", "")
         })
 
     # === VERIFY SUB-MODELS in model_predictions ===
@@ -355,7 +356,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 valid_sms = [sm for sm in sub_model_stats[label] if sm['model_name'] != "xgboost_single"]
                 for sm in valid_sms:
                     model_name = sm['model_name']
-                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "lstm_gru": "LSTM"}
+                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "xgboost_single": "XGB", "lstm_gru": "LSTM", "lstm": "LSTM"}
                     disp_name = short_map.get(model_name, model_name)
                     sm_icon = "🟢" if sm["hit"] else "🔴"
                     sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:5]) + "]"
@@ -374,7 +375,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 msg += f"          └ 📍 {prov_name}:\n"
                 for sm in valid_sms:
                     model_name = sm['model_name']
-                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "lstm_gru": "LSTM"}
+                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "xgboost_single": "XGB", "lstm_gru": "LSTM", "lstm": "LSTM"}
                     disp_name = short_map.get(model_name, model_name)
                     sm_icon = "🟢" if sm["hit"] else "🔴"
                     sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:5]) + "]"
