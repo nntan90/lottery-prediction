@@ -267,32 +267,43 @@ async def run_ensemble_for_region(
         total_expected = len(provs_to_run) * TOTAL_MODELS_PER_PROVINCE
         active_count = len(ensemble_output['contributing_models'])
 
-        msg = f"🎯 <b>TÍN HIỆU THỐNG KÊ {region} — {date_str} ({dow_str})</b>\n"
-        msg += f"<i>🤖 Multi-Model Ensemble v3.2 — xếp hạng xác suất tương đối</i>\n\n"
+        msg = f"🎯 <b>BÁO CÁO PHÂN TÍCH TÍN HIỆU {region}</b>\n"
+        msg += f"📅 <b>Ngày: {date_str} ({dow_str})</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        if region == "XSMN":
-            province_map = XSMNCrawler().PROVINCE_MAP
-            pnames = [province_map.get(p, p) for p in provinces]
-            msg += f"🏢 <b>Đài:</b> {', '.join(pnames)}\n\n"
-        else:
-            msg += f"🏢 <b>Đài:</b> Miền Bắc\n\n"
+        # 1. Single Model [XGBoost v3]
+        xgb_results = [r for r in all_model_results if r.get('model_name') == 'xgboost_core' and r.get('status') == 'success']
+        if xgb_results:
+            msg += f"🤖 <b>Single Model [XGBoost v3]</b>\n"
+            for xgb_result in xgb_results:
+                prov_name = xgb_result.get('province') or "ALL"
+                if len(provs_to_run) > 1:
+                    msg += f"🏢 Đài: {prov_name}\n"
+                p1, p2, p3 = [p for p, _ in xgb_result['top_pairs'][:3]]
+                s1, s2, s3 = [s for _, s in xgb_result['top_pairs'][:3]]
+                msg += f"📊 Top 3 tín hiệu: <code>{p1:02d}</code>, <code>{p2:02d}</code>, <code>{p3:02d}</code> | [Score: {s1:.4f} | {s2:.4f} | {s3:.4f}]\n"
+                model_ver = xgb_result.get('model_version') or 'N/A'
+                msg += f" Model: {model_ver}\n"
+            msg += "\n"
 
-        p1, p2, p3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        s1, s2, s3 = prediction["prob_1"], prediction["prob_2"], prediction["prob_3"]
+        # 2. Multi-Model Ensemble
+        msg += f"🤖 <b>Multi-Model Ensemble v3.2 — xếp hạng xác suất tương đối</b>\n"
+        
+        ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
+        msg += f"📊 Top 3 tín hiệu: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
-        pairs_str = f"<code>{p1:02d}</code>, <code>{p2:02d}</code>, <code>{p3:02d}</code>"
+        if scoring_log_msg:
+            msg += f"{scoring_log_msg}\n"
+            
+        msg += f"   Models Active: {active_count}/{total_expected}\n"
 
-        msg += f"📊 <b>Top 3 tín hiệu:</b> {pairs_str}\n"
-        msg += f"   <i>Score tương đối: {s1:.2f} | {s2:.2f} | {s3:.2f}</i>\n"
-        msg += f"   <i>Models Active: {active_count}/{total_expected}</i>\n\n"
-
-        # Model details per province
+        # 3. Model details per province
         for prov in provs_to_run:
             prov_results = [r for r in all_model_results
                            if r.get("province") == prov and r.get("status") == "success"]
             if prov_results:
                 prov_name = prov or "ALL"
-                msg += f"📍 <b>{prov_name}:</b>\n"
+                msg += f"📍 <b>{prov_name}</b>:\n"
                 for r in prov_results:
                     m_short = {
                         "frequency": "Freq", "gap_overdue": "Gap",
@@ -301,28 +312,22 @@ async def run_ensemble_for_region(
                     pairs = ", ".join(f"{p:02d}" for p, _ in r["top_pairs"][:3])
                     msg += f"   🔹 {m_short}: [{pairs}]\n"
 
-        msg += f"\n<i>Hit khi 2 số cuối bất kỳ giải có mặt trong 3 cặp trên. Không phải cam kết chắc thắng.</i>"
-
-        await notifier.send_message(msg, config_key=f"predict_ensemble_{region.lower()}")
-
-        # Gửi scoring log riêng nếu có (tránh exceed Telegram 4096 char limit)
-        if scoring_log_msg:
-            max_len = 4000
-            if len(scoring_log_msg) <= max_len:
-                await notifier.send_message(scoring_log_msg, config_key="predict_ensemble_scoring_log")
-            else:
-                # Chunk scoring log
-                chunks = scoring_log_msg.split('\n\n')
-                current_chunk = ""
-                for chunk in chunks:
-                    if len(current_chunk) + len(chunk) + 2 > max_len:
-                        if current_chunk:
-                            await notifier.send_message(current_chunk, config_key="predict_ensemble_scoring_log")
-                        current_chunk = chunk
-                    else:
-                        current_chunk += ("\n\n" + chunk) if current_chunk else chunk
-                if current_chunk:
-                    await notifier.send_message(current_chunk, config_key="predict_ensemble_scoring_log")
+        max_len = 4000
+        if len(msg) <= max_len:
+            await notifier.send_message(msg, config_key=f"predict_ensemble_{region.lower()}")
+        else:
+            # Chunk message if it exceeds limit
+            chunks = msg.split('\n\n')
+            current_chunk = ""
+            for chunk in chunks:
+                if len(current_chunk) + len(chunk) + 2 > max_len:
+                    if current_chunk:
+                        await notifier.send_message(current_chunk, config_key=f"predict_ensemble_{region.lower()}")
+                    current_chunk = chunk
+                else:
+                    current_chunk += ("\n\n" + chunk) if current_chunk else chunk
+            if current_chunk:
+                await notifier.send_message(current_chunk, config_key=f"predict_ensemble_{region.lower()}")
 
         print(f"\n📱 Telegram notification sent for {region}!")
 

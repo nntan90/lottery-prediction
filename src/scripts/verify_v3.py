@@ -286,26 +286,104 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
     hit_rate = hits / total * 100 if total > 0 else 0
 
     province_map = XSMNCrawler().PROVINCE_MAP
+    
+    # Nhóm dữ liệu theo Region
+    grouped_data = {}
+    for r in results_summary:
+        reg = r["region"].upper()
+        if reg not in grouped_data:
+            grouped_data[reg] = []
+        grouped_data[reg].append(r)
+
     msg = f"📊 <b>KẾT QUẢ DỰ ĐOÁN — {date_str}</b>\n\n"
 
-    for r in results_summary:
-        icon = "✅" if r["hit"] else "❌"
-        pairs_str = " | ".join(f"<code>{p:02d}</code>" for p in r["pairs"])
-        match_str = " ".join(f"<b>{p:02d}</b>" for p in r["matched"]) if r["matched"] else "—"
-        lbl = province_map.get(r["label"].split("/")[-1], r["label"])
-        msg += f"{icon} {lbl}: {pairs_str} → <code>{match_str}</code>\n"
+    for region, records in grouped_data.items():
+        msg += f"📍 <b>{region}</b>\n"
         
-        # Thêm tracking history của sub-models
-        if r["label"] in sub_model_stats:
-            for sm in sub_model_stats[r["label"]]:
-                sm_icon = "🟢" if sm["hit"] else "🔴"
-                sm_match = ",".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
-                msg += f"  └ {sm_icon} {sm['model_name']}: trúng {sm_match}\n"
+        # 1. Single Model [XGBoost v3]
+        msg += f"   └ 🤖 Single Model [XGBoost v3]\n"
+        for r in records:
+            province = r["province"]
+            prov_name = province_map.get(province, province) if province else "All"
+            
+            # Nếu là XSMN, Single Model không có record tổng 'All' nên ta bỏ qua
+            if region == "XSMN" and prov_name.lower() == "all":
+                continue
+                
+            # Nếu là XSMB (chỉ có 'all'), ẩn chữ 'All' đi cho đẹp
+            if prov_name.lower() == "all": 
+                prov_display_sm = "Top 3" 
+            else:
+                prov_display_sm = prov_name.title()
+            
+            # Tìm XGBoost single/core trong model_predictions
+            xgb_sm = next((sm for sm in sub_model_stats.get(r["label"], []) if sm["model_name"] in ["xgboost_single", "xgboost_core"]), None)
+            
+            if xgb_sm:
+                display_pairs = xgb_sm["pairs"][:3] # Single model hiển thị top 3
+                matched_pairs = [p for p in xgb_sm["matched"] if p in display_pairs]
+                icon = "🟢" if matched_pairs else "🔴"
+                pairs_str = " | ".join(f"{p:02d}" for p in display_pairs)
+                match_str = " ".join(f"{p:02d}" for p in matched_pairs) if matched_pairs else "—"
+                msg += f"          └ {icon} {prov_display_sm}: {pairs_str} → {match_str}\n"
+            else:
+                continue # Bỏ qua nếu không có dữ liệu
+                
+        msg += "\n"
+        
+        # 2. Multi-Model
+        msg += f"   └ 🤖 Multi-Model\n"
+        
+        # 2.a) Tìm record ensemble (All)
+        ensemble_record = next((r for r in records if (r["province"] == "all" or r["province"] is None) and str(r.get("model_version", "")).startswith("ensemble")), None)
+        
+        # Fallback cho XSMB nếu không có 'ensemble' trong model_version
+        if not ensemble_record and region == "XSMB":
+            ensemble_record = next((r for r in records if r["province"] is None), None)
 
-    msg += (
-        f"\n📈 <b>Tỉ lệ: {hits}/{total} đài trúng ({hit_rate:.0f}%)</b>\n"
-        f"<i>Trúng = ≥ 1 cặp có trong 2 số cuối bất kỳ giải</i>"
-    )
+        if ensemble_record:
+            pairs_str = " | ".join(f"{p:02d}" for p in ensemble_record["pairs"])
+            match_str = " ".join(f"{p:02d}" for p in ensemble_record["matched"]) if ensemble_record["matched"] else "—"
+            msg += f"          └ Đồng thuận: {pairs_str} → {match_str}\n"
+
+        # 2.b) In lịch sử các sub-models
+        region_labels = [label for label in sub_model_stats.keys() if label.startswith(region + "/")]
+        
+        if region == "XSMB":
+            label = region + "/all"
+            if label in sub_model_stats:
+                valid_sms = [sm for sm in sub_model_stats[label] if sm['model_name'] != "xgboost_single"]
+                for sm in valid_sms:
+                    model_name = sm['model_name']
+                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "lstm_gru": "LSTM"}
+                    disp_name = short_map.get(model_name, model_name)
+                    sm_icon = "🟢" if sm["hit"] else "🔴"
+                    sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:5]) + "]"
+                    sm_match = ", ".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
+                    msg += f"             └ {sm_icon} {disp_name}: {sm_pairs_str} → {sm_match}\n"
+        else:
+            # XSMN in sub-models theo từng đài
+            for label in region_labels:
+                prov = label.split("/", 1)[1]
+                if prov.lower() == "all": continue
+                
+                valid_sms = [sm for sm in sub_model_stats[label] if sm['model_name'] != "xgboost_single"]
+                if not valid_sms: continue
+                
+                prov_name = province_map.get(prov, prov).title()
+                msg += f"          └ 📍 {prov_name}:\n"
+                for sm in valid_sms:
+                    model_name = sm['model_name']
+                    short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "lstm_gru": "LSTM"}
+                    disp_name = short_map.get(model_name, model_name)
+                    sm_icon = "🟢" if sm["hit"] else "🔴"
+                    sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:5]) + "]"
+                    sm_match = ", ".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
+                    msg += f"             └ {sm_icon} {disp_name}: {sm_pairs_str} → {sm_match}\n"
+                    
+        msg += "\n"
+
+    msg += f"📈 <b>Tỉ lệ: {hits}/{total} dự đoán chính xác ({hit_rate:.0f}%)</b>"
 
     await notifier.send_message(msg)
     print(f"\n📊 Verify done: {hits}/{total} hit ({hit_rate:.0f}%)")

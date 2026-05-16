@@ -221,7 +221,7 @@ def compute_global_borda(
     top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
 
     # ── Tạo Telegram Log cho Top 3 ──
-    scoring_log = ['📝 <b>CHI TIẾT CHẤM ĐIỂM (EXPERT SCORING v3.2 — 5 Models):</b>']
+    scoring_log = []
     for pair, score in top_pairs:
         log_lines = []
         # 1. Base Score
