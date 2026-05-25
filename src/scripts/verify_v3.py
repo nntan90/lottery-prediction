@@ -30,50 +30,51 @@ from src.crawler.xsmn_crawler import XSMNCrawler
 from src.utils.operational_date import resolve_operational_date
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces
 
-# Constants for Profit Calculation
-XSMN_TIER_POINTS = [3, 2, 2]
-XSMN_COST_PER_POINT = 14000
-XSMN_REVENUE_PER_HIT_POINT = 70000
-
-XSMB_TIER_POINTS = [2, 1, 1]
-XSMB_COST_PER_POINT = 23000
-XSMB_REVENUE_PER_HIT_POINT = 80000
+# Constants for Profit Calculation (Đá vòng 3 số)
+COST_DA_VONG = 328000
+REVENUE_PER_VONG = 1100000
 
 def calculate_station_profit(region, pairs, tail_rows):
-    """Calculate cost, revenue, profit, and hit details for a station per pair."""
-    region_lower = region.lower()
-    if region_lower == "xsmn":
-        tie_points = XSMN_TIER_POINTS
-        cost_per_pt = XSMN_COST_PER_POINT
-        rev_per_pt = XSMN_REVENUE_PER_HIT_POINT
-    elif region_lower == "xsmb":
-        tie_points = XSMB_TIER_POINTS
-        cost_per_pt = XSMB_COST_PER_POINT
-        rev_per_pt = XSMB_REVENUE_PER_HIT_POINT
-    else:
-        return []
-
-    results = []
-    tails_list = [r["tail_2d"] for r in tail_rows]
-
-    for idx, pair in enumerate(pairs):
-        if pair is None:
-            continue
+    """
+    Calculate cost, revenue, profit for 'Đá vòng 3 con' (Xiên vòng 3).
+    Dùng chung cho cả XSMN và XSMB theo yêu cầu của user.
+    """
+    tails_set = {r["tail_2d"] for r in tail_rows}
+    
+    # Lấy các số dự đoán (bỏ None và trùng lặp nếu có)
+    valid_preds = set(p for p in pairs if p is not None)
+    
+    # Đếm xem có bao nhiêu số trong dự đoán xuất hiện trong kết quả
+    matched_count = 0
+    for p in valid_preds:
+        if p in tails_set:
+            matched_count += 1
             
-        cost = tie_points[idx] * cost_per_pt
-        occurrences = tails_list.count(pair)
-        revenue = tie_points[idx] * occurrences * rev_per_pt
-        profit = revenue - cost
+    # Tính số vòng trúng (Xiên 2)
+    # Đá 3 con -> 3 vòng xiên 2.
+    # Trúng 2 con -> ăn 1 vòng
+    # Trúng 3 con -> ăn 3 vòng
+    if matched_count < 2:
+        vong_trung = 0
+    elif matched_count == 2:
+        vong_trung = 1
+    elif matched_count == 3:
+        vong_trung = 3
+    else:
+        vong_trung = 0
         
-        results.append({
-            "pair": int(pair),
-            "hit_count": occurrences,
-            "cost": cost,
-            "revenue": revenue,
-            "profit": profit
-        })
-
-    return results
+    cost = COST_DA_VONG
+    revenue = vong_trung * REVENUE_PER_VONG
+    profit = revenue - cost
+    
+    # Trả về 1 record đại diện cho cả combo (dùng pair = -1)
+    return [{
+        "pair": -1,
+        "hit_count": matched_count,
+        "cost": cost,
+        "revenue": revenue,
+        "profit": profit
+    }]
 
 
 
