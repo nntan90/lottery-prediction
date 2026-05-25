@@ -65,3 +65,57 @@ combsum:
 # Pair must be selected by at least min_models_agree models to be considered
 # Set to 1 to disable (any model can nominate)
 min_models_agree: 1        # After 60-90 days, consider setting to 2 for robustness
+
+# =============================================================================
+# XSMB-Specific Overrides (v3.3 — Diversity & Anti-Cluster)
+# =============================================================================
+# Reasoning:
+#   XSMB chỉ có 5 model results (1 province) vs XSMN 15+ results (3+ provinces).
+#   Consensus bonus quá lớn (5.0) so với base score (~1.0) khiến top 3 cluster.
+#   Freq+Gap models trùng 10/17 features với XGBoost → triple-counting.
+#   Giải pháp: giảm consensus, rebalance weights, Pure Borda, diversity enforcement.
+#
+# Nếu key không có trong xsmb_overrides, sẽ fallback về giá trị global ở trên.
+# =============================================================================
+xsmb_overrides:
+  # --- XSMB Weights (v3.3 — de-duplicate Freq/Gap overlap with XGBoost) ---
+  # Freq+Gap: giảm vì XGBoost đã bao gồm tất cả features của chúng
+  # Markov: tăng vì là signal THỰC SỰ independent (transition matrix)
+  # XGBoost: tăng vì là superset model với 17 features
+  # LSTM: giữ vì là independent deep learning signal
+  weights:
+    frequency: 0.10         # ↓ from 0.20 (trùng với XGBoost features)
+    gap_overdue: 0.10       # ↓ from 0.20 (trùng với XGBoost features)
+    markov: 0.25            # ↑ from 0.20 (independent transition matrix)
+    xgboost_core: 0.30      # ↑ from 0.25 (superset model)
+    lstm: 0.25              # ↑ from 0.15 (independent deep learning)
+
+  # --- XSMB Consensus (v3.3 — reduced to prevent score domination) ---
+  # Với chỉ 5 models, consensus ≥2 xảy ra ~2.3 lần do ngẫu nhiên.
+  # Bonus phải nhỏ hơn base score (~1.0) để không dominate ranking.
+  consensus:
+    gold_threshold: 4       # ↑ from 3 (khó đạt hơn với 5 models)
+    silver_threshold: 3     # ↑ from 2 (tránh random coincidence)
+    gold_bonus: 1.5         # ↓ from 5.0 (không vượt base score max)
+    silver_bonus: 0.5       # ↓ from 2.0
+
+  # --- XSMB History (v3.3 — reduced gambler's fallacy bias) ---
+  # Lottery draws are independent events. History adjustment nên nhỏ.
+  history:
+    overdue_penalty: -0.5   # ↓ from -2.0
+    sweetspot_bonus: 0.5    # ↓ from 2.0
+    potential_bonus: 0.3    # ↓ from 1.0
+
+  # --- XSMB CombSUM (v3.3 — switch to Pure Borda) ---
+  # CombSUM min-max normalize triệt tiêu rank 4-5 (score ≈ 0).
+  # Pure Borda preserves rank information: rank 5 vẫn đóng góp 1 điểm.
+  combsum:
+    enabled: false          # ← Pure Borda mode cho XSMB
+
+  # --- XSMB Diversity Enforcement (v3.3 — MMR selection) ---
+  # Sau khi tính score, dùng MMR (Maximal Marginal Relevance) để chọn top 3
+  # sao cho các picks không cluster (không cùng derive từ 1 set models).
+  # lambda: 0 = max diversity, 1 = max relevance (pure score-based)
+  diversity:
+    enabled: true
+    lambda: 0.6             # Balance giữa score cao và diversity

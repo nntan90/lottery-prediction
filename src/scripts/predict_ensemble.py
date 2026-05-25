@@ -234,7 +234,9 @@ async def run_ensemble_for_region(
     print(f"  🌍 GLOBAL ENSEMBLE ({region})")
     print(f"  {'='*50}")
 
-    ensemble_output = compute_global_borda(all_model_results, recent_tails, top_n_output=3)
+    ensemble_output = compute_global_borda(
+        all_model_results, recent_tails, top_n_output=3, region=region
+    )
 
     if not ensemble_output["top_pairs"]:
         raise RuntimeError(

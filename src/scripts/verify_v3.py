@@ -28,6 +28,7 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 from src.utils.operational_date import resolve_operational_date
+from src.xsmn_ensemble.resolve_provinces import get_target_provinces
 
 # Constants for Profit Calculation
 XSMN_TIER_POINTS = [3, 2, 2]
@@ -76,16 +77,7 @@ def calculate_station_profit(region, pairs, tail_rows):
 
 
 
-# Tỉnh hợp lệ theo ngày trong tuần của người dùng (0=Monday, 6=Sunday)
-VALID_XSMN_STATIONS = {
-    0: ["tphcm", "dong_thap"],    # Thứ 2
-    1: ["ben_tre", "vung_tau"],   # Thứ 3
-    2: ["dong_nai", "can_tho"],   # Thứ 4
-    3: ["tay_ninh", "an_giang"],  # Thứ 5
-    4: ["vinh_long", "binh_duong"],# Thứ 6
-    5: ["tphcm", "long_an"],      # Thứ 7
-    6: ["tien_giang", "kien_giang"],# Chủ nhật
-}
+
 
 async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: date):
     """Verify tất cả dự đoán cho target_date."""
@@ -124,7 +116,12 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
         if province and province != "all":
             tail_query = tail_query.eq("province", province)
-        # Nếu province là None hoặc "all" -> Lấy tất cả province của region đó trong ngày
+        elif region.upper() == "XSMN":
+            # Nếu province là "all" (Ensemble) -> Chỉ verify trên các đài mục tiêu của XSMN hôm nay
+            # để tránh bị tính trúng sai nếu số đó ra ở đài không đánh (ví dụ Cà Mau)
+            target_provs = get_target_provinces(target_date)
+            if target_provs:
+                tail_query = tail_query.in_("province", target_provs)
 
         tail_rows = tail_query.execute().data
         if not tail_rows:
@@ -159,8 +156,8 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             is_tracking_enabled = True # XSMB always tracked
         elif region_lower == "xsmn":
             if province and province != "all":
-                mapped_prov = province.replace("-", "_").replace("tp_hcm", "tphcm")
-                if mapped_prov in VALID_XSMN_STATIONS.get(weekday, []):
+                target_provs = get_target_provinces(target_date)
+                if province in target_provs:
                     is_tracking_enabled = True
             else:
                 is_tracking_enabled = True # Global ensemble XSMN (province=None or "all") luôn tracking
@@ -237,6 +234,10 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 t_query = db.supabase.table("tails_2d").select("tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
                 if province and province != "all":
                     t_query = t_query.eq("province", province)
+                elif region.upper() == "XSMN":
+                    target_provs = get_target_provinces(target_date)
+                    if target_provs:
+                        t_query = t_query.in_("province", target_provs)
                 t_rows = t_query.execute().data
                 if t_rows:
                     tail_set_cache[(region, province)] = {r["tail_2d"] for r in t_rows}

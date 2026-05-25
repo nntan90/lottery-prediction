@@ -1,8 +1,8 @@
 """
-ensemble_engine.py — Weighted Borda Count + CombSUM Aggregation Engine (v3.2)
+ensemble_engine.py — Weighted Borda Count + CombSUM Aggregation Engine (v3.3)
 Kết hợp output từ 5 sub-models thành Top 3 cuối cùng.
 
-Models (v3.2):
+Models (v3.2+):
   1. frequency      — Pure frequency/hot-cool scoring
   2. gap_overdue    — Pure gap/overdue scoring
   3. markov         — Markov Chain transition
@@ -10,16 +10,25 @@ Models (v3.2):
   5. lstm           — LSTM/GRU sequence model
 
 Scoring config loaded from config/scoring.yaml (falls back to hardcoded defaults).
+XSMB-specific overrides: xsmb_overrides section in scoring.yaml.
+
+v3.3 Changes (XSMB-specific):
+  - Reduced consensus bonus (5.0 → 1.5) — bonus không vượt base score
+  - Rebalanced weights: Freq+Gap giảm (trùng features XGBoost), Markov/XGB/LSTM tăng
+  - Pure Borda mode (CombSUM off) — preserve rank diversity
+  - MMR Diversity Enforcement — top 3 picks anti-cluster
+  - Reduced history adjustment — giảm gambler's fallacy bias
 
 Aggregation Methods:
   - Weighted Borda Count: mỗi model trả top 5, rank → điểm (5→1), × trọng số
-  - CombSUM (optional): chuẩn hóa score min-max trước khi cộng có trọng số
-  - Consensus bonus: ≥2 model chọn cùng pair → bonus
+  - CombSUM (optional, disabled for XSMB): chuẩn hóa score min-max
+  - Consensus bonus: region-specific thresholds
   - History adjustment: 3-week same-weekday lookback
+  - Diversity (XSMB): MMR selection to prevent clustering
 
 Guardrails:
   - 1-2 model lỗi → ensemble vẫn chạy với model còn lại
-  - Dynamic consensus threshold scales with model count
+  - XSMN: giữ nguyên logic v3.2 (backward compatible)
 """
 
 import os
@@ -79,6 +88,167 @@ COMBSUM_METHOD = _comb_cfg.get("method", "minmax")
 MIN_MODELS_AGREE = _CFG.get("min_models_agree", 1)
 
 
+# ─── XSMB-Specific Config Resolver (v3.3) ──────────────────────────────────
+
+def _get_region_config(region: Optional[str] = None) -> dict:
+    """
+    Trả về scoring config cho region cụ thể.
+    XSMB: dùng xsmb_overrides (nếu có), fallback global.
+    XSMN/None: dùng global config (backward compatible).
+
+    Returns:
+        dict với keys: weights, consensus_gold_threshold, consensus_silver_threshold,
+        bonus_gold, bonus_silver, history_overdue, history_sweetspot,
+        history_potential, combsum_enabled, diversity_enabled, diversity_lambda
+    """
+    # Global defaults (= XSMN behavior)
+    cfg = {
+        "weights": DEFAULT_WEIGHTS.copy(),
+        "consensus_gold_threshold": CONSENSUS_THRESHOLD_GOLD,
+        "consensus_silver_threshold": CONSENSUS_THRESHOLD_SILVER,
+        "bonus_gold": BONUS_GOLD,
+        "bonus_silver": BONUS_SILVER,
+        "history_overdue": HISTORY_PENALTY_OVERDUE,
+        "history_sweetspot": HISTORY_BONUS_SWEETSPOT,
+        "history_potential": HISTORY_BONUS_POTENTIAL,
+        "combsum_enabled": COMBSUM_ENABLED,
+        "diversity_enabled": False,
+        "diversity_lambda": 0.6,
+    }
+
+    if region and region.upper() == "XSMB":
+        xsmb = _CFG.get("xsmb_overrides", {})
+        if not xsmb:
+            return cfg
+
+        # Weights override
+        xsmb_w = xsmb.get("weights", {})
+        if xsmb_w:
+            # Start from default, override with XSMB values
+            w = DEFAULT_WEIGHTS.copy()
+            for k, v in xsmb_w.items():
+                w[k] = float(v)
+            cfg["weights"] = w
+
+        # Consensus override
+        xsmb_cons = xsmb.get("consensus", {})
+        if xsmb_cons:
+            cfg["consensus_gold_threshold"] = xsmb_cons.get("gold_threshold", cfg["consensus_gold_threshold"])
+            cfg["consensus_silver_threshold"] = xsmb_cons.get("silver_threshold", cfg["consensus_silver_threshold"])
+            cfg["bonus_gold"] = float(xsmb_cons.get("gold_bonus", cfg["bonus_gold"]))
+            cfg["bonus_silver"] = float(xsmb_cons.get("silver_bonus", cfg["bonus_silver"]))
+
+        # History override
+        xsmb_hist = xsmb.get("history", {})
+        if xsmb_hist:
+            cfg["history_overdue"] = float(xsmb_hist.get("overdue_penalty", cfg["history_overdue"]))
+            cfg["history_sweetspot"] = float(xsmb_hist.get("sweetspot_bonus", cfg["history_sweetspot"]))
+            cfg["history_potential"] = float(xsmb_hist.get("potential_bonus", cfg["history_potential"]))
+
+        # CombSUM override
+        xsmb_comb = xsmb.get("combsum", {})
+        if xsmb_comb:
+            cfg["combsum_enabled"] = bool(xsmb_comb.get("enabled", cfg["combsum_enabled"]))
+
+        # Diversity override
+        xsmb_div = xsmb.get("diversity", {})
+        if xsmb_div:
+            cfg["diversity_enabled"] = bool(xsmb_div.get("enabled", False))
+            cfg["diversity_lambda"] = float(xsmb_div.get("lambda", 0.6))
+
+    return cfg
+
+
+# ─── MMR Diversity Selection (v3.3) ─────────────────────────────────────────
+
+def _jaccard_similarity(set_a: set, set_b: set) -> float:
+    """Jaccard similarity giữa 2 tập model names."""
+    if not set_a and not set_b:
+        return 1.0
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union > 0 else 0.0
+
+
+def _select_diverse_top_n(
+    scored_pairs: list[tuple[int, float]],
+    pair_unique_models: dict[int, set],
+    n: int = 3,
+    lambda_: float = 0.6,
+) -> list[tuple[int, float]]:
+    """
+    MMR (Maximal Marginal Relevance) selection cho diverse top-N.
+
+    Thay vì lấy top-N theo score thuần, MMR cân bằng giữa:
+      - Relevance: score cao
+      - Diversity: supporting model set khác với các pairs đã chọn
+
+    Algorithm:
+      1. Pick #1: pair có score cao nhất
+      2. Pick #i: argmax(λ × norm_score - (1-λ) × max_sim_to_selected)
+         - norm_score: score normalized về [0,1]
+         - max_sim_to_selected: Jaccard similarity lớn nhất với các pairs đã chọn
+
+    Args:
+        scored_pairs: sorted list of (pair, score) — descending by score
+        pair_unique_models: dict pair → set of model names that voted for it
+        n: number of pairs to select
+        lambda_: tradeoff parameter (0=max diversity, 1=max relevance)
+
+    Returns:
+        List of (pair, score) — diverse top-N selection
+    """
+    if len(scored_pairs) <= n:
+        return scored_pairs
+
+    # Normalize scores to [0, 1] cho MMR
+    max_score = scored_pairs[0][1]  # already sorted desc
+    min_score = scored_pairs[-1][1]
+    score_range = max_score - min_score
+
+    def norm_score(s: float) -> float:
+        if score_range < 1e-10:
+            return 1.0
+        return (s - min_score) / score_range
+
+    # Pick #1: highest score
+    selected = [scored_pairs[0]]
+    selected_model_sets = [pair_unique_models.get(scored_pairs[0][0], set())]
+    remaining = list(scored_pairs[1:])
+
+    # Pick #2..#n using MMR
+    while len(selected) < n and remaining:
+        best_mmr = -float('inf')
+        best_idx = 0
+
+        for idx, (pair, score) in enumerate(remaining):
+            # Relevance component
+            relevance = norm_score(score)
+
+            # Diversity component: max similarity to any already-selected pair
+            pair_models = pair_unique_models.get(pair, set())
+            max_sim = max(
+                _jaccard_similarity(pair_models, sel_models)
+                for sel_models in selected_model_sets
+            )
+
+            # MMR score: high relevance, low similarity to selected
+            mmr = lambda_ * relevance - (1.0 - lambda_) * max_sim
+
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = idx
+
+        # Select the best MMR candidate
+        chosen_pair, chosen_score = remaining.pop(best_idx)
+        selected.append((chosen_pair, chosen_score))
+        selected_model_sets.append(pair_unique_models.get(chosen_pair, set()))
+
+    return selected
+
+
 # ─── Model Name Display Mapping ─────────────────────────────────────────────
 MODEL_DISPLAY_NAME = {
     "frequency":    "Freq",
@@ -113,24 +283,51 @@ def compute_global_borda(
     recent_tails: List[int],
     weights: Optional[dict[str, float]] = None,
     top_n_output: int = 3,
+    region: Optional[str] = None,
 ) -> Dict:
     """
     Tính Global Weighted Borda Count + CombSUM từ tất cả model results.
     Kết hợp thuật toán phân tích lịch sử 3 kỳ quay gần nhất.
 
-    Aggregation formula (CombSUM mode):
-        FinalScore(n) = Σ w_m · s_m_normalized(n)  +  consensus_bonus  +  history_adj
+    v3.3: Region-aware scoring.
+      - XSMB: Pure Borda + reduced consensus + MMR diversity
+      - XSMN: giữ nguyên logic v3.2 (backward compatible)
+
+    Aggregation formula:
+      XSMN (CombSUM): FinalScore(n) = Σ w_m · s_m_norm(n) + consensus + history
+      XSMB (Borda):   FinalScore(n) = Σ w_m · borda_pts(n) + consensus + history
+                      → MMR diversity selection for top 3
 
     Args:
         model_results: List of dicts từ nhiều province
         recent_tails: List các 2 số cuối (tails) xuất hiện trong 3 kỳ gần nhất
-        weights: dict model_name -> weight
+        weights: dict model_name -> weight (override region config nếu cung cấp)
         top_n_output: số cặp cuối cùng output (default 3)
+        region: 'XSMB' | 'XSMN' | None — determines scoring pipeline
 
     Returns:
         Dict chứa top 3 global pairs và scoring log.
     """
-    w = weights if weights else DEFAULT_WEIGHTS
+    # ── Load region-specific config ──
+    rcfg = _get_region_config(region)
+    w = weights if weights else rcfg["weights"]
+    use_combsum = rcfg["combsum_enabled"]
+    cons_gold_threshold = rcfg["consensus_gold_threshold"]
+    cons_silver_threshold = rcfg["consensus_silver_threshold"]
+    bonus_gold = rcfg["bonus_gold"]
+    bonus_silver = rcfg["bonus_silver"]
+    hist_overdue = rcfg["history_overdue"]
+    hist_sweetspot = rcfg["history_sweetspot"]
+    hist_potential = rcfg["history_potential"]
+    use_diversity = rcfg["diversity_enabled"]
+    diversity_lambda = rcfg["diversity_lambda"]
+
+    is_xsmb = region and region.upper() == "XSMB"
+    if is_xsmb:
+        mode_label = "Borda" if not use_combsum else "CombSUM"
+        print(f"     🔧 XSMB v3.3: {mode_label} mode, diversity={'ON' if use_diversity else 'OFF'}, "
+              f"consensus=({cons_gold_threshold}/{cons_silver_threshold}), "
+              f"bonus=({bonus_gold}/{bonus_silver})")
 
     # Filter thành công
     valid_results = [r for r in model_results if r.get("status") == "success" and r.get("top_pairs")]
@@ -144,9 +341,9 @@ def compute_global_borda(
             "consensus_pairs": [],
         }
 
-    # ── CombSUM Note ──
-    # Models đã normalize output về [0,1] bên trong (min-max across 100 pairs).
-    # KHÔNG re-normalize ở đây — tránh double normalization làm rank 5 bị zero-out.
+    # ── Scoring Mode Note ──
+    # CombSUM (XSMN default): weight × normalized_score — tốt khi có 15+ data points
+    # Pure Borda (XSMB v3.3): weight × rank_points — preserve rank info, tránh score compression
 
     # ── Tính Borda scores ──
     pair_scores: dict[int, float] = {}
@@ -167,12 +364,13 @@ def compute_global_borda(
             borda_pts = BORDA_POINTS.get(rank, 0)
 
             if borda_pts > 0:
-                if COMBSUM_ENABLED:
-                    # Pure CombSUM: weight × normalized_score
-                    # Models đã output [0,1], không nhân thêm borda_pts (tránh double-count ranking)
+                if use_combsum:
+                    # CombSUM: weight × normalized_score
+                    # Models đã output [0,1], không nhân thêm borda_pts
                     weighted_pts = weight * raw_score
                 else:
-                    # Pure Borda: rank-based only
+                    # Pure Borda: weight × rank_points (5,4,3,2,1)
+                    # Preserves rank diversity — rank 5 vẫn đóng góp 1×weight
                     weighted_pts = weight * borda_pts
 
                 pair_scores[pair] = pair_scores.get(pair, 0) + weighted_pts
@@ -194,10 +392,10 @@ def compute_global_borda(
     # ── Consensus bonus (đếm theo UNIQUE model names, tránh inflate cross-province) ──
     for pair in list(pair_scores.keys()):
         unique_count = len(pair_unique_models.get(pair, set()))
-        if unique_count >= CONSENSUS_THRESHOLD_GOLD:
-            pair_scores[pair] += BONUS_GOLD
-        elif unique_count >= CONSENSUS_THRESHOLD_SILVER:
-            pair_scores[pair] += BONUS_SILVER
+        if unique_count >= cons_gold_threshold:
+            pair_scores[pair] += bonus_gold
+        elif unique_count >= cons_silver_threshold:
+            pair_scores[pair] += bonus_silver
 
     # ── Thuật toán kết hợp lịch sử 3 kỳ gần nhất CÙNG THỨ ──
     recent_counts = {}
@@ -208,17 +406,29 @@ def compute_global_borda(
         count = recent_counts.get(pair, 0)
         if count >= 2:
             # Nổ >= 2 lần trong 3 tuần cùng thứ -> Phạt
-            pair_scores[pair] += HISTORY_PENALTY_OVERDUE
+            pair_scores[pair] += hist_overdue
         elif count == 1:
             # Nổ đúng 1 lần -> Rơi đúng nhịp chuẩn -> Thưởng
-            pair_scores[pair] += HISTORY_BONUS_SWEETSPOT
+            pair_scores[pair] += hist_sweetspot
         else:
             # Chưa nổ -> Tiềm năng (Gan ngắn) -> Thưởng
-            pair_scores[pair] += HISTORY_BONUS_POTENTIAL
+            pair_scores[pair] += hist_potential
 
-    # ── Sort & pick top N ──
+    # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
-    top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
+
+    if use_diversity and len(sorted_pairs) > top_n_output:
+        # MMR diversity selection: pick top N candidates from larger pool
+        # Use top 15 candidates as MMR input to balance speed vs diversity
+        mmr_pool = [(p, s) for p, s in sorted_pairs[:15]]
+        diverse_selection = _select_diverse_top_n(
+            mmr_pool, pair_unique_models, n=top_n_output, lambda_=diversity_lambda
+        )
+        top_pairs = [(pair, round(score, 4)) for pair, score in diverse_selection]
+        print(f"     🎲 MMR diversity: selected {[f'{p:02d}' for p,_ in top_pairs]} "
+              f"(λ={diversity_lambda})")
+    else:
+        top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
 
     # ── Tạo Telegram Log cho Top 3 ──
     scoring_log = []
@@ -231,7 +441,7 @@ def compute_global_borda(
             for r_idx, (p, raw_s) in enumerate(result.get('top_pairs', [])):
                 if p == pair:
                     wt = w.get(result['model_name'], 0.15)
-                    if COMBSUM_ENABLED:
+                    if use_combsum:
                         pts = wt * raw_s
                     else:
                         pts = BORDA_POINTS.get(r_idx + 1, 0) * wt
@@ -244,28 +454,40 @@ def compute_global_borda(
 
         # 2. Consensus Bonus (unique models)
         c_unique = len(pair_unique_models.get(pair, set()))
-        if c_unique >= CONSENSUS_THRESHOLD_GOLD:
-            log_lines.append(f"   ├ Đồng thuận: +{BONUS_GOLD}đ ({c_unique} model đồng ý)")
-        elif c_unique >= CONSENSUS_THRESHOLD_SILVER:
-            log_lines.append(f"   ├ Đồng thuận: +{BONUS_SILVER}đ ({c_unique} model đồng ý)")
+        if c_unique >= cons_gold_threshold:
+            log_lines.append(f"   ├ Đồng thuận: +{bonus_gold}đ ({c_unique} model đồng ý)")
+        elif c_unique >= cons_silver_threshold:
+            log_lines.append(f"   ├ Đồng thuận: +{bonus_silver}đ ({c_unique} model đồng ý)")
 
         # 3. History Bonus
         h_count = recent_counts.get(pair, 0)
         if h_count >= 2:
-            log_lines.append(f"   └ Lịch sử: {HISTORY_PENALTY_OVERDUE}đ (Nổ {h_count} lần/3 tuần)")
+            log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/3 tuần)")
         elif h_count == 1:
-            log_lines.append(f"   └ Lịch sử: +{HISTORY_BONUS_SWEETSPOT}đ (Nổ đúng 1 nhịp/3 tuần)")
+            log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ đúng 1 nhịp/3 tuần)")
         else:
-            log_lines.append(f"   └ Lịch sử: +{HISTORY_BONUS_POTENTIAL}đ (Đang nén 3 tuần chưa ra)")
+            log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén 3 tuần chưa ra)")
+
+        # 4. Diversity tag (XSMB v3.3)
+        if use_diversity:
+            pair_models_set = pair_unique_models.get(pair, set())
+            model_tags = [MODEL_DISPLAY_NAME.get(m, m) for m in pair_models_set]
+            log_lines.append(f"   └ Sources: {', '.join(sorted(model_tags))}")
 
         scoring_log.append('\n'.join(log_lines))
 
-    consensus_pairs_list = [p for p, models in pair_unique_models.items() if len(models) >= CONSENSUS_THRESHOLD_SILVER]
+    consensus_pairs_list = [p for p, models in pair_unique_models.items() if len(models) >= cons_silver_threshold]
+
+    # Determine ensemble method label
+    if is_xsmb:
+        method_label = 'expert_borda_v3.3_diverse' if use_diversity else 'expert_borda_v3.3'
+    else:
+        method_label = 'expert_borda_combsum_v3.2'
 
     return {
         'top_pairs': top_pairs,
         'contributing_models': list(set(contributing)),
-        'ensemble_method': 'expert_borda_combsum_v3.2',
+        'ensemble_method': method_label,
         'borda_details': {p: round(s, 4) for p, s in sorted_pairs},
         'consensus_pairs': consensus_pairs_list,
         'scoring_log': '\n\n'.join(scoring_log)
