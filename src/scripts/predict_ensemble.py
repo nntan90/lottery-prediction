@@ -65,13 +65,14 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
     target_weekday = target_date.weekday()
 
     for prov in provs_to_check:
-        # Lấy 30 kỳ gần nhất để lọc ra 3 kỳ cùng thứ
+        # Lấy đủ số kỳ để tìm ra N kỳ cùng thứ (thường x7 lần limit)
+        fetch_limit = limit_per_province * 7 + 10
         q1 = db.supabase.table("lottery_draws") \
             .select("draw_date") \
             .eq("region", region) \
             .lt("draw_date", str(target_date)) \
             .order("draw_date", desc=True) \
-            .limit(30)
+            .limit(fetch_limit)
         q1 = q1.eq("province", prov) if prov else q1.is_("province", "null")
         draws = q1.execute()
 
@@ -227,15 +228,23 @@ async def run_ensemble_for_region(
         results = await run_models_for_target(db, storage, region, province, target_date, tmpdir)
         all_model_results.extend(results)
 
-    # Lấy lịch sử 3 kỳ gần nhất
+    # Lấy lịch sử kỳ gần nhất (5 kỳ cho XSMB, 3 kỳ cho XSMN)
     limit_per_prov = 5 if region.upper() == "XSMB" else 3
     recent_tails = get_recent_tails(db, region, provinces, target_date, limit_per_province=limit_per_prov)
     print(f"  📅 Lấy lịch sử {limit_per_prov} kỳ quay cùng thứ: {len(recent_tails)} số")
+
+    # Lấy lịch sử mở rộng (10 kỳ cho XSMB để check Toxic Gap)
+    extended_tails = []
+    if region.upper() == "XSMB":
+        extended_tails = get_recent_tails(db, region, provinces, target_date, limit_per_province=10)
+        print(f"  📅 Lấy lịch sử mở rộng 10 kỳ quay cùng thứ (Toxic Gap check): {len(extended_tails)} số")
+
+    print(f"\n  {'='*50}")
     print(f"  🌍 GLOBAL ENSEMBLE ({region})")
     print(f"  {'='*50}")
 
     ensemble_output = compute_global_borda(
-        all_model_results, recent_tails, top_n_output=3, region=region
+        all_model_results, recent_tails, top_n_output=3, region=region, extended_tails=extended_tails
     )
 
     if not ensemble_output["top_pairs"]:
