@@ -228,9 +228,9 @@ async def run_ensemble_for_region(
         all_model_results.extend(results)
 
     # Lấy lịch sử 3 kỳ gần nhất
-    recent_tails = get_recent_tails(db, region, provinces, target_date, limit_per_province=3)
-
-    print(f"\n  {'='*50}")
+    limit_per_prov = 5 if region.upper() == "XSMB" else 3
+    recent_tails = get_recent_tails(db, region, provinces, target_date, limit_per_province=limit_per_prov)
+    print(f"  📅 Lấy lịch sử {limit_per_prov} kỳ quay cùng thứ: {len(recent_tails)} số")
     print(f"  🌍 GLOBAL ENSEMBLE ({region})")
     print(f"  {'='*50}")
 

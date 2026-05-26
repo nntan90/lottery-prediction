@@ -397,22 +397,30 @@ def compute_global_borda(
         elif unique_count >= cons_silver_threshold:
             pair_scores[pair] += bonus_silver
 
-    # ── Thuật toán kết hợp lịch sử 3 kỳ gần nhất CÙNG THỨ ──
+    # ── Thuật toán kết hợp lịch sử N kỳ gần nhất CÙNG THỨ ──
     recent_counts = {}
     for t in recent_tails:
         recent_counts[t] = recent_counts.get(t, 0) + 1
 
     for pair in pair_scores:
         count = recent_counts.get(pair, 0)
-        if count >= 2:
-            # Nổ >= 2 lần trong 3 tuần cùng thứ -> Phạt
-            pair_scores[pair] += hist_overdue
-        elif count == 1:
-            # Nổ đúng 1 lần -> Rơi đúng nhịp chuẩn -> Thưởng
-            pair_scores[pair] += hist_sweetspot
+        
+        if is_xsmb:
+            # XSMB (v3.3): 5 tuần
+            if count >= 3:
+                pair_scores[pair] += hist_overdue
+            elif count in [1, 2]:
+                pair_scores[pair] += hist_sweetspot
+            else:
+                pair_scores[pair] += hist_potential
         else:
-            # Chưa nổ -> Tiềm năng (Gan ngắn) -> Thưởng
-            pair_scores[pair] += hist_potential
+            # XSMN (v3.2): 3 tuần
+            if count >= 2:
+                pair_scores[pair] += hist_overdue
+            elif count == 1:
+                pair_scores[pair] += hist_sweetspot
+            else:
+                pair_scores[pair] += hist_potential
 
     # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
@@ -461,12 +469,22 @@ def compute_global_borda(
 
         # 3. History Bonus
         h_count = recent_counts.get(pair, 0)
-        if h_count >= 2:
-            log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/3 tuần)")
-        elif h_count == 1:
-            log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ đúng 1 nhịp/3 tuần)")
+        n_weeks = 5 if is_xsmb else 3
+        
+        if is_xsmb:
+            if h_count >= 3:
+                log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/{n_weeks} tuần)")
+            elif h_count in [1, 2]:
+                log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ {h_count} nhịp/{n_weeks} tuần)")
+            else:
+                log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
         else:
-            log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén 3 tuần chưa ra)")
+            if h_count >= 2:
+                log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/{n_weeks} tuần)")
+            elif h_count == 1:
+                log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ đúng 1 nhịp/{n_weeks} tuần)")
+            else:
+                log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
 
         # 4. Diversity tag (XSMB v3.3)
         if use_diversity:
