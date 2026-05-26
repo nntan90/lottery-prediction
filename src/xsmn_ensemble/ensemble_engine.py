@@ -284,6 +284,7 @@ def compute_global_borda(
     weights: Optional[dict[str, float]] = None,
     top_n_output: int = 3,
     region: Optional[str] = None,
+    extended_tails: Optional[List[int]] = None,
 ) -> Dict:
     """
     Tính Global Weighted Borda Count + CombSUM từ tất cả model results.
@@ -401,18 +402,31 @@ def compute_global_borda(
     recent_counts = {}
     for t in recent_tails:
         recent_counts[t] = recent_counts.get(t, 0) + 1
+        
+    extended_counts = {}
+    if extended_tails:
+        for t in extended_tails:
+            extended_counts[t] = extended_counts.get(t, 0) + 1
 
     for pair in pair_scores:
         count = recent_counts.get(pair, 0)
         
         if is_xsmb:
-            # XSMB (v3.3): 5 tuần
+            # XSMB (v3.3): 5 tuần + Toxic Gap 10 tuần
             if count >= 3:
                 pair_scores[pair] += hist_overdue
-            elif count in [1, 2]:
-                pair_scores[pair] += hist_sweetspot
+            elif count == 2:
+                pair_scores[pair] += 0.6  # Momentum mạnh
+            elif count == 1:
+                pair_scores[pair] += 0.3  # Momentum vừa
             else:
-                pair_scores[pair] += hist_potential
+                # count == 0: Xét Toxic Gap
+                ext_count = extended_counts.get(pair, 0)
+                if ext_count == 0 and extended_tails:
+                    # Gan nguy hiểm (10 tuần không ra)
+                    pair_scores[pair] += hist_overdue 
+                else:
+                    pair_scores[pair] += hist_potential
         else:
             # XSMN (v3.2): 3 tuần
             if count >= 2:
@@ -474,10 +488,16 @@ def compute_global_borda(
         if is_xsmb:
             if h_count >= 3:
                 log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/{n_weeks} tuần)")
-            elif h_count in [1, 2]:
-                log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ {h_count} nhịp/{n_weeks} tuần)")
+            elif h_count == 2:
+                log_lines.append(f"   └ Lịch sử: +0.6đ (Nổ {h_count} nhịp/{n_weeks} tuần)")
+            elif h_count == 1:
+                log_lines.append(f"   └ Lịch sử: +0.3đ (Nổ {h_count} nhịp/{n_weeks} tuần)")
             else:
-                log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
+                ext_count = extended_counts.get(pair, 0)
+                if ext_count == 0 and extended_tails:
+                    log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Gan nguy hiểm 10 tuần)")
+                else:
+                    log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
         else:
             if h_count >= 2:
                 log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/{n_weeks} tuần)")
