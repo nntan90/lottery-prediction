@@ -119,3 +119,62 @@ xsmb_overrides:
   diversity:
     enabled: true
     lambda: 0.6             # Balance giữa score cao và diversity
+
+# =============================================================================
+# XSMB v4.0 — Dedicated Multi-Model Ensemble (7 Models)
+# =============================================================================
+# Replaces xsmb_overrides for the v4 pipeline (src/xsmb_ensemble/).
+# 7 models: frequency, gap_overdue, markov, xgboost_core, lstm, bayesian, cyclic
+# =============================================================================
+xsmb_v4:
+  models:
+    - frequency
+    - gap_overdue
+    - markov
+    - xgboost_core
+    - lstm
+    - bayesian
+    - cyclic
+
+  # --- v4 Weights (7 models, sum ≈ 1.0) ---
+  # Freq+Gap: low weight (overlap with XGBoost features)
+  # Markov²: medium (independent second-order transition)
+  # XGBoost: highest (25-feature superset ML model)
+  # BiLSTM: medium-high (independent deep learning)
+  # Bayesian: medium (uncertainty-aware, independent signal)
+  # Cyclic: medium (FFT-based, fully independent signal)
+  weights:
+    frequency: 0.10
+    gap_overdue: 0.10
+    markov: 0.15
+    xgboost_core: 0.20
+    lstm: 0.15
+    bayesian: 0.15
+    cyclic: 0.15
+
+  # --- Consensus (stricter with 7 models) ---
+  consensus:
+    gold_threshold: 5       # 5/7 models agree
+    silver_threshold: 3     # 3/7 models agree
+    gold_bonus: 1.5
+    silver_bonus: 0.5
+
+  # --- History (reduced gambler's fallacy) ---
+  history:
+    overdue_penalty: -0.5
+    sweetspot_bonus: 0.5
+    potential_bonus: 0.3
+
+  # --- Diversity (MMR selection) ---
+  diversity:
+    enabled: true
+    lambda: 0.6
+
+  # --- Auto-Weight Tuning ---
+  # Automatically adjust weights based on backtest performance
+  auto_weight:
+    enabled: true
+    lookback_days: 30       # Analyse 30-day rolling window
+    smoothing: 0.7          # 70% performance-driven, 30% current weight
+    min_weight: 0.05        # No model below 5%
+    max_weight: 0.35        # No model above 35%

@@ -94,3 +94,20 @@
 
 **Workflow:** `02-predict-ensemble.yml` — Chạy 07:00 VN hằng ngày.
 **Orchestration:** `src/scripts/predict_ensemble.py` — Fault tolerant (model lỗi → các model còn lại vẫn chạy và bù đắp kết quả).
+
+## 🎯 7. XSMB Multi-Model Ensemble (v4.0)
+> **Scope**: Áp dụng riêng cho XSMB (tách biệt hoàn toàn với XSMN để tối ưu hóa dữ liệu daily).
+
+**7 Sub-Models chạy song song:**
+- **Model A (frequency):** Rule-based hot/cool với multi-window (3/7/14/30/60 kỳ) và same-weekday frequency.
+- **Model B (gap):** Gap/overdue model với weekday-specific gap stats và percentile.
+- **Model C (markov):** Second-order Markov Chain transition matrix (100x100 state space nén) + weekday-conditioned.
+- **Model D (xgboost):** XGBoost classifier nâng cấp lên 25 features (thêm 8 features mới).
+- **Model E (lstm):** Bi-directional LSTM/GRU sequence model (lookback 60 kỳ) kết hợp Attention.
+- **Model F (bayesian):** Bayesian Network posterior scorer + confidence calibration (entropy-based).
+- **Model G (cyclic):** FFT / Autocorrelation chu kỳ tuần hoàn lặp lại của cặp số.
+
+**Ensemble & Weight Tuning:**
+- **Adaptive Weighted Borda:** Borda Count kết hợp confidence/entropy calibration của model Bayesian và auto-weights từ backtest.
+- **Auto-Weight Tuning:** Tự động điều chỉnh weight của 7 models dựa trên rolling backtest performance (30 ngày gần nhất) qua `src/scripts/tune_weights.py`.
+

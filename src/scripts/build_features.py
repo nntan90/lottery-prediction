@@ -137,7 +137,7 @@ def build_features_for_station(
     target_tail_set = frozenset(r["tail_2d"] for r in tail_rows) if tail_rows else None
 
     # Bước 3: Tính 100 feature rows
-    feature_rows = build_features_for_day(target_date, history_df, target_tail_set)
+    feature_rows = build_features_for_day(target_date, history_df, target_tail_set, region=region)
     for row in feature_rows:
         row["region"] = region
         row["province"] = province

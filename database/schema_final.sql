@@ -111,6 +111,16 @@ CREATE TABLE IF NOT EXISTS pair_features (
   -- Context
   day_of_week   SMALLINT, -- 0=Mon ... 6=Sun
 
+  -- XSMB v4 extra features (Migration 07)
+  freq_3                 REAL,
+  freq_14                REAL,
+  weekday_freq_30        REAL,
+  gap_percentile         REAL,
+  neighbor_freq_7        REAL,
+  last_position_encoded  INT,
+  streak_length          INT,
+  cross_pair_corr        REAL,
+
   -- Label (for training)
   hit           BOOLEAN,  -- 1 nếu pair xuất hiện trong TAIL_SET ngày đó
 

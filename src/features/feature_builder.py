@@ -53,6 +53,7 @@ def build_features_for_day(
     target_date: date,
     history: pd.DataFrame,   # from _extract_history, does NOT include target_date
     target_tail_set: Optional[frozenset] = None,  # TAIL_SET của target_date (nếu biết)
+    region: str = "XSMN",
 ) -> List[Dict]:
     """
     Tính feature vector cho 100 cặp (00–99) tại target_date.
@@ -62,6 +63,7 @@ def build_features_for_day(
         target_date: ngày cần tính feature
         history: DataFrame lịch sử (không bao gồm target_date)
         target_tail_set: TAIL_SET của target_date (để tính label hit). None nếu đang predict tương lai.
+        region: 'XSMB' hoặc 'XSMN' để quyết định thêm 8 features v4
 
     Returns:
         List of 100 dicts (1 dict per pair 0–99)
@@ -69,6 +71,7 @@ def build_features_for_day(
     dow = target_date.weekday()   # 0=Mon..6=Sun
     target_month = target_date.month
     n = len(history)
+    is_xsmb = (region == "XSMB")
 
     # ── Pre-compute: decade_freq_30 ──────────────────────────────────────────
     # Nhóm thập phân: pair 0–9 → decade 0, 10–19 → decade 1, ...
@@ -102,6 +105,46 @@ def build_features_for_day(
     else:
         same_month_history = pd.DataFrame()
         n_month = 0
+
+    # ── XSMB-specific v4 pre-computations ────────────────────────────────────
+    if is_xsmb:
+        appeared_matrix = np.zeros((n, 100), dtype=np.float32)
+        for i, tail_set in enumerate(history["tail_set"]):
+            for p in tail_set:
+                if 0 <= p <= 99:
+                    appeared_matrix[i, p] = 1.0
+
+        weekday = target_date.weekday()
+        if "draw_date" in history.columns and n > 0:
+            history_draw_dates = pd.to_datetime(history["draw_date"])
+            wd_mask = history_draw_dates.dt.weekday == weekday
+            wd_history = history[wd_mask]
+            n_wd = len(wd_history)
+            if n_wd >= 3:
+                wd_appeared_matrix = np.zeros((n_wd, 100), dtype=np.float32)
+                for i, tail_set in enumerate(wd_history["tail_set"]):
+                    for p in tail_set:
+                        if 0 <= p <= 99:
+                            wd_appeared_matrix[i, p] = 1.0
+                wd_window = min(n_wd, 30)
+                weekday_freq_30_all = wd_appeared_matrix[-wd_window:].mean(axis=0)
+            else:
+                weekday_freq_30_all = None
+        else:
+            weekday_freq_30_all = None
+
+        if n >= 7:
+            freq7_all = appeared_matrix[-7:].mean(axis=0)
+        else:
+            freq7_all = np.zeros(100, dtype=np.float32)
+
+        if n >= 20:
+            corr_matrix = np.corrcoef(appeared_matrix.T)
+            np.fill_diagonal(corr_matrix, 0)
+            corr_matrix = np.nan_to_num(corr_matrix, 0.0)
+            cross_pair_corr_all = corr_matrix.max(axis=1)
+        else:
+            cross_pair_corr_all = np.zeros(100, dtype=np.float32)
 
     # ── Main loop: tính features cho từng cặp 00–99 ─────────────────────────
     rows = []
@@ -183,12 +226,70 @@ def build_features_for_day(
         else:
             month_freq = round(freq_100, 4)   # fallback: dùng freq_100
 
+        # ── XSMB extra features ─────────────────────────────────────────
+        if is_xsmb:
+            freq_3 = float(appeared_matrix[-3:, pair].mean()) if n >= 3 else 0.0
+            freq_14 = float(appeared_matrix[-14:, pair].mean()) if n >= 14 else 0.0
+
+            if weekday_freq_30_all is not None:
+                weekday_freq_30 = float(weekday_freq_30_all[pair])
+            else:
+                weekday_freq_30 = float(freq_30)
+
+            positions = np.where(appeared_matrix[:, pair] > 0)[0]
+            if len(positions) >= 3:
+                gaps = np.diff(positions)
+                current_gap = n - 1 - positions[-1] if len(positions) > 0 else n
+                gap_percentile = float(np.mean(gaps <= current_gap))
+            else:
+                gap_percentile = 0.5
+
+            if n >= 7:
+                neighbors = []
+                for delta in [-1, 1, -10, 10]:
+                    nb = pair + delta
+                    if 0 <= nb <= 99:
+                        neighbors.append(freq7_all[nb])
+                neighbor_freq_7 = float(np.mean(neighbors)) if neighbors else 0.0
+            else:
+                neighbor_freq_7 = 0.0
+
+            if n > 0:
+                pos_list = np.where(appeared_matrix[:, pair] > 0)[0]
+                if len(pos_list) > 0:
+                    gap = n - 1 - pos_list[-1]
+                    if gap <= 3:
+                        last_position_encoded = 2
+                    elif gap <= 10:
+                        last_position_encoded = 1
+                    else:
+                        last_position_encoded = 0
+                else:
+                    last_position_encoded = 0
+            else:
+                last_position_encoded = 0
+
+            if n > 0:
+                col = appeared_matrix[:, pair]
+                streak = 0
+                last_val = col[-1]
+                for val in reversed(col):
+                    if val == last_val:
+                        streak += 1
+                    else:
+                        break
+                streak_length = int(streak if last_val > 0.5 else -streak)
+            else:
+                streak_length = 0
+
+            cross_pair_corr = float(cross_pair_corr_all[pair])
+
         # ── Label ───────────────────────────────────────────────────────
         hit = None
         if target_tail_set is not None:
             hit = pair in target_tail_set
 
-        rows.append({
+        row_dict = {
             "feature_date":    target_date.isoformat(),
             "pair":            pair,
             # v1 features
@@ -212,7 +313,21 @@ def build_features_for_day(
             "month_freq":      month_freq,
             # label
             "hit":             hit,
-        })
+        }
+
+        if is_xsmb:
+            row_dict.update({
+                "freq_3":                 round(freq_3, 4),
+                "freq_14":                round(freq_14, 4),
+                "weekday_freq_30":        round(weekday_freq_30, 4),
+                "gap_percentile":         round(gap_percentile, 4),
+                "neighbor_freq_7":        round(neighbor_freq_7, 4),
+                "last_position_encoded":  last_position_encoded,
+                "streak_length":          streak_length,
+                "cross_pair_corr":        round(cross_pair_corr, 4),
+            })
+
+        rows.append(row_dict)
 
     return rows
 
