@@ -1,5 +1,5 @@
 """
-ensemble_engine.py — XSMB Adaptive Weighted Borda v4.0
+ensemble_engine.py — XSMB Adaptive Weighted Borda v4.1 (Anti-Echo & Recency Intelligence)
 
 Kết hợp output từ 7 sub-models thành Top 3 cuối cùng.
 
@@ -15,10 +15,18 @@ Models (v4.0):
 Aggregation:
   - Adaptive Weighted Borda Count
   - Confidence-weighted scoring (from Bayesian model)
-  - Consensus bonus (unique model agreement)
-  - History adjustment (same-weekday lookback)
+  - Consensus bonus (unique model agreement) — v4.1: capped to base score
+  - History adjustment (same-weekday lookback) — v4.1: exponential penalty
+  - Recency Dampener — v4.1: score × decay^(count-1)
   - MMR Diversity Selection
   - Auto-weight integration (from auto_weight.py)
+
+v4.1 Changes (Anti-Echo & Recency Intelligence):
+  - Exponential history penalty: -0.5 × 2^(count-2) for count ≥ 3
+  - Consensus scaling cap: bonus ≤ |base_score|
+  - Recency dampener: score × 0.7^(count-1) for count ≥ 2
+  - Momentum 2/5 tuần: neutral (was +0.6)
+  - Enhanced scoring log with decay factor display
 
 Config: scoring.yaml → xsmb_v4 section
 """
@@ -69,17 +77,25 @@ CONSENSUS_GOLD_THRESHOLD = _cons_cfg.get("gold_threshold", 4)
 CONSENSUS_SILVER_THRESHOLD = _cons_cfg.get("silver_threshold", 3)
 BONUS_GOLD = float(_cons_cfg.get("gold_bonus", 1.5))
 BONUS_SILVER = float(_cons_cfg.get("silver_bonus", 0.5))
+CONSENSUS_CAP_TO_BASE = bool(_cons_cfg.get("cap_to_base", True))  # v4.1
 
 # History
 _hist_cfg = _V4_CFG.get("history", _CFG.get("xsmb_overrides", {}).get("history", {}))
 HIST_OVERDUE = float(_hist_cfg.get("overdue_penalty", -0.5))
 HIST_SWEETSPOT = float(_hist_cfg.get("sweetspot_bonus", 0.5))
 HIST_POTENTIAL = float(_hist_cfg.get("potential_bonus", 0.3))
+HIST_EXPONENTIAL = bool(_hist_cfg.get("exponential", True))  # v4.1
 
 # Diversity
 _div_cfg = _V4_CFG.get("diversity", _CFG.get("xsmb_overrides", {}).get("diversity", {}))
 DIVERSITY_ENABLED = bool(_div_cfg.get("enabled", True))
 DIVERSITY_LAMBDA = float(_div_cfg.get("lambda", 0.6))
+
+# Recency Dampener (v4.1)
+_rd_cfg = _V4_CFG.get("recency_dampener", {})
+RECENCY_DAMPENER_ENABLED = bool(_rd_cfg.get("enabled", True))
+RECENCY_DAMPENER_THRESHOLD = int(_rd_cfg.get("threshold", 2))
+RECENCY_DAMPENER_DECAY = float(_rd_cfg.get("decay_base", 0.7))
 
 # Auto-weight
 _aw_cfg = _V4_CFG.get("auto_weight", {})
@@ -258,15 +274,28 @@ def compute_xsmb_ensemble(
                     pair_model_names[pair] = []
                 pair_model_names[pair].append(model_name)
 
-    # ── Consensus bonus ──
+    # ── Consensus bonus (v4.1: capped to base score) ──
+    consensus_applied: dict[int, float] = {}  # track actual bonus applied
     for pair in list(pair_scores.keys()):
         unique_count = len(pair_unique_models.get(pair, set()))
-        if unique_count >= CONSENSUS_GOLD_THRESHOLD:
-            pair_scores[pair] += BONUS_GOLD
-        elif unique_count >= CONSENSUS_SILVER_THRESHOLD:
-            pair_scores[pair] += BONUS_SILVER
+        base = pair_scores[pair]  # base score BEFORE consensus
 
-    # ── History adjustment (5-week same-weekday) ──
+        if unique_count >= CONSENSUS_GOLD_THRESHOLD:
+            bonus = BONUS_GOLD
+            if CONSENSUS_CAP_TO_BASE:
+                cap = max(abs(base), 0.5)  # minimum cap = 0.5
+                bonus = min(bonus, cap)
+            pair_scores[pair] += bonus
+            consensus_applied[pair] = bonus
+        elif unique_count >= CONSENSUS_SILVER_THRESHOLD:
+            bonus = BONUS_SILVER
+            if CONSENSUS_CAP_TO_BASE:
+                cap = max(abs(base), 0.5)
+                bonus = min(bonus, cap)
+            pair_scores[pair] += bonus
+            consensus_applied[pair] = bonus
+
+    # ── History adjustment (v4.1: exponential penalty) ──
     recent_counts: dict[int, int] = {}
     for t in recent_tails:
         recent_counts[t] = recent_counts.get(t, 0) + 1
@@ -276,22 +305,47 @@ def compute_xsmb_ensemble(
         for t in extended_tails:
             extended_counts[t] = extended_counts.get(t, 0) + 1
 
+    history_applied: dict[int, float] = {}  # track history adjustment
     for pair in pair_scores:
         count = recent_counts.get(pair, 0)
 
         if count >= 3:
-            pair_scores[pair] += HIST_OVERDUE   # Too hot, cooling
+            # v4.1: Exponential penalty — quá nóng, cooling aggressively
+            # count=3 → -2.0, count=4 → -4.0, count=5 → -8.0
+            if HIST_EXPONENTIAL:
+                penalty = HIST_OVERDUE * (2 ** (count - 2))
+            else:
+                penalty = HIST_OVERDUE
+            pair_scores[pair] += penalty
+            history_applied[pair] = penalty
         elif count == 2:
-            pair_scores[pair] += 0.6            # Strong momentum
+            # v4.1: Neutral — 2/5 không phải signal rõ ràng
+            pair_scores[pair] += 0.0
+            history_applied[pair] = 0.0
         elif count == 1:
             pair_scores[pair] += 0.3            # Moderate momentum
+            history_applied[pair] = 0.3
         else:
             # Check Toxic Gap (10 weeks)
             ext_count = extended_counts.get(pair, 0)
             if ext_count == 0 and extended_tails:
                 pair_scores[pair] += HIST_OVERDUE  # Dangerous cold streak
+                history_applied[pair] = HIST_OVERDUE
             else:
                 pair_scores[pair] += HIST_POTENTIAL
+                history_applied[pair] = HIST_POTENTIAL
+
+    # ── Recency Dampener (v4.1: multiplicative decay) ──
+    recency_decay_applied: dict[int, float] = {}  # track decay factor
+    if RECENCY_DAMPENER_ENABLED:
+        for pair in pair_scores:
+            count = recent_counts.get(pair, 0)
+            if count >= RECENCY_DAMPENER_THRESHOLD:
+                # decay = base ^ (count - 1)
+                # count=2 → ×0.7, count=3 → ×0.49, count=4 → ×0.343
+                decay = RECENCY_DAMPENER_DECAY ** (count - 1)
+                pair_scores[pair] *= decay
+                recency_decay_applied[pair] = decay
 
     # ── Sort & pick top N (with diversity) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
@@ -311,6 +365,9 @@ def compute_xsmb_ensemble(
         top_pairs, valid_results, w, pair_unique_models,
         recent_counts, extended_counts, extended_tails,
         model_confidences,
+        consensus_applied=consensus_applied,
+        history_applied=history_applied,
+        recency_decay_applied=recency_decay_applied,
     )
 
     consensus_list = [p for p, models in pair_unique_models.items()
@@ -319,7 +376,7 @@ def compute_xsmb_ensemble(
     return {
         "top_pairs": top_pairs,
         "contributing_models": list(set(contributing)),
-        "ensemble_method": "xsmb_borda_v4.0",
+        "ensemble_method": "xsmb_borda_v4.1",
         "borda_details": {p: round(s, 4) for p, s in sorted_pairs},
         "consensus_pairs": consensus_list,
         "scoring_log": scoring_log,
@@ -337,8 +394,19 @@ def _build_scoring_log(
     extended_counts: dict,
     extended_tails: list,
     model_confidences: dict,
+    *,
+    consensus_applied: Optional[dict] = None,
+    history_applied: Optional[dict] = None,
+    recency_decay_applied: Optional[dict] = None,
 ) -> str:
-    """Build human-readable scoring breakdown cho Telegram."""
+    """Build human-readable scoring breakdown cho Telegram (v4.1 enhanced)."""
+    if consensus_applied is None:
+        consensus_applied = {}
+    if history_applied is None:
+        history_applied = {}
+    if recency_decay_applied is None:
+        recency_decay_applied = {}
+
     log_entries = []
 
     for pair, score in top_pairs:
@@ -357,30 +425,47 @@ def _build_scoring_log(
                     lines_detail = f"{m_name}(T{r_idx + 1})"
                     models_hit.append(lines_detail)
 
-        lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ")
+        # v4.1: warning icon for overheated pairs
+        h_count = recent_counts.get(pair, 0)
+        heat_icon = "🔥" if h_count >= 3 else ""
+        lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ {heat_icon}")
         lines.append(f"   ├ Cơ sở: {base_points:.2f}đ từ {', '.join(models_hit)}")
 
-        # Consensus
+        # Consensus (v4.1: show actual bonus + cap info)
         c_unique = len(pair_unique_models.get(pair, set()))
-        if c_unique >= CONSENSUS_GOLD_THRESHOLD:
-            lines.append(f"   ├ Đồng thuận: +{BONUS_GOLD}đ ({c_unique}/{TOTAL_MODELS} model)")
-        elif c_unique >= CONSENSUS_SILVER_THRESHOLD:
-            lines.append(f"   ├ Đồng thuận: +{BONUS_SILVER}đ ({c_unique}/{TOTAL_MODELS} model)")
+        actual_bonus = consensus_applied.get(pair)
+        if actual_bonus is not None:
+            cap_tag = ""
+            if CONSENSUS_CAP_TO_BASE:
+                # Check if bonus was capped
+                if c_unique >= CONSENSUS_GOLD_THRESHOLD and actual_bonus < BONUS_GOLD:
+                    cap_tag = f" [capped ≤ {abs(base_points):.2f}]"
+                elif c_unique >= CONSENSUS_SILVER_THRESHOLD and actual_bonus < BONUS_SILVER:
+                    cap_tag = f" [capped ≤ {abs(base_points):.2f}]"
+            lines.append(f"   ├ Đồng thuận: +{actual_bonus:.2f}đ ({c_unique}/{TOTAL_MODELS} model){cap_tag}")
 
-        # History
-        h_count = recent_counts.get(pair, 0)
-        if h_count >= 3:
-            lines.append(f"   ├ Lịch sử: {HIST_OVERDUE}đ (Nổ {h_count}/5 tuần)")
-        elif h_count == 2:
-            lines.append(f"   ├ Lịch sử: +0.6đ (Momentum mạnh {h_count}/5 tuần)")
-        elif h_count == 1:
-            lines.append(f"   ├ Lịch sử: +0.3đ (Momentum vừa {h_count}/5 tuần)")
-        else:
-            ext_count = extended_counts.get(pair, 0)
-            if ext_count == 0 and extended_tails:
-                lines.append(f"   ├ Lịch sử: {HIST_OVERDUE}đ (Gan nguy hiểm 10 tuần)")
+        # History (v4.1: show exponential penalty detail)
+        hist_adj = history_applied.get(pair)
+        if hist_adj is not None:
+            if h_count >= 3:
+                exp_tag = " ← exponential" if HIST_EXPONENTIAL else ""
+                lines.append(f"   ├ Lịch sử: {hist_adj:.2f}đ (Nổ {h_count}/5 tuần{exp_tag})")
+            elif h_count == 2:
+                lines.append(f"   ├ Lịch sử: 0.00đ (Neutral {h_count}/5 tuần)")
+            elif h_count == 1:
+                lines.append(f"   ├ Lịch sử: +0.30đ (Momentum vừa {h_count}/5 tuần)")
             else:
-                lines.append(f"   ├ Lịch sử: +{HIST_POTENTIAL}đ (Đang nén)")
+                ext_count = extended_counts.get(pair, 0)
+                if ext_count == 0 and extended_tails:
+                    lines.append(f"   ├ Lịch sử: {hist_adj:.2f}đ (Gan nguy hiểm 10 tuần)")
+                else:
+                    lines.append(f"   ├ Lịch sử: +{hist_adj:.2f}đ (Đang nén)")
+
+        # Recency dampener (v4.1)
+        decay = recency_decay_applied.get(pair)
+        if decay is not None:
+            pct_reduction = (1.0 - decay) * 100
+            lines.append(f"   ├ 🔥 Recency Decay: ×{decay:.2f} (-{pct_reduction:.0f}% quá nóng)")
 
         # Model sources
         pair_models = pair_unique_models.get(pair, set())
@@ -416,7 +501,7 @@ def format_ensemble_result(
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],
-        "model_version": "ensemble_v4.0",
+        "model_version": "ensemble_v4.1",
         "ensemble_method": ensemble_output["ensemble_method"],
         "contributing_models": ensemble_output["contributing_models"],
         "final_scores": [s for _, s in top[:3]],

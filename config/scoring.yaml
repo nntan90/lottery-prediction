@@ -152,18 +152,32 @@ xsmb_v4:
     bayesian: 0.15
     cyclic: 0.15
 
-  # --- Consensus (stricter with 7 models) ---
+  # --- Consensus (v4.1 — with scaling cap) ---
+  # Cap: bonus KHÔNG vượt quá base score → tránh consensus domination
   consensus:
     gold_threshold: 5       # 5/7 models agree
     silver_threshold: 3     # 3/7 models agree
     gold_bonus: 1.5
     silver_bonus: 0.5
+    cap_to_base: true       # v4.1: cap bonus ≤ |base_score|
 
-  # --- History (reduced gambler's fallacy) ---
+  # --- History (v4.1 — exponential penalty) ---
+  # Penalty scales exponentially: -0.5 × 2^(count-2)
+  # count=3 → -2.0, count=4 → -4.0, count=5 → -8.0
   history:
     overdue_penalty: -0.5
+    exponential: true       # v4.1: exponential scaling
     sweetspot_bonus: 0.5
     potential_bonus: 0.3
+
+  # --- Recency Dampener (v4.1 — Anti-Echo) ---
+  # Sau khi tính ensemble score, multiply decay factor cho pair nổ nhiều.
+  # decay = decay_base ^ (count - 1)
+  # count=2 → ×0.7, count=3 → ×0.49, count=4 → ×0.343
+  recency_dampener:
+    enabled: true
+    threshold: 2            # Apply khi recent_count >= threshold
+    decay_base: 0.7         # Decay factor per extra hit
 
   # --- Diversity (MMR selection) ---
   diversity:

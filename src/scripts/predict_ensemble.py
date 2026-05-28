@@ -1,5 +1,5 @@
 """
-predict_ensemble.py — v4.0 (7-Model XSMB + 5-Model XSMN)
+predict_ensemble.py — v4.1 (7-Model XSMB + 5-Model XSMN)
 Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
 Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
@@ -323,10 +323,10 @@ async def run_xsmb_ensemble(
     tmpdir: str,
 ):
     """
-    XSMB v4.0 — 7-Model Dedicated Ensemble Pipeline.
+    XSMB v4.1 — 7-Model Dedicated Ensemble Pipeline.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v4.0 (7 Models)")
+    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v4.1 (7 Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"{'='*60}")
 
@@ -357,7 +357,7 @@ async def run_xsmb_ensemble(
     print(f"  📅 Lấy lịch sử mở rộng 10 kỳ (Toxic Gap): {len(extended_tails)} số")
 
     print(f"\n  {'='*50}")
-    print(f"  🌍 XSMB ENSEMBLE v4.0")
+    print(f"  🌍 XSMB ENSEMBLE v4.1")
     print(f"  {'='*50}")
 
     ensemble_output = compute_xsmb_ensemble(
@@ -405,7 +405,7 @@ async def run_xsmb_ensemble(
 
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v4.0 — 7 models</b>\n"
+        msg += f"🤖 <b>Multi-Model Ensemble v4.1 — 7 models</b>\n"
         msg += f"📊 Top 3 tín hiệu: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if scoring_log_msg:
@@ -428,7 +428,7 @@ async def run_xsmb_ensemble(
         await _send_chunked(notifier, msg, "predict_ensemble_xsmb")
         print(f"\n📱 Telegram notification sent for XSMB!")
 
-    print(f"\n✅ XSMB Ensemble v4.0 Prediction complete!")
+    print(f"\n✅ XSMB Ensemble v4.1 Prediction complete!")
 
 
 async def run_xsmn_ensemble(
@@ -543,7 +543,7 @@ async def _send_chunked(notifier, msg: str, config_key: str):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v4.0 + XSMN v3.2)")
+    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v4.1 + XSMN v3.2)")
     parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 
@@ -559,9 +559,9 @@ async def main():
     notifier = LotteryNotifier(db, default_config_key="predict_ensemble")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # XSMB — v4.0 (7 models)
+        # XSMB — v4.1 (7 models)
         print(f"\n{'='*60}")
-        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v4.0 (7 Models)")
+        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v4.1 (7 Models)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir)
 
         # XSMN — v3.2 (5 models, backward compatible)

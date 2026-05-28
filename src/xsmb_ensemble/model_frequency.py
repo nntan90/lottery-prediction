@@ -106,19 +106,29 @@ def predict_frequency(
             # Normalize [-1, +1] → [0, 1]
             acceleration_norm = min(max((acceleration + 0.5) / 1.0, 0.0), 1.0)
 
-            # ── Hot-streak scoring ──
-            # 3/3: xuất hiện tất cả 3 kỳ gần nhất (cực hiếm, cực nóng)
-            # 2/3: xuất hiện 2/3 kỳ gần nhất
+            # ── Hot-streak scoring (v4.1: cooling-aware) ──
+            # 3/3: xuất hiện tất cả 3 kỳ gần nhất → quá nóng, có thể cooling
+            # 2/3: warm signal, nhưng không extreme
+            # v4.1: giảm score cho 3/3 để tránh echo vào consensus
             hot_streak = 0.0
             if n >= 3:
                 last3 = col[-3:]
                 hits_in_3 = last3.sum()
                 if hits_in_3 >= 3:
-                    hot_streak = 1.0   # 3/3 = max hot
+                    hot_streak = 0.3   # ↓ from 1.0 — quá nóng = likely cooling
                 elif hits_in_3 >= 2:
-                    hot_streak = 0.6   # 2/3 = warm
+                    hot_streak = 0.5   # warm signal
                 elif last3[-1] == 1:
                     hot_streak = 0.3   # Xuất hiện kỳ mới nhất
+
+                # v4.1: 7-day cooling check — extreme hot → regression to mean
+                if n >= 7:
+                    last7 = col[-7:]
+                    hits_in_7 = last7.sum()
+                    if hits_in_7 >= 5:
+                        hot_streak *= 0.3  # Extreme hot → dampen heavily
+                    elif hits_in_7 >= 4:
+                        hot_streak *= 0.5  # Very hot → moderate dampen
 
             # ── Momentum: freq ngắn hạn - freq trung hạn ──
             momentum = freq_7 - freq_30

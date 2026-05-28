@@ -173,14 +173,24 @@ def predict_gap(
             freq_7 = col[-min(n, 7):].mean() if n >= 7 else col.mean()
             inverse_recent_freq = 1.0 - freq_7
 
-            # ── Composite Score ──
+            # ── Fresh Compression bonus (v4.1) ──
+            # Pair đang nén: gap trung bình + z-score vừa phải = sweetspot
+            # Ưu tiên pair "building pressure" thay vì pair đang nổ liên tiếp
+            fresh_compression = 0.0
+            if 7 <= gap <= 15 and 0.5 <= gap_zscore <= 2.0:
+                fresh_compression = 0.3   # nhẹ nhàng
+            elif 15 < gap <= 25 and gap_zscore > 1.5:
+                fresh_compression = 0.5   # stronger signal
+
+            # ── Composite Score (v4.1: +fresh_compression) ──
             scores[pair] = (
-                gap_zscore_norm         * 0.25 +
-                weekday_gap_ratio_norm  * 0.20 +
-                gap_pct_norm            * 0.15 +
-                consecutive_miss_norm   * 0.15 +
-                cluster_gap_norm        * 0.10 +
-                inverse_recent_freq     * 0.15
+                gap_zscore_norm         * 0.22 +   # ↓ from 0.25
+                weekday_gap_ratio_norm  * 0.18 +   # ↓ from 0.20
+                gap_pct_norm            * 0.13 +   # ↓ from 0.15
+                consecutive_miss_norm   * 0.12 +   # ↓ from 0.15
+                cluster_gap_norm        * 0.10 +   # unchanged
+                inverse_recent_freq     * 0.15 +   # unchanged
+                fresh_compression       * 0.10     # NEW v4.1
             )
 
         # Min-max normalize to [0, 1]
