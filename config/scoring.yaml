@@ -182,7 +182,7 @@ xsmb_v4:
   # --- Diversity (MMR selection) ---
   diversity:
     enabled: true
-    lambda: 0.6
+    lambda: 0.75
 
   # --- Auto-Weight Tuning ---
   # Automatically adjust weights based on backtest performance
@@ -192,3 +192,32 @@ xsmb_v4:
     smoothing: 0.7          # 70% performance-driven, 30% current weight
     min_weight: 0.05        # No model below 5%
     max_weight: 0.35        # No model above 35%
+
+# =============================================================================
+# XSMN-Specific Overrides (v3.3 — Rebalanced Scoring)
+# =============================================================================
+xsmn_overrides:
+  weights:
+    frequency: 0.15
+    gap_overdue: 0.15
+    markov: 0.20
+    xgboost_core: 0.30
+    lstm: 0.20
+
+  consensus:
+    gold_threshold: 4
+    silver_threshold: 3
+    gold_bonus: 1.0
+    silver_bonus: 0.3
+
+  history:
+    overdue_penalty: -0.5
+    sweetspot_bonus: 0.5
+    potential_bonus: 0.3
+
+  combsum:
+    enabled: false           # Switch to Pure Borda (giống XSMB)
+
+  diversity:
+    enabled: true
+    lambda: 0.7              # Ưu tiên score hơn diversity

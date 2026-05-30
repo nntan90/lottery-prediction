@@ -123,7 +123,14 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
         t_data = q2.execute()
 
         if t_data.data:
-            tails.extend([int(row["tail_2d"]) for row in t_data.data])
+            per_date_pairs = {}
+            for row in t_data.data:
+                d = row.get("draw_date", "")
+                if d not in per_date_pairs:
+                    per_date_pairs[d] = set()
+                per_date_pairs[d].add(int(row["tail_2d"]))
+            for pairs in per_date_pairs.values():
+                tails.extend(pairs)
 
     return tails
 
@@ -215,6 +222,12 @@ async def run_xsmb_models(
     # ── Summary ──
     success_count = sum(1 for r in model_results if r["status"] == "success")
     print(f"\n  📊 XSMB Models Active: {success_count}/{TOTAL_MODELS_XSMB}")
+
+    lstm_results = [r for r in model_results if r.get("model_name") == "lstm"]
+    if lstm_results and lstm_results[0].get("status") != "success":
+        err = lstm_results[0].get("error_message", "unknown")
+        print(f"  🚨 WARNING: LSTM FAILED — {err}")
+        print(f"  🚨 Ensemble sẽ chạy với {success_count} models (LSTM weight={0.15} bị mất)")
 
     # Save model_predictions logs
     for mr in model_results:

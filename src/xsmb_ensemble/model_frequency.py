@@ -134,15 +134,35 @@ def predict_frequency(
             momentum = freq_7 - freq_30
             momentum_norm = min(max((momentum + 0.5) / 1.0, 0.0), 1.0)
 
+            # ── Contrarian: pair lạnh có potential nổ ──
+            contrarian_score = 1.0 - freq_7  # freq thấp = chưa nổ gần đây
+
+            # ── Gap Sweetspot (Fresh Compression) ──
+            fresh_compression = 0.0
+            if n >= 7:
+                gap_since_last = 0
+                for k in range(n-1, -1, -1):
+                    if col[k] > 0.5:
+                        gap_since_last = n - 1 - k
+                        break
+                else:
+                    gap_since_last = n
+                if 7 <= gap_since_last <= 15:
+                    fresh_compression = 0.4
+                elif 15 < gap_since_last <= 25:
+                    fresh_compression = 0.6
+
             # ── Composite Score ──
             scores[pair] = (
-                freq_7            * 0.20 +
-                freq_14           * 0.15 +
+                freq_7            * 0.12 +
+                freq_14           * 0.12 +
                 freq_30           * 0.10 +
-                weekday_freq      * 0.15 +
-                acceleration_norm * 0.15 +
-                hot_streak        * 0.10 +
-                momentum_norm     * 0.15
+                weekday_freq      * 0.13 +
+                acceleration_norm * 0.10 +
+                hot_streak        * 0.08 +
+                momentum_norm     * 0.10 +
+                contrarian_score  * 0.15 +
+                fresh_compression * 0.10
             )
 
         # Min-max normalize to [0, 1]

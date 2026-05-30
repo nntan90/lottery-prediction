@@ -231,6 +231,15 @@ def compute_xsmb_ensemble(
             "models_total": TOTAL_MODELS,
         }
 
+    # NEW: Re-normalize weights
+    active_model_names = {r["model_name"] for r in valid_results}
+    w = {k: v for k, v in w.items() if k in active_model_names}
+    w_sum = sum(w.values())
+    if w_sum > 0:
+        w = {k: v / w_sum for k, v in w.items()}
+    print(f"     🔧 Active models: {len(active_model_names)}/{TOTAL_MODELS}, "
+          f"weights re-normalized: {', '.join(f'{k}={v:.2f}' for k,v in w.items())}")
+
     # ── Extract Bayesian confidence nếu available ──
     if model_confidences is None:
         model_confidences = {}

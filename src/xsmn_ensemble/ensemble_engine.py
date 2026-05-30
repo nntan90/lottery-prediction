@@ -114,6 +114,10 @@ def _get_region_config(region: Optional[str] = None) -> dict:
         "combsum_enabled": COMBSUM_ENABLED,
         "diversity_enabled": False,
         "diversity_lambda": 0.6,
+        "cap_to_base": False,
+        "recency_dampener_enabled": False,
+        "recency_dampener_threshold": 2,
+        "recency_dampener_decay": 0.7,
     }
 
     if region and region.upper() == "XSMB":
@@ -137,6 +141,7 @@ def _get_region_config(region: Optional[str] = None) -> dict:
             cfg["consensus_silver_threshold"] = xsmb_cons.get("silver_threshold", cfg["consensus_silver_threshold"])
             cfg["bonus_gold"] = float(xsmb_cons.get("gold_bonus", cfg["bonus_gold"]))
             cfg["bonus_silver"] = float(xsmb_cons.get("silver_bonus", cfg["bonus_silver"]))
+            cfg["cap_to_base"] = bool(xsmb_cons.get("cap_to_base", cfg["cap_to_base"]))
 
         # History override
         xsmb_hist = xsmb.get("history", {})
@@ -155,8 +160,63 @@ def _get_region_config(region: Optional[str] = None) -> dict:
         if xsmb_div:
             cfg["diversity_enabled"] = bool(xsmb_div.get("enabled", False))
             cfg["diversity_lambda"] = float(xsmb_div.get("lambda", 0.6))
+            
+        # Recency Dampener
+        xsmb_rd = xsmb.get("recency_dampener", {})
+        if xsmb_rd:
+            cfg["recency_dampener_enabled"] = bool(xsmb_rd.get("enabled", False))
+            cfg["recency_dampener_threshold"] = int(xsmb_rd.get("threshold", 2))
+            cfg["recency_dampener_decay"] = float(xsmb_rd.get("decay_base", 0.7))
+
+    elif region and region.upper() == "XSMN":
+        xsmn = _CFG.get("xsmn_overrides", {})
+        if not xsmn:
+            return cfg
+
+        # Weights override
+        xsmn_w = xsmn.get("weights", {})
+        if xsmn_w:
+            w = DEFAULT_WEIGHTS.copy()
+            for k, v in xsmn_w.items():
+                w[k] = float(v)
+            cfg["weights"] = w
+
+        # Consensus override
+        xsmn_cons = xsmn.get("consensus", {})
+        if xsmn_cons:
+            cfg["consensus_gold_threshold"] = xsmn_cons.get("gold_threshold", cfg["consensus_gold_threshold"])
+            cfg["consensus_silver_threshold"] = xsmn_cons.get("silver_threshold", cfg["consensus_silver_threshold"])
+            cfg["bonus_gold"] = float(xsmn_cons.get("gold_bonus", cfg["bonus_gold"]))
+            cfg["bonus_silver"] = float(xsmn_cons.get("silver_bonus", cfg["bonus_silver"]))
+            cfg["cap_to_base"] = bool(xsmn_cons.get("cap_to_base", cfg["cap_to_base"]))
+
+        # History override
+        xsmn_hist = xsmn.get("history", {})
+        if xsmn_hist:
+            cfg["history_overdue"] = float(xsmn_hist.get("overdue_penalty", cfg["history_overdue"]))
+            cfg["history_sweetspot"] = float(xsmn_hist.get("sweetspot_bonus", cfg["history_sweetspot"]))
+            cfg["history_potential"] = float(xsmn_hist.get("potential_bonus", cfg["history_potential"]))
+
+        # CombSUM override
+        xsmn_comb = xsmn.get("combsum", {})
+        if xsmn_comb:
+            cfg["combsum_enabled"] = bool(xsmn_comb.get("enabled", cfg["combsum_enabled"]))
+
+        # Diversity override
+        xsmn_div = xsmn.get("diversity", {})
+        if xsmn_div:
+            cfg["diversity_enabled"] = bool(xsmn_div.get("enabled", False))
+            cfg["diversity_lambda"] = float(xsmn_div.get("lambda", 0.6))
+            
+        # Recency Dampener
+        xsmn_rd = xsmn.get("recency_dampener", {})
+        if xsmn_rd:
+            cfg["recency_dampener_enabled"] = bool(xsmn_rd.get("enabled", False))
+            cfg["recency_dampener_threshold"] = int(xsmn_rd.get("threshold", 2))
+            cfg["recency_dampener_decay"] = float(xsmn_rd.get("decay_base", 0.7))
 
     return cfg
+
 
 
 # ─── MMR Diversity Selection (v3.3) ─────────────────────────────────────────
@@ -322,6 +382,10 @@ def compute_global_borda(
     hist_potential = rcfg["history_potential"]
     use_diversity = rcfg["diversity_enabled"]
     diversity_lambda = rcfg["diversity_lambda"]
+    cap_to_base = rcfg["cap_to_base"]
+    rd_enabled = rcfg["recency_dampener_enabled"]
+    rd_threshold = rcfg["recency_dampener_threshold"]
+    rd_decay = rcfg["recency_dampener_decay"]
 
     is_xsmb = region and region.upper() == "XSMB"
     if is_xsmb:
@@ -332,6 +396,13 @@ def compute_global_borda(
 
     # Filter thành công
     valid_results = [r for r in model_results if r.get("status") == "success" and r.get("top_pairs")]
+
+    # Re-normalize weights cho models active
+    active_model_names = {r["model_name"] for r in valid_results}
+    w = {k: v for k, v in w.items() if k in active_model_names}
+    w_sum = sum(w.values())
+    if w_sum > 0:
+        w = {k: v / w_sum for k, v in w.items()}
 
     if not valid_results:
         return {
@@ -393,10 +464,19 @@ def compute_global_borda(
     # ── Consensus bonus (đếm theo UNIQUE model names, tránh inflate cross-province) ──
     for pair in list(pair_scores.keys()):
         unique_count = len(pair_unique_models.get(pair, set()))
+        base_score = pair_scores[pair]
+        bonus = 0.0
+        
         if unique_count >= cons_gold_threshold:
-            pair_scores[pair] += bonus_gold
+            bonus = bonus_gold
         elif unique_count >= cons_silver_threshold:
-            pair_scores[pair] += bonus_silver
+            bonus = bonus_silver
+            
+        if bonus > 0:
+            if cap_to_base:
+                cap = max(abs(base_score), 0.5)
+                bonus = min(bonus, cap)
+            pair_scores[pair] += bonus
 
     # ── Thuật toán kết hợp lịch sử N kỳ gần nhất CÙNG THỨ ──
     recent_counts = {}
@@ -435,6 +515,14 @@ def compute_global_borda(
                 pair_scores[pair] += hist_sweetspot
             else:
                 pair_scores[pair] += hist_potential
+                
+    # ── Recency Dampener ──
+    if rd_enabled:
+        for pair in pair_scores:
+            count = recent_counts.get(pair, 0)
+            if count >= rd_threshold:
+                decay = rd_decay ** (count - 1)
+                pair_scores[pair] *= decay
 
     # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)

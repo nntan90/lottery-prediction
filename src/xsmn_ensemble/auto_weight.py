@@ -1,5 +1,5 @@
 """
-auto_weight.py — Auto-Weight Tuning Engine (XSMB v4)
+auto_weight.py — Auto-Weight Tuning Engine (XSMN v3.3)
 
 Tự động điều chỉnh weights cho 7 sub-models dựa trên backtest performance:
   1. Query model_predictions N ngày gần nhất
@@ -24,7 +24,7 @@ from typing import Dict, Optional, List
 def compute_optimal_weights(
     db,
     lookback_days: int = 30,
-    region: str = "XSMB",
+    region: str = "XSMN",
     current_weights: Optional[dict[str, float]] = None,
     smoothing: float = 0.7,
     min_weight: float = 0.05,
@@ -53,7 +53,7 @@ def compute_optimal_weights(
     Returns:
         dict[str, float] — optimized weights
     """
-    from src.xsmb_ensemble.ensemble_engine import DEFAULT_WEIGHTS
+    from src.xsmn_ensemble.ensemble_engine import DEFAULT_WEIGHTS
 
     if current_weights is None:
         current_weights = DEFAULT_WEIGHTS.copy()
@@ -157,8 +157,7 @@ def _query_actual_tails(
             .gte("draw_date", start_date.isoformat()) \
             .lte("draw_date", end_date.isoformat())
 
-        # XSMB: province is null
-        q = q.is_("province", "null")
+        # XSMN: query records for specific region (provinces exist, but we aggregate across all provinces)
 
         result = q.execute()
         rows = result.data or []
@@ -248,9 +247,9 @@ def format_weight_report(
     Returns:
         str — formatted Telegram message
     """
-    from src.xsmb_ensemble.ensemble_engine import MODEL_DISPLAY_NAME
+    from src.xsmn_ensemble.ensemble_engine import MODEL_DISPLAY_NAME
 
-    lines = ["📊 <b>XSMB Auto-Weight Report</b>\n"]
+    lines = ["📊 <b>XSMN Auto-Weight Report</b>\n"]
 
     all_models = sorted(set(list(current_weights.keys()) + list(optimal_weights.keys())))
 
