@@ -71,8 +71,14 @@ def compute_credibility_scores(
     """
     is_xsmb = region.upper() == "XSMB"
 
+    from src.scoring.credibility_config import load_credibility_config_from_yaml
+    yaml_cfg = load_credibility_config_from_yaml()
+
     if lookback_draws is None:
-        lookback_draws = LOOKBACK_XSMB if is_xsmb else LOOKBACK_XSMN
+        if is_xsmb:
+            lookback_draws = yaml_cfg.get("lookback_xsmb", LOOKBACK_XSMB)
+        else:
+            lookback_draws = yaml_cfg.get("lookback_xsmn", LOOKBACK_XSMN)
 
     # Load config weights as anchor
     if config_weights is None:

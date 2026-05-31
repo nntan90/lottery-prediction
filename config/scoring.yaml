@@ -231,7 +231,7 @@ xsmn_overrides:
 # =============================================================================
 credibility:
   enabled: true
-  lookback_xsmb: 14          # Number of past draws to evaluate (XSMB daily)
+  lookback_xsmb: 30          # Number of past draws to evaluate (XSMB daily)
   lookback_xsmn: 8           # Number of past draws to evaluate (XSMN weekly)
   recency_decay: 0.85        # Exponential decay per draw (15% loss/draw)
   smoothing: 0.60            # 60% credibility, 40% config weight
