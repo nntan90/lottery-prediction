@@ -68,7 +68,8 @@ from src.xsmb_ensemble.ensemble_engine import (
     format_ensemble_result as xsmb_format_ensemble_result,
     format_model_prediction_log as xsmb_format_model_prediction_log,
 )
-from src.xsmb_ensemble.auto_weight import compute_optimal_weights
+from src.xsmb_ensemble.auto_weight import compute_optimal_weights  # legacy fallback
+from src.scoring.credibility_scorer import compute_credibility_scores
 
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
@@ -346,20 +347,31 @@ async def run_xsmb_ensemble(
     # Run 7 models
     all_model_results = await run_xsmb_models(db, storage, target_date, tmpdir)
 
-    # Auto-weight tuning
+    # Credibility Scoring (pre-prediction — replaces auto_weight)
     auto_weights = None
-    try:
-        auto_weights = compute_optimal_weights(db, lookback_days=30, region="XSMB")
-        if auto_weights:
-            print(f"  🔧 Auto-weights applied: {', '.join(f'{k}={v:.2f}' for k,v in auto_weights.items())}")
-    except Exception as e:
-        print(f"  ⚠️  Auto-weight failed (using defaults): {e}")
-
-    # Extract Bayesian confidence
     model_confidences = {}
+    credibility_log = ""
+    try:
+        credibility = compute_credibility_scores(db, "XSMB", target_date)
+        auto_weights = credibility["credibility_weights"]
+        model_confidences = credibility["confidence_map"]
+        credibility_log = credibility.get("scoring_log", "")
+        print(credibility_log)
+    except Exception as e:
+        print(f"  \u26a0\ufe0f  Credibility scoring failed, falling back to auto_weight: {e}")
+        try:
+            auto_weights = compute_optimal_weights(db, lookback_days=30, region="XSMB")
+            if auto_weights:
+                print(f"  \ud83d\udd27 Auto-weights fallback applied: {', '.join(f'{k}={v:.2f}' for k,v in auto_weights.items())}")
+        except Exception as e2:
+            print(f"  \u26a0\ufe0f  Auto-weight also failed (using defaults): {e2}")
+
+    # Extract Bayesian confidence (merge with credibility confidences)
     for r in all_model_results:
         if r.get("model_name") == "bayesian" and r.get("status") == "success":
-            model_confidences["bayesian"] = r.get("confidence", 1.0)
+            # Only override if credibility didn't provide it
+            if "bayesian" not in model_confidences:
+                model_confidences["bayesian"] = r.get("confidence", 1.0)
 
     # History tails (5 kỳ cùng thứ)
     recent_tails = get_recent_tails(db, "XSMB", [], target_date, limit_per_province=5)
@@ -426,6 +438,10 @@ async def run_xsmb_ensemble(
 
         msg += f"   Models Active: {active}/{TOTAL_MODELS_XSMB}\n\n"
 
+        # Credibility scorecard
+        if credibility_log:
+            msg += f"{credibility_log}\n\n"
+
         # Per-model details
         msg += "📋 <b>Chi tiết các model:</b>\n"
         model_short = {
@@ -472,12 +488,24 @@ async def run_xsmn_ensemble(
     recent_tails = get_recent_tails(db, "XSMN", provinces, target_date, limit_per_province=3)
     print(f"  📅 Lấy lịch sử 3 kỳ quay cùng thứ: {len(recent_tails)} số")
 
+    # Credibility Scoring for XSMN (pre-prediction)
+    xsmn_weights = None
+    xsmn_credibility_log = ""
+    try:
+        xsmn_credibility = compute_credibility_scores(db, "XSMN", target_date)
+        xsmn_weights = xsmn_credibility["credibility_weights"]
+        xsmn_credibility_log = xsmn_credibility.get("scoring_log", "")
+        print(xsmn_credibility_log)
+    except Exception as e:
+        print(f"  \u26a0\ufe0f  XSMN Credibility scoring failed (using defaults): {e}")
+
     print(f"\n  {'='*50}")
-    print(f"  🌍 GLOBAL ENSEMBLE (XSMN)")
+    print(f"  \ud83c\udf0d GLOBAL ENSEMBLE (XSMN)")
     print(f"  {'='*50}")
 
     ensemble_output = compute_global_borda(
-        all_model_results, recent_tails, top_n_output=3, region="XSMN"
+        all_model_results, recent_tails, top_n_output=3, region="XSMN",
+        weights=xsmn_weights,
     )
 
     if not ensemble_output["top_pairs"]:

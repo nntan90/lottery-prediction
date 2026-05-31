@@ -221,3 +221,28 @@ xsmn_overrides:
   diversity:
     enabled: true
     lambda: 0.7              # Ưu tiên score hơn diversity
+
+# =============================================================================
+# Model Credibility Scoring System
+# =============================================================================
+# Pre-prediction engine that evaluates each sub-model's trustworthiness
+# across 6 dimensions before ensemble aggregation.
+# Replaces auto_weight.py for dynamic weight tuning.
+# =============================================================================
+credibility:
+  enabled: true
+  lookback_xsmb: 14          # Number of past draws to evaluate (XSMB daily)
+  lookback_xsmn: 8           # Number of past draws to evaluate (XSMN weekly)
+  recency_decay: 0.85        # Exponential decay per draw (15% loss/draw)
+  smoothing: 0.60            # 60% credibility, 40% config weight
+  min_weight: 0.05           # Floor per model
+  max_weight: 0.35           # Ceiling per model
+  confidence_floor: 0.4      # Minimum Borda confidence multiplier
+  confidence_ceil: 1.2       # Maximum Borda confidence multiplier
+  dim_weights:
+    recency_mrr: 0.30        # Recent hit quality (decay-weighted)
+    streak_momentum: 0.25    # Hot/cold consecutive patterns
+    ndcg_score: 0.15         # Ranking quality (DCG-based)
+    consensus_accuracy: 0.10 # Model's consensus hit accuracy
+    stability_index: 0.10    # Output consistency
+    recovery_speed: 0.10     # Bounce-back speed after misses
