@@ -18,6 +18,7 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
@@ -69,6 +70,11 @@ def load_training_data(
         offset += 1000
 
     df = pd.DataFrame(all_data)
+    if not df.empty:
+        for col in FEATURE_COLS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype(np.float32)
+
     n_ky = len(df) // 100 if len(df) > 0 else 0
     print(f"  ✅ Loaded {len(df)} rows ({n_ky} kỳ){weekday_label}")
     return df

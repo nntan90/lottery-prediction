@@ -52,7 +52,11 @@ def _load_scoring_config() -> dict:
 _CFG = _load_scoring_config()
 
 # Borda points by rank position (1-indexed)
-BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}).items()}
+_DEFAULT_BORDA_POINTS = {
+    1: 5, 2: 4, 3: 3, 4: 2, 5: 1,
+    6: 0.5, 7: 0.4, 8: 0.3, 9: 0.2, 10: 0.1,
+}
+BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", _DEFAULT_BORDA_POINTS).items()}
 
 # Default expert weights (v3.2 — 5 models)
 _w_cfg = _CFG.get("weights", {})
@@ -321,6 +325,23 @@ MODEL_DISPLAY_NAME = {
 }
 
 
+def _source_key(model_name: str, province: Optional[str], *, is_xsmb: bool) -> str:
+    """Return the source id used for consensus counting."""
+    if is_xsmb:
+        return model_name
+    return f"{model_name}@{province or 'ALL'}"
+
+
+def _display_source(source_key: str) -> str:
+    """Human-readable source label for Telegram logs."""
+    if "@" not in source_key:
+        return MODEL_DISPLAY_NAME.get(source_key, source_key)
+
+    model_name, province = source_key.split("@", 1)
+    model_label = MODEL_DISPLAY_NAME.get(model_name, model_name)
+    return f"{model_label}/{province}"
+
+
 def _normalize_scores_minmax(top_pairs: list) -> list:
     """
     Normalize raw scores to [0, 1] range using min-max.
@@ -336,6 +357,42 @@ def _normalize_scores_minmax(top_pairs: list) -> list:
     if rng < 1e-10:
         return [(p, 1.0) for p, _ in top_pairs]
     return [(p, (s - s_min) / rng) for p, s in top_pairs]
+
+
+def _build_candidate_shortlist(
+    sorted_pairs: list[tuple[int, float]],
+    pair_model_count: dict[int, int],
+    pair_unique_models: dict[int, set],
+    *,
+    limit: int = 10,
+) -> tuple[list[dict], str]:
+    """Build a compact Top-N candidate audit log for Telegram."""
+    candidates = []
+    lines = ["📌 <b>Top 10 ứng viên multi-model (pool chung)</b>"]
+
+    for rank, (pair, score) in enumerate(sorted_pairs[:limit], start=1):
+        source_keys = sorted(pair_unique_models.get(pair, set()))
+        display_models = [_display_source(s) for s in source_keys]
+        support_count = pair_model_count.get(pair, 0)
+
+        candidates.append({
+            "rank": rank,
+            "pair": pair,
+            "score": round(score, 4),
+            "support_count": support_count,
+            "unique_model_count": len(source_keys),
+            "models": source_keys,
+            "sources": source_keys,
+        })
+
+        source_str = ", ".join(display_models) if display_models else "-"
+        lines.append(
+            f"   {rank:02d}. <code>{pair:02d}</code> = {score:.2f}đ"
+            f" | votes={support_count}, sources={len(source_keys)}"
+            f" | {source_str}"
+        )
+
+    return candidates, "\n".join(lines) if candidates else ""
 
 
 def compute_global_borda(
@@ -411,6 +468,8 @@ def compute_global_borda(
             "ensemble_method": "weighted_borda",
             "borda_details": {},
             "consensus_pairs": [],
+            "candidate_log": "",
+            "top_candidates": [],
         }
 
     # ── Scoring Mode Note ──
@@ -420,16 +479,17 @@ def compute_global_borda(
     # ── Tính Borda scores ──
     pair_scores: dict[int, float] = {}
     pair_model_count: dict[int, int] = {}  # đếm tổng model results chọn pair
-    pair_unique_models: dict[int, set] = {}  # đếm UNIQUE model names per pair
-    pair_model_names: dict[int, list] = {}  # track model names per pair
+    pair_unique_models: dict[int, set] = {}  # XSMN counts unique model@province sources per pair
+    pair_model_names: dict[int, list] = {}  # track source names per pair
 
     contributing = []
 
     for result in valid_results:
         model_name = result["model_name"]
         prov = result.get("province", "unknown")
+        source = _source_key(model_name, prov, is_xsmb=is_xsmb)
         weight = w.get(model_name, 0.15)  # fallback weight
-        contributing.append(f"{model_name}_{prov}")
+        contributing.append(source)
 
         for rank_idx, (pair, raw_score) in enumerate(result["top_pairs"]):
             rank = rank_idx + 1  # 1-indexed
@@ -449,19 +509,22 @@ def compute_global_borda(
                 pair_model_count[pair] = pair_model_count.get(pair, 0) + 1
                 if pair not in pair_unique_models:
                     pair_unique_models[pair] = set()
-                pair_unique_models[pair].add(model_name)
+                pair_unique_models[pair].add(source)
                 if pair not in pair_model_names:
                     pair_model_names[pair] = []
-                pair_model_names[pair].append(model_name)
+                pair_model_names[pair].append(source)
 
-    # ── Minimum Model Agreement Filter ──
+    # ── Minimum Source Agreement Filter ──
     if MIN_MODELS_AGREE > 1:
         pair_scores = {
             p: s for p, s in pair_scores.items()
             if pair_model_count.get(p, 0) >= MIN_MODELS_AGREE
         }
 
-    # ── Consensus bonus (đếm theo UNIQUE model names, tránh inflate cross-province) ──
+    # ── Consensus bonus ──
+    # XSMN pools all selected pairs from the two daily provinces first, then
+    # scores/ranks once globally. Consensus therefore counts unique model@province
+    # sources, e.g. frequency@tp-hcm and frequency@dong-thap are two sources.
     for pair in list(pair_scores.keys()):
         unique_count = len(pair_unique_models.get(pair, set()))
         base_score = pair_scores[pair]
@@ -526,11 +589,13 @@ def compute_global_borda(
 
     # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
+    top_candidates, candidate_log = _build_candidate_shortlist(
+        sorted_pairs, pair_model_count, pair_unique_models, limit=10
+    )
 
     if use_diversity and len(sorted_pairs) > top_n_output:
-        # MMR diversity selection: pick top N candidates from larger pool
-        # Use top 15 candidates as MMR input to balance speed vs diversity
-        mmr_pool = [(p, s) for p, s in sorted_pairs[:15]]
+        # MMR diversity selection uses the same Top 10 pool shown in Telegram.
+        mmr_pool = [(p, s) for p, s in sorted_pairs[:10]]
         diverse_selection = _select_diverse_top_n(
             mmr_pool, pair_unique_models, n=top_n_output, lambda_=diversity_lambda
         )
@@ -556,8 +621,10 @@ def compute_global_borda(
                     else:
                         pts = BORDA_POINTS.get(r_idx + 1, 0) * wt
                     base_points += pts
-                    m_name = MODEL_DISPLAY_NAME.get(result['model_name'], result['model_name'])
-                    models_hit.append(f"{m_name}(Top{r_idx+1})")
+                    source = _source_key(
+                        result['model_name'], result.get("province", "unknown"), is_xsmb=is_xsmb
+                    )
+                    models_hit.append(f"{_display_source(source)}(Top{r_idx+1})")
 
         log_lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ")
         log_lines.append(f"   ├ Cơ sở: {base_points:.2f}đ từ {', '.join(models_hit)}")
@@ -565,9 +632,9 @@ def compute_global_borda(
         # 2. Consensus Bonus (unique models)
         c_unique = len(pair_unique_models.get(pair, set()))
         if c_unique >= cons_gold_threshold:
-            log_lines.append(f"   ├ Đồng thuận: +{bonus_gold}đ ({c_unique} model đồng ý)")
+            log_lines.append(f"   ├ Đồng thuận: +{bonus_gold}đ ({c_unique} nguồn đồng ý)")
         elif c_unique >= cons_silver_threshold:
-            log_lines.append(f"   ├ Đồng thuận: +{bonus_silver}đ ({c_unique} model đồng ý)")
+            log_lines.append(f"   ├ Đồng thuận: +{bonus_silver}đ ({c_unique} nguồn đồng ý)")
 
         # 3. History Bonus
         h_count = recent_counts.get(pair, 0)
@@ -597,7 +664,7 @@ def compute_global_borda(
         # 4. Diversity tag (XSMB v3.3)
         if use_diversity:
             pair_models_set = pair_unique_models.get(pair, set())
-            model_tags = [MODEL_DISPLAY_NAME.get(m, m) for m in pair_models_set]
+            model_tags = [_display_source(m) for m in pair_models_set]
             log_lines.append(f"   └ Sources: {', '.join(sorted(model_tags))}")
 
         scoring_log.append('\n'.join(log_lines))
@@ -616,7 +683,9 @@ def compute_global_borda(
         'ensemble_method': method_label,
         'borda_details': {p: round(s, 4) for p, s in sorted_pairs},
         'consensus_pairs': consensus_pairs_list,
-        'scoring_log': '\n\n'.join(scoring_log)
+        'scoring_log': '\n\n'.join(scoring_log),
+        'candidate_log': candidate_log,
+        'top_candidates': top_candidates,
     }
 
 
@@ -658,7 +727,8 @@ def format_ensemble_result(
         "hit": None,
         "matched_pairs": None,
         "tail_set": None,
-        "scoring_log": ensemble_output.get('scoring_log', '')
+        "scoring_log": ensemble_output.get('scoring_log', ''),
+        "candidate_log": ensemble_output.get('candidate_log', ''),
     }
 
 

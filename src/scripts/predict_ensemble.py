@@ -1,23 +1,26 @@
 """
-predict_ensemble.py — v4.1 (7-Model XSMB + 5-Model XSMN)
+predict_ensemble.py — v4.2 (10-Model XSMB + 5-Model XSMN)
 Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
 Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
-XSMB (v4.0 — 7 models):
-  1. Frequency (multi-window)    → Top 5
-  2. Gap/Overdue (weekday)       → Top 5
-  3. Markov (second-order)       → Top 5
-  4. XGBoost (25 features)       → Top 5
-  5. BiLSTM + Attention          → Top 5
-  6. Bayesian (posterior)         → Top 5
-  7. Cyclic (FFT patterns)       → Top 5
+XSMB (v4.2 — 10 models):
+  1. Frequency (multi-window)    → Top 2
+  2. Gap/Overdue (weekday)       → Top 2
+  3. Markov (second-order)       → Top 2
+  4. XGBoost (25 features)       → Top 2
+  5. BiLSTM + Attention          → Top 2
+  6. Bayesian (posterior)        → Top 2
+  7. Cyclic (FFT patterns)       → Top 2
+  8. Stats Freq/Gap              → Top 2
+  9. Chi-square GOF              → Top 2
+  10. Chi-square Independence    → Top 2
   → Adaptive Borda Ensemble      → Top 3
 
 XSMN (v3.2 — 5 models, backward compatible):
   1-5. Frequency/Gap/Markov/XGB/LSTM → Borda+CombSUM → Top 3
 
 Flow mỗi ngày:
-  1. XSMB: chạy 7 models → v4 ensemble
+  1. XSMB: chạy 10 models → v4 ensemble
   2. XSMN: resolve provinces → chạy 5 models per province → v3.2 ensemble
   3. Ghi prediction_results + model_predictions
   4. Gửi Telegram notification
@@ -29,6 +32,7 @@ Usage:
 
 import argparse
 import asyncio
+import html
 import os
 import sys
 import tempfile
@@ -63,6 +67,11 @@ from src.xsmb_ensemble.model_xgboost import predict_xgboost as xsmb_predict_xgbo
 from src.xsmb_ensemble.model_lstm import predict_lstm as xsmb_predict_lstm
 from src.xsmb_ensemble.model_bayesian import predict_bayesian as xsmb_predict_bayesian
 from src.xsmb_ensemble.model_cyclic import predict_cyclic as xsmb_predict_cyclic
+from src.xsmb_ensemble.model_stats_freq_gap import predict_stats_freq_gap as xsmb_predict_stats_freq_gap
+from src.xsmb_ensemble.model_chisquare_gof import predict_chisquare_gof as xsmb_predict_chisquare_gof
+from src.xsmb_ensemble.model_chisquare_independence import (
+    predict_chisquare_independence as xsmb_predict_chisquare_independence,
+)
 from src.xsmb_ensemble.ensemble_engine import (
     compute_xsmb_ensemble,
     format_ensemble_result as xsmb_format_ensemble_result,
@@ -74,11 +83,32 @@ from src.scoring.credibility_scorer import compute_credibility_scores
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-TOTAL_MODELS_XSMB = 7           # v4: 7 models for XSMB
+TOTAL_MODELS_XSMB = 10          # v4.2: 10 models for XSMB
 TOTAL_MODELS_PER_PROVINCE = 5   # v3.2: 5 models per XSMN province
+MODEL_OUTPUT_TOP_N = 10
+XSMB_MODEL_OUTPUT_TOP_N = 2
 RULE_MODEL_LOOKBACK_DRAWS = 180
 XGB_FEATURE_LOOKBACK_DRAWS = 240
 LSTM_LOOKBACK_DRAWS = 180
+
+MODEL_SHORT_NAMES = {
+    "frequency": "Freq",
+    "gap_overdue": "Gap",
+    "markov": "Markov",
+    "xgboost_core": "XGB",
+    "lstm": "LSTM",
+    "bayesian": "Bayes",
+    "cyclic": "Cyclic",
+    "stats_freq_gap": "StatsFG",
+    "chisquare_gof": "ChiGOF",
+    "chisquare_independence": "ChiInd",
+}
+
+XSMB_MODEL_SHORT_NAMES = {
+    **MODEL_SHORT_NAMES,
+    "markov": "Markov²",
+    "lstm": "BiLSTM",
+}
 
 
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
@@ -143,11 +173,11 @@ async def run_xsmb_models(
     tmpdir: str,
 ) -> list:
     """
-    Chạy 7 models XSMB v4. Trả về list model_results.
+    Chạy 10 models XSMB v4.2. Trả về list model_results.
     Fault-tolerant: model lỗi → ensemble vẫn chạy với model còn lại.
     """
     print(f"\n  {'='*50}")
-    print(f"  📍 XSMB v4.0 — 7-Model Pipeline")
+    print(f"  📍 XSMB v4.2 — 10-Model Pipeline")
     print(f"  {'='*50}")
 
     model_results = []
@@ -156,7 +186,7 @@ async def run_xsmb_models(
     print(f"  🔹 Model A (Frequency/Multi-window)...")
     result = xsmb_predict_frequency(
         db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5, region="XSMB",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
     )
     model_results.append(result)
     _log_model_result(result, "A")
@@ -165,7 +195,7 @@ async def run_xsmb_models(
     print(f"  🔹 Model B (Gap/Weekday-specific)...")
     result = xsmb_predict_gap(
         db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5, region="XSMB",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
     )
     model_results.append(result)
     _log_model_result(result, "B")
@@ -174,7 +204,7 @@ async def run_xsmb_models(
     print(f"  🔹 Model C (Markov²)...")
     result = xsmb_predict_markov(
         db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5, region="XSMB",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
     )
     model_results.append(result)
     _log_model_result(result, "C")
@@ -183,7 +213,7 @@ async def run_xsmb_models(
     print(f"  🔹 Model D (XGBoost v4)...")
     result = xsmb_predict_xgboost(
         db, storage, province=None, target_date=target_date,
-        region="XSMB", n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=5, tmpdir=tmpdir,
+        region="XSMB", n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result)
     _log_model_result(result, "D")
@@ -192,7 +222,7 @@ async def run_xsmb_models(
     print(f"  🔹 Model E (BiLSTM+Attention)...")
     result = xsmb_predict_lstm(
         db, storage=storage, province=None, target_date=target_date,
-        region="XSMB", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=60, top_n=5, tmpdir=tmpdir,
+        region="XSMB", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=60, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result)
     _log_model_result(result, "E")
@@ -201,13 +231,13 @@ async def run_xsmb_models(
     print(f"  🔹 Model F (Bayesian)...")
     result = xsmb_predict_bayesian(
         db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5, region="XSMB",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
     )
     model_results.append(result)
     if result["status"] == "success":
         conf = result.get("confidence", 0)
         pairs_str = ", ".join(f"{p:02d}" for p, _ in result["top_pairs"])
-        print(f"     ✅ Top 5: [{pairs_str}] (conf={conf:.2f}, {result['execution_time_ms']}ms)")
+        print(f"     ✅ Top {XSMB_MODEL_OUTPUT_TOP_N}: [{pairs_str}] (conf={conf:.2f}, {result['execution_time_ms']}ms)")
     else:
         print(f"     ❌ Error: {result['error_message']}")
 
@@ -215,10 +245,37 @@ async def run_xsmb_models(
     print(f"  🔹 Model G (Cyclic/FFT)...")
     result = xsmb_predict_cyclic(
         db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5, region="XSMB",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
     )
     model_results.append(result)
     _log_model_result(result, "G")
+
+    # ── Model H: Descriptive Frequency/Gap Stats ──
+    print(f"  🔹 Model H (Stats Freq/Gap)...")
+    result = xsmb_predict_stats_freq_gap(
+        db, province=None, target_date=target_date,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    )
+    model_results.append(result)
+    _log_model_result(result, "H")
+
+    # ── Model I: Chi-square Goodness-of-fit ──
+    print(f"  🔹 Model I (Chi-square GOF)...")
+    result = xsmb_predict_chisquare_gof(
+        db, province=None, target_date=target_date,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    )
+    model_results.append(result)
+    _log_model_result(result, "I")
+
+    # ── Model J: Chi-square Independence/Homogeneity ──
+    print(f"  🔹 Model J (Chi-square Independence)...")
+    result = xsmb_predict_chisquare_independence(
+        db, province=None, target_date=target_date,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    )
+    model_results.append(result)
+    _log_model_result(result, "J")
 
     # ── Summary ──
     success_count = sum(1 for r in model_results if r["status"] == "success")
@@ -261,7 +318,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 1 (Frequency/Hot-Cool)...")
     result_1 = xsmn_predict_frequency(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
     )
     model_results.append(result_1)
     _log_model_result(result_1, "1")
@@ -270,7 +327,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 2 (Gap/Overdue)...")
     result_2 = xsmn_predict_gap(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
     )
     model_results.append(result_2)
     _log_model_result(result_2, "2")
@@ -279,7 +336,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 3 (Markov)...")
     result_3 = xsmn_predict_markov(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=5,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
     )
     model_results.append(result_3)
     _log_model_result(result_3, "3")
@@ -288,7 +345,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 4 (XGBoost)...")
     result_4 = xsmn_predict_xgboost(
         db, storage, province, target_date, region="XSMN",
-        n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=5, tmpdir=tmpdir,
+        n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result_4)
     _log_model_result(result_4, "4")
@@ -297,7 +354,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 5 (LSTM/GRU)...")
     result_5 = xsmn_predict_lstm(
         db, storage=storage, province=province, target_date=target_date,
-        region="XSMN", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=30, top_n=5, tmpdir=tmpdir,
+        region="XSMN", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=30, top_n=MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result_5)
     _log_model_result(result_5, "5")
@@ -324,9 +381,47 @@ def _log_model_result(result: dict, label: str):
         version_str = f" [{result.get('model_version', '')}]" if result.get('model_version') else ""
         time_str = f"{result['execution_time_ms']}ms"
         n_str = f"n={result['n_draws_used']} kỳ, " if result.get('n_draws_used') else ""
-        print(f"     ✅ Top 5: [{pairs_str}]{version_str} ({n_str}{time_str})")
+        print(f"     ✅ Top {len(result['top_pairs'])}: [{pairs_str}]{version_str} ({n_str}{time_str})")
     else:
         print(f"     ❌ Error: {result['error_message']}")
+
+
+def _format_pair_list(top_pairs: list, limit: int = MODEL_OUTPUT_TOP_N, with_scores: bool = False) -> str:
+    """Format Top-N pairs for compact Telegram display."""
+    pairs = top_pairs[:limit]
+    if with_scores:
+        return ", ".join(f"<code>{p:02d}</code>({s:.2f})" for p, s in pairs)
+    return ", ".join(f"<code>{p:02d}</code>" for p, _ in pairs)
+
+
+def _format_model_top_log(
+    model_results: list[dict],
+    *,
+    title: str,
+    model_short_names: dict[str, str],
+    limit: int = MODEL_OUTPUT_TOP_N,
+) -> str:
+    """Build Telegram log showing each successful model's Top-N selected pairs."""
+    lines = [f"📋 <b>{title}</b>"]
+    has_success = False
+
+    for result in model_results:
+        if result.get("status") != "success":
+            continue
+
+        top_pairs = result.get("top_pairs") or []
+        if not top_pairs:
+            continue
+
+        has_success = True
+        model_name = result.get("model_name", "unknown")
+        model_label = model_short_names.get(model_name, model_name)
+        province = result.get("province")
+        province_label = f" {html.escape(str(province))}" if province else ""
+        pairs = _format_pair_list(top_pairs, limit=limit)
+        lines.append(f"   🔹 {html.escape(model_label)}{province_label}: [{pairs}]")
+
+    return "\n".join(lines) if has_success else ""
 
 
 async def run_xsmb_ensemble(
@@ -337,14 +432,14 @@ async def run_xsmb_ensemble(
     tmpdir: str,
 ):
     """
-    XSMB v4.1 — 7-Model Dedicated Ensemble Pipeline.
+    XSMB v4.2 — 10-Model Dedicated Ensemble Pipeline.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v4.1 (7 Models)")
+    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v4.2 (10 Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"{'='*60}")
 
-    # Run 7 models
+    # Run 10 models
     all_model_results = await run_xsmb_models(db, storage, target_date, tmpdir)
 
     # Credibility Scoring (pre-prediction — replaces auto_weight)
@@ -382,7 +477,7 @@ async def run_xsmb_ensemble(
     print(f"  📅 Lấy lịch sử mở rộng 10 kỳ (Toxic Gap): {len(extended_tails)} số")
 
     print(f"\n  {'='*50}")
-    print(f"  🌍 XSMB ENSEMBLE v4.1")
+    print(f"  🌍 XSMB ENSEMBLE v4.2")
     print(f"  {'='*50}")
 
     ensemble_output = compute_xsmb_ensemble(
@@ -407,6 +502,7 @@ async def run_xsmb_ensemble(
     # Save prediction
     prediction = xsmb_format_ensemble_result("XSMB", None, ensemble_output, target_date)
     scoring_log_msg = prediction.pop('scoring_log', '')
+    candidate_log_msg = prediction.pop('candidate_log', '')
     save_prediction(db, prediction)
 
     # Telegram notification
@@ -423,15 +519,18 @@ async def run_xsmb_ensemble(
         xgb_results = [r for r in all_model_results if r.get('model_name') == 'xgboost_core' and r.get('status') == 'success']
         if xgb_results:
             xgb = xgb_results[0]
-            p1, p2, p3 = [p for p, _ in xgb['top_pairs'][:3]]
-            s1, s2, s3 = [s for _, s in xgb['top_pairs'][:3]]
+            xgb_pairs = ", ".join(f"<code>{p:02d}</code>" for p, _ in xgb["top_pairs"][:XSMB_MODEL_OUTPUT_TOP_N])
+            xgb_scores = " | ".join(f"{s:.4f}" for _, s in xgb["top_pairs"][:XSMB_MODEL_OUTPUT_TOP_N])
             msg += f"🤖 <b>Single Model [XGBoost v4]</b>\n"
-            msg += f"📊 Top 3: <code>{p1:02d}</code>, <code>{p2:02d}</code>, <code>{p3:02d}</code> | [{s1:.4f} | {s2:.4f} | {s3:.4f}]\n\n"
+            msg += f"📊 Top {XSMB_MODEL_OUTPUT_TOP_N}: {xgb_pairs} | [{xgb_scores}]\n\n"
 
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v4.1 — 7 models</b>\n"
+        msg += f"🤖 <b>Multi-Model Ensemble v4.2 — 10 models</b>\n"
         msg += f"📊 Top 3 tín hiệu: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
+
+        if candidate_log_msg:
+            msg += f"{candidate_log_msg}\n\n"
 
         if scoring_log_msg:
             msg += f"{scoring_log_msg}\n"
@@ -442,22 +541,19 @@ async def run_xsmb_ensemble(
         if credibility_log:
             msg += f"{credibility_log}\n\n"
 
-        # Per-model details
-        msg += "📋 <b>Chi tiết các model:</b>\n"
-        model_short = {
-            "frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov²",
-            "xgboost_core": "XGB", "lstm": "BiLSTM", "bayesian": "Bayes", "cyclic": "Cyclic",
-        }
-        for r in all_model_results:
-            if r.get("status") == "success":
-                m_short = model_short.get(r["model_name"], r["model_name"])
-                pairs = ", ".join(f"{p:02d}" for p, _ in r["top_pairs"][:3])
-                msg += f"   🔹 {m_short}: [{pairs}]\n"
+        model_top_log = _format_model_top_log(
+            all_model_results,
+            title=f"Top {XSMB_MODEL_OUTPUT_TOP_N} theo từng model",
+            model_short_names=XSMB_MODEL_SHORT_NAMES,
+            limit=XSMB_MODEL_OUTPUT_TOP_N,
+        )
+        if model_top_log:
+            msg += f"{model_top_log}\n"
 
         await _send_chunked(notifier, msg, "predict_ensemble_xsmb")
         print(f"\n📱 Telegram notification sent for XSMB!")
 
-    print(f"\n✅ XSMB Ensemble v4.1 Prediction complete!")
+    print(f"\n✅ XSMB Ensemble v4.2 Prediction complete!")
 
 
 async def run_xsmn_ensemble(
@@ -522,6 +618,7 @@ async def run_xsmn_ensemble(
     # Save
     prediction = xsmn_format_ensemble_result("XSMN", "all", ensemble_output, target_date)
     scoring_log_msg = prediction.pop('scoring_log', '')
+    candidate_log_msg = prediction.pop('candidate_log', '')
     save_prediction(db, prediction)
 
     # Telegram
@@ -539,6 +636,9 @@ async def run_xsmn_ensemble(
         msg += f"🤖 <b>Multi-Model Ensemble v3.2</b>\n"
         msg += f"📊 Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
+        if candidate_log_msg:
+            msg += f"{candidate_log_msg}\n\n"
+
         if scoring_log_msg:
             msg += f"{scoring_log_msg}\n"
 
@@ -548,15 +648,14 @@ async def run_xsmn_ensemble(
             prov_results = [r for r in all_model_results
                            if r.get("province") == prov and r.get("status") == "success"]
             if prov_results:
-                prov_name = prov or "ALL"
-                msg += f"📍 <b>{prov_name}</b>:\n"
-                for r in prov_results:
-                    m_short = {
-                        "frequency": "Freq", "gap_overdue": "Gap",
-                        "markov": "Markov", "xgboost_core": "XGB", "lstm": "LSTM",
-                    }.get(r["model_name"], r["model_name"])
-                    pairs = ", ".join(f"{p:02d}" for p, _ in r["top_pairs"][:3])
-                    msg += f"   🔹 {m_short}: [{pairs}]\n"
+                prov_name = html.escape(str(prov or "ALL"))
+                model_top_log = _format_model_top_log(
+                    prov_results,
+                    title=f"{prov_name} — Top {MODEL_OUTPUT_TOP_N} theo từng model",
+                    model_short_names=MODEL_SHORT_NAMES,
+                )
+                if model_top_log:
+                    msg += f"{model_top_log}\n"
 
         await _send_chunked(notifier, msg, "predict_ensemble_xsmn")
         print(f"\n📱 Telegram notification sent for XSMN!")
@@ -569,22 +668,32 @@ async def _send_chunked(notifier, msg: str, config_key: str):
     max_len = 4000
     if len(msg) <= max_len:
         await notifier.send_message(msg, config_key=config_key)
-    else:
-        chunks = msg.split('\n\n')
-        current_chunk = ""
-        for chunk in chunks:
-            if len(current_chunk) + len(chunk) + 2 > max_len:
+        return
+
+    current_chunk = ""
+    for block in msg.split('\n\n'):
+        split_by_line = False
+        pending_blocks = [block]
+        if len(block) > max_len:
+            split_by_line = True
+            pending_blocks = block.splitlines()
+
+        for chunk in pending_blocks:
+            separator = "\n" if split_by_line else "\n\n"
+            extra_len = len(separator) if current_chunk else 0
+            if len(current_chunk) + len(chunk) + extra_len > max_len:
                 if current_chunk:
                     await notifier.send_message(current_chunk, config_key=config_key)
                 current_chunk = chunk
             else:
-                current_chunk += ("\n\n" + chunk) if current_chunk else chunk
-        if current_chunk:
-            await notifier.send_message(current_chunk, config_key=config_key)
+                current_chunk += (separator + chunk) if current_chunk else chunk
+
+    if current_chunk:
+        await notifier.send_message(current_chunk, config_key=config_key)
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v4.1 + XSMN v3.2)")
+    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v4.2 + XSMN v3.2)")
     parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 
@@ -600,9 +709,9 @@ async def main():
     notifier = LotteryNotifier(db, default_config_key="predict_ensemble")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # XSMB — v4.1 (7 models)
+        # XSMB — v4.2 (10 models)
         print(f"\n{'='*60}")
-        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v4.1 (7 Models)")
+        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v4.2 (10 Models)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir)
 
         # XSMN — v3.2 (5 models, backward compatible)

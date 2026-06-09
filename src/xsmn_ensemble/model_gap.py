@@ -27,7 +27,7 @@ def predict_gap(
     db,
     province: Optional[str] = None,
     target_date: Optional[date] = None,
-    n_draws: int = 100,
+    n_draws: int = 250,
     top_n: int = 5,
     region: str = "XSMN",
 ) -> Dict:

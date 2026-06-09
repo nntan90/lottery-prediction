@@ -7,7 +7,7 @@ def _load_tails_by_draws(
     db,
     region: str,
     province: Optional[str] = None,
-    n_draws: int = 100,
+    n_draws: int = 250,
     before_date: Optional[date] = None,
 ) -> pd.DataFrame:
     """
@@ -18,27 +18,45 @@ def _load_tails_by_draws(
         DataFrame: columns ['draw_date', 'tail_set']
         Mỗi row = 1 kỳ quay, tail_set = frozenset of ints
     """
-    query = db.supabase.table("tails_2d") \
-        .select("draw_date,tail_2d") \
-        .eq("region", region) \
-        .order("draw_date", desc=True)
+    limit = 1000
+    offset = 0
+    all_rows = []
 
-    if province:
-        query = query.eq("province", province)
-    else:
-        query = query.is_("province", "null")
+    while True:
+        query = db.supabase.table("tails_2d") \
+            .select("draw_date,tail_2d") \
+            .eq("region", region) \
+            .order("draw_date", desc=True)
 
-    if before_date:
-        query = query.lt("draw_date", before_date.isoformat())
+        if province:
+            query = query.eq("province", province)
+        else:
+            query = query.is_("province", "null")
 
-    # Lấy gấp 30 lần vì mỗi kỳ có ~18 tails → 100 kỳ cần ~1800 rows max
-    query = query.limit(n_draws * 30)
+        if before_date:
+            query = query.lt("draw_date", before_date.isoformat())
 
-    rows = query.execute().data
-    if not rows:
+        query = query.range(offset, offset + limit - 1)
+        chunk = query.execute().data
+
+        if not chunk:
+            break
+
+        all_rows.extend(chunk)
+
+        unique_dates = set(r["draw_date"] for r in all_rows)
+        if len(unique_dates) >= n_draws:
+            break
+
+        if len(chunk) < limit:
+            break
+
+        offset += limit
+
+    if not all_rows:
         return pd.DataFrame(columns=["draw_date", "tail_set"])
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     grouped = df.groupby("draw_date")["tail_2d"].apply(frozenset).reset_index()
     grouped.columns = ["draw_date", "tail_set"]
 

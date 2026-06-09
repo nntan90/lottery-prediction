@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
 from src.xsmn_ensemble.ensemble_engine import compute_global_borda, BORDA_POINTS
+from src.xsmb_ensemble.ensemble_engine import compute_xsmb_ensemble
 
 
 class TestComputeGlobalBorda(unittest.TestCase):
@@ -69,6 +70,25 @@ class TestComputeGlobalBorda(unittest.TestCase):
         # 42 appears in all 3 models → gold consensus bonus (+5.0)
         self.assertIn(42, [p for p, _ in out["top_pairs"]])
         self.assertIn(42, out["consensus_pairs"])
+
+    def test_xsmn_consensus_pool_counts_model_province_sources(self):
+        """XSMN should pool two provinces before scoring and count model@province sources."""
+        results = [
+            self._make_result("frequency", "tp-hcm", [42, 20, 30, 40, 50]),
+            self._make_result("frequency", "dong-thap", [42, 21, 31, 41, 51]),
+            self._make_result("markov", "tp-hcm", [42, 88, 77, 66, 55]),
+        ]
+
+        out = compute_global_borda(results, [], top_n_output=3, region="XSMN")
+        candidate_42 = next(c for c in out["top_candidates"] if c["pair"] == 42)
+
+        self.assertIn(42, [p for p, _ in out["top_pairs"]])
+        self.assertIn(42, out["consensus_pairs"])
+        self.assertEqual(candidate_42["unique_model_count"], 3)
+        self.assertIn("frequency@tp-hcm", candidate_42["sources"])
+        self.assertIn("frequency@dong-thap", candidate_42["sources"])
+        self.assertIn("Freq/tp-hcm", out["candidate_log"])
+        self.assertIn("Freq/dong-thap", out["candidate_log"])
 
     def test_history_penalty_overdue(self):
         """Pair appearing >=2 times in recent tails should get penalty."""
@@ -136,7 +156,43 @@ class TestBordaPoints(unittest.TestCase):
     def test_borda_points_mapping(self):
         self.assertEqual(BORDA_POINTS[1], 5)
         self.assertEqual(BORDA_POINTS[5], 1)
-        self.assertNotIn(6, BORDA_POINTS)
+        self.assertEqual(BORDA_POINTS[6], 0.5)
+        self.assertEqual(BORDA_POINTS[10], 0.1)
+        self.assertNotIn(11, BORDA_POINTS)
+
+
+class TestComputeXsmbEnsemble(unittest.TestCase):
+    """Tests for the XSMB dedicated 7-model ensemble engine."""
+
+    def _make_result(self, model_name: str, pairs: list, status: str = "success"):
+        return {
+            "model_name": model_name,
+            "province": None,
+            "status": status,
+            "top_pairs": [(p, float(10 - i)) for i, p in enumerate(pairs)],
+        }
+
+    def test_xsmb_single_pool_counts_unique_models(self):
+        """XSMB should count unique model sources in one shared regional pool."""
+        results = [
+            self._make_result("frequency", [42, 10, 11, 12, 13, 14, 15, 16, 17, 18]),
+            self._make_result("gap_overdue", [42, 20, 21, 22, 23, 24, 25, 26, 27, 28]),
+            self._make_result("markov", [42, 30, 31, 32, 33, 34, 35, 36, 37, 38]),
+            self._make_result("xgboost_core", [99, 42, 41, 40, 39, 37, 36, 35, 34, 33]),
+        ]
+
+        out = compute_xsmb_ensemble(results, [], top_n_output=3, extended_tails=[])
+        candidate_42 = next(c for c in out["top_candidates"] if c["pair"] == 42)
+        candidate_pairs = {c["pair"] for c in out["top_candidates"]}
+        final_pairs = {p for p, _ in out["top_pairs"]}
+
+        self.assertIn(42, final_pairs)
+        self.assertIn(42, out["consensus_pairs"])
+        self.assertEqual(candidate_42["unique_model_count"], 4)
+        self.assertIn("frequency", candidate_42["models"])
+        self.assertIn("gap_overdue", candidate_42["models"])
+        self.assertIn("Freq", out["candidate_log"])
+        self.assertTrue(final_pairs.issubset(candidate_pairs))
 
 
 if __name__ == "__main__":

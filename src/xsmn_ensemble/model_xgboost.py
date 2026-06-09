@@ -28,29 +28,49 @@ def _load_tails_for_features(
     db,
     region: str,
     province: Optional[str] = None,
-    n_draws: int = 120,
+    n_draws: int = 250,
     before_date: Optional[date] = None,
 ) -> pd.DataFrame:
     """
     Lấy tails_2d cho province/region để build features on-the-fly.
-    Lookback theo kỳ quay (LIMIT).
+    Lookback theo kỳ quay (LIMIT). Pagination implemented to bypass 1000 limit.
     """
-    query = db.supabase.table("tails_2d") \
-        .select("draw_date,tail_2d") \
-        .eq("region", region) \
-        .order("draw_date", desc=True)
+    limit = 1000
+    offset = 0
+    all_rows = []
 
-    if province:
-        query = query.eq("province", province)
-    else:
-        query = query.is_("province", "null")
+    while True:
+        query = db.supabase.table("tails_2d") \
+            .select("draw_date,tail_2d") \
+            .eq("region", region) \
+            .order("draw_date", desc=True)
 
-    if before_date:
-        query = query.lt("draw_date", before_date.isoformat())
+        if province:
+            query = query.eq("province", province)
+        else:
+            query = query.is_("province", "null")
 
-    query = query.limit(n_draws * 30)
-    rows = query.execute().data
-    return _extract_history(rows, max_rows=n_draws) if rows else pd.DataFrame()
+        if before_date:
+            query = query.lt("draw_date", before_date.isoformat())
+
+        query = query.range(offset, offset + limit - 1)
+        chunk = query.execute().data
+
+        if not chunk:
+            break
+
+        all_rows.extend(chunk)
+
+        unique_dates = set(r["draw_date"] for r in all_rows)
+        if len(unique_dates) >= n_draws:
+            break
+
+        if len(chunk) < limit:
+            break
+
+        offset += limit
+
+    return _extract_history(all_rows, max_rows=n_draws) if all_rows else pd.DataFrame()
 
 
 def _get_active_model(db, region: str, province: Optional[str] = None, weekday: Optional[int] = None) -> Optional[dict]:
@@ -106,7 +126,7 @@ def predict_xgboost(
     province: Optional[str],
     target_date: date,
     region: str = "XSMN",
-    n_draws: int = 120,
+    n_draws: int = 250,
     top_n: int = 5,
     tmpdir: Optional[str] = None,
 ) -> Dict:

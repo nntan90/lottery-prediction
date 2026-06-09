@@ -674,8 +674,10 @@ def _get_default_weights(region: str) -> Dict[str, float]:
         except ImportError:
             return {
                 "frequency": 0.10, "gap_overdue": 0.10,
-                "markov": 0.15, "xgboost_core": 0.20,
-                "lstm": 0.15, "bayesian": 0.15, "cyclic": 0.15,
+                "markov": 0.13, "xgboost_core": 0.17,
+                "lstm": 0.12, "bayesian": 0.12, "cyclic": 0.10,
+                "stats_freq_gap": 0.09, "chisquare_gof": 0.08,
+                "chisquare_independence": 0.09,
             }
     else:
         try:
@@ -737,6 +739,8 @@ def _build_scoring_log(
         "frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov²",
         "xgboost_core": "XGB", "lstm": "BiLSTM", "bayesian": "Bayes",
         "cyclic": "Cyclic",
+        "stats_freq_gap": "StatsFG", "chisquare_gof": "ChiGOF",
+        "chisquare_independence": "ChiInd",
     }
 
     STREAK_ICONS = {

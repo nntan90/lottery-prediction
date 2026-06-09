@@ -37,6 +37,11 @@ borda_points:
   3: 3
   4: 2
   5: 1
+  6: 0.5
+  7: 0.4
+  8: 0.3
+  9: 0.2
+  10: 0.1
 
 # --- Consensus Rules ---
 # Bonus when multiple models agree on the same pair
@@ -121,10 +126,10 @@ xsmb_overrides:
     lambda: 0.6             # Balance giữa score cao và diversity
 
 # =============================================================================
-# XSMB v4.0 — Dedicated Multi-Model Ensemble (7 Models)
+# XSMB v4.2 — Dedicated Multi-Model Ensemble (10 Models)
 # =============================================================================
 # Replaces xsmb_overrides for the v4 pipeline (src/xsmb_ensemble/).
-# 7 models: frequency, gap_overdue, markov, xgboost_core, lstm, bayesian, cyclic
+# 10 models: 7 existing models + 3 statistical test models
 # =============================================================================
 xsmb_v4:
   models:
@@ -135,8 +140,11 @@ xsmb_v4:
     - lstm
     - bayesian
     - cyclic
+    - stats_freq_gap
+    - chisquare_gof
+    - chisquare_independence
 
-  # --- v4 Weights (7 models, sum ≈ 1.0) ---
+  # --- v4.2 Weights (10 models, sum ≈ 1.0) ---
   # Freq+Gap: low weight (overlap with XGBoost features)
   # Markov²: medium (independent second-order transition)
   # XGBoost: highest (25-feature superset ML model)
@@ -146,17 +154,20 @@ xsmb_v4:
   weights:
     frequency: 0.10
     gap_overdue: 0.10
-    markov: 0.15
-    xgboost_core: 0.20
-    lstm: 0.15
-    bayesian: 0.15
-    cyclic: 0.15
+    markov: 0.13
+    xgboost_core: 0.17
+    lstm: 0.12
+    bayesian: 0.12
+    cyclic: 0.10
+    stats_freq_gap: 0.09
+    chisquare_gof: 0.08
+    chisquare_independence: 0.09
 
   # --- Consensus (v4.1 — with scaling cap) ---
   # Cap: bonus KHÔNG vượt quá base score → tránh consensus domination
   consensus:
-    gold_threshold: 5       # 5/7 models agree
-    silver_threshold: 3     # 3/7 models agree
+    gold_threshold: 6       # 6/10 models agree
+    silver_threshold: 4     # 4/10 models agree
     gold_bonus: 1.5
     silver_bonus: 0.5
     cap_to_base: true       # v4.1: cap bonus ≤ |base_score|

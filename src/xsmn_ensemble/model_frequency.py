@@ -28,7 +28,7 @@ def predict_frequency(
     db,
     province: Optional[str] = None,
     target_date: Optional[date] = None,
-    n_draws: int = 100,
+    n_draws: int = 250,
     top_n: int = 5,
     region: str = "XSMN",
 ) -> Dict:
@@ -45,17 +45,6 @@ def predict_frequency(
         n_draws: số kỳ quay lookback
         top_n: số cặp top-N output
         region: 'XSMN' hoặc 'XSMB'
-
-    Returns:
-        {
-            'model_name': 'frequency',
-            'province': province,
-            'top_pairs': [(pair, score), ...],
-            'n_draws_used': int,
-            'status': 'success' | 'error',
-            'error_message': str | None,
-            'execution_time_ms': int,
-        }
     """
     start_ms = time.time()
 
@@ -82,49 +71,22 @@ def predict_frequency(
             # ── Frequency features ──
             freq_7  = appeared[-min(n, 7):].sum()  / max(min(n, 7), 1)
             freq_30 = appeared[-min(n, 30):].sum() / max(min(n, 30), 1)
-            freq_100 = appeared.sum() / max(n, 1)
+            freq_100 = appeared[-min(n, 100):].sum() / max(min(n, 100), 1)
 
             # ── Hot streak: xuất hiện trong 2 kỳ gần nhất liên tiếp ──
-            # Note: XSMN mỗi tỉnh xổ 1 lần/tuần, 3 kỳ liên tiếp = cực hiếm
             is_hot_streak = float(appeared[-2:].all()) if n >= 2 else 0.0
 
             # ── Momentum: freq ngắn hạn đang TĂNG so với trung hạn ──
-            # Positive = số đang nóng lên, Negative = số đang nguội đi
             momentum = freq_7 - freq_30
-            # Normalize momentum to [0, 1]: map từ [-1, +1] → [0, 1]
             momentum_norm = min(max((momentum + 1.0) / 2.0, 0.0), 1.0)
-
-            # ── Contrarian: pair lạnh có potential nổ ──
-            contrarian_score = 1.0 - freq_7
-
-            # ── Gap Sweetspot (Fresh Compression) & Gap Ratio ──
-            fresh_compression = 0.0
-            gap_ratio_norm = 0.0
-            appeared_positions = np.where(appeared)[0]
-            if len(appeared_positions) > 0:
-                gap_since_last = n - 1 - appeared_positions[-1]
-                if len(appeared_positions) >= 2:
-                    avg_gap = float(np.diff(appeared_positions).mean())
-                    gap_ratio = gap_since_last / (avg_gap + 1e-6)
-                    gap_ratio_norm = min(max(gap_ratio - 1.0, 0) / 2.0, 1.0)
-            else:
-                gap_since_last = n
-
-            if 7 <= gap_since_last <= 15:
-                fresh_compression = 0.4
-            elif 15 < gap_since_last <= 25:
-                fresh_compression = 0.6
 
             # ── Composite Score ──
             scores[pair] = (
-                freq_7            * 0.15 +
-                freq_30           * 0.15 +
-                freq_100          * 0.10 +
-                is_hot_streak     * 0.05 +
-                momentum_norm     * 0.10 +
-                contrarian_score  * 0.20 +
-                fresh_compression * 0.15 +
-                gap_ratio_norm    * 0.10
+                freq_7            * 0.30 +
+                freq_30           * 0.25 +
+                freq_100          * 0.15 +
+                is_hot_streak     * 0.15 +
+                momentum_norm     * 0.15
             )
 
         # Min-max normalize to [0, 1]

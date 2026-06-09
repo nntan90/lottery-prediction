@@ -1,5 +1,5 @@
 """
-ensemble_engine.py — XSMB Adaptive Weighted Borda v4.1 (Anti-Echo & Recency Intelligence)
+ensemble_engine.py — XSMB Adaptive Weighted Borda v4.2 (Statistical Tests)
 
 Kết hợp output từ 7 sub-models thành Top 3 cuối cùng.
 
@@ -11,6 +11,9 @@ Models (v4.0):
   E. lstm           — Bi-LSTM + Attention
   F. bayesian       — Bayesian posterior estimation
   G. cyclic         — Cyclic Pattern FFT detector
+  H. stats_freq_gap — Descriptive frequency/gap statistics
+  I. chisquare_gof  — Chi-square goodness-of-fit
+  J. chisquare_independence — Chi-square independence/homogeneity
 
 Aggregation:
   - Adaptive Weighted Borda Count
@@ -54,21 +57,28 @@ def _load_scoring_config() -> dict:
 _CFG = _load_scoring_config()
 
 # Borda points by rank
-BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}).items()}
+_DEFAULT_BORDA_POINTS = {
+    1: 5, 2: 4, 3: 3, 4: 2, 5: 1,
+    6: 0.5, 7: 0.4, 8: 0.3, 9: 0.2, 10: 0.1,
+}
+BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", _DEFAULT_BORDA_POINTS).items()}
 
 # XSMB v4 config
 _V4_CFG = _CFG.get("xsmb_v4", {})
 
-# Default weights (v4 — 7 models)
+# Default weights (v4.2 — 10 models)
 _w_cfg = _V4_CFG.get("weights", {})
 DEFAULT_WEIGHTS: dict[str, float] = {
     "frequency":    _w_cfg.get("frequency",    0.10),
     "gap_overdue":  _w_cfg.get("gap_overdue",  0.10),
-    "markov":       _w_cfg.get("markov",       0.15),
-    "xgboost_core": _w_cfg.get("xgboost_core", 0.20),
-    "lstm":         _w_cfg.get("lstm",         0.15),
-    "bayesian":     _w_cfg.get("bayesian",     0.15),
-    "cyclic":       _w_cfg.get("cyclic",       0.15),
+    "markov":       _w_cfg.get("markov",       0.13),
+    "xgboost_core": _w_cfg.get("xgboost_core", 0.17),
+    "lstm":         _w_cfg.get("lstm",         0.12),
+    "bayesian":     _w_cfg.get("bayesian",     0.12),
+    "cyclic":       _w_cfg.get("cyclic",       0.10),
+    "stats_freq_gap": _w_cfg.get("stats_freq_gap", 0.09),
+    "chisquare_gof": _w_cfg.get("chisquare_gof", 0.08),
+    "chisquare_independence": _w_cfg.get("chisquare_independence", 0.09),
 }
 
 # Consensus
@@ -115,9 +125,12 @@ MODEL_DISPLAY_NAME = {
     "lstm":         "BiLSTM",
     "bayesian":     "Bayes",
     "cyclic":       "Cyclic",
+    "stats_freq_gap": "StatsFG",
+    "chisquare_gof": "ChiGOF",
+    "chisquare_independence": "ChiInd",
 }
 
-TOTAL_MODELS = 7
+TOTAL_MODELS = 10
 
 
 # ─── Diversity Selection (MMR) ──────────────────────────────────────────────
@@ -183,6 +196,41 @@ def _select_diverse_top_n(
     return selected
 
 
+def _build_candidate_shortlist(
+    sorted_pairs: list[tuple[int, float]],
+    pair_model_count: dict[int, int],
+    pair_unique_models: dict[int, set],
+    *,
+    limit: int = 10,
+) -> tuple[list[dict], str]:
+    """Build a compact Top-N candidate audit log for Telegram."""
+    candidates = []
+    lines = ["📌 <b>Top 10 ứng viên multi-model</b>"]
+
+    for rank, (pair, score) in enumerate(sorted_pairs[:limit], start=1):
+        model_names = sorted(pair_unique_models.get(pair, set()))
+        display_models = [MODEL_DISPLAY_NAME.get(m, m) for m in model_names]
+        support_count = pair_model_count.get(pair, 0)
+
+        candidates.append({
+            "rank": rank,
+            "pair": pair,
+            "score": round(score, 4),
+            "support_count": support_count,
+            "unique_model_count": len(model_names),
+            "models": model_names,
+        })
+
+        source_str = ", ".join(display_models) if display_models else "-"
+        lines.append(
+            f"   {rank:02d}. <code>{pair:02d}</code> = {score:.2f}đ"
+            f" | votes={support_count}, models={len(model_names)}"
+            f" | {source_str}"
+        )
+
+    return candidates, "\n".join(lines) if candidates else ""
+
+
 # ─── Main Ensemble Function ─────────────────────────────────────────────────
 
 def compute_xsmb_ensemble(
@@ -196,14 +244,14 @@ def compute_xsmb_ensemble(
     """
     XSMB v4 Adaptive Weighted Borda Ensemble.
 
-    Kết hợp output từ 7 models thành Top 3 cuối cùng.
+    Kết hợp output từ 10 models thành Top 3 cuối cùng.
 
     Aggregation:
       FinalScore(pair) = Σ w_m × conf_m × borda_pts(pair, m) + consensus + history
       → MMR diversity selection for top 3
 
     Args:
-        model_results: List of dicts từ 7 sub-models
+        model_results: List of dicts từ 10 sub-models
         recent_tails: tails từ 5 kỳ cùng thứ gần nhất
         weights: override weights (default from config)
         top_n_output: số cặp output (default 3)
@@ -223,10 +271,12 @@ def compute_xsmb_ensemble(
         return {
             "top_pairs": [],
             "contributing_models": [],
-            "ensemble_method": "xsmb_borda_v4.0",
+            "ensemble_method": "xsmb_borda_v4.2",
             "borda_details": {},
             "consensus_pairs": [],
             "scoring_log": "",
+            "candidate_log": "",
+            "top_candidates": [],
             "models_active": 0,
             "models_total": TOTAL_MODELS,
         }
@@ -358,9 +408,13 @@ def compute_xsmb_ensemble(
 
     # ── Sort & pick top N (with diversity) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
+    top_candidates, candidate_log = _build_candidate_shortlist(
+        sorted_pairs, pair_model_count, pair_unique_models, limit=10
+    )
 
     if DIVERSITY_ENABLED and len(sorted_pairs) > top_n_output:
-        mmr_pool = sorted_pairs[:15]
+        # Keep final Top 3 selectable only from the same Top 10 pool shown in Telegram.
+        mmr_pool = sorted_pairs[:10]
         diverse_selection = _select_diverse_top_n(
             mmr_pool, pair_unique_models, n=top_n_output, lambda_=DIVERSITY_LAMBDA
         )
@@ -385,10 +439,12 @@ def compute_xsmb_ensemble(
     return {
         "top_pairs": top_pairs,
         "contributing_models": list(set(contributing)),
-        "ensemble_method": "xsmb_borda_v4.1",
+        "ensemble_method": "xsmb_borda_v4.2",
         "borda_details": {p: round(s, 4) for p, s in sorted_pairs},
         "consensus_pairs": consensus_list,
         "scoring_log": scoring_log,
+        "candidate_log": candidate_log,
+        "top_candidates": top_candidates,
         "models_active": len(active_models),
         "models_total": TOTAL_MODELS,
     }
@@ -510,7 +566,7 @@ def format_ensemble_result(
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],
-        "model_version": "ensemble_v4.1",
+        "model_version": "ensemble_v4.2",
         "ensemble_method": ensemble_output["ensemble_method"],
         "contributing_models": ensemble_output["contributing_models"],
         "final_scores": [s for _, s in top[:3]],
@@ -518,6 +574,7 @@ def format_ensemble_result(
         "matched_pairs": None,
         "tail_set": None,
         "scoring_log": ensemble_output.get("scoring_log", ""),
+        "candidate_log": ensemble_output.get("candidate_log", ""),
     }
 
 
@@ -533,7 +590,10 @@ def format_model_prediction_log(
         top.append((None, None))
 
     model_name = model_result.get("model_name", "unknown")
-    if model_name in ("frequency", "gap_overdue", "markov", "bayesian", "cyclic"):
+    if model_name in (
+        "frequency", "gap_overdue", "markov", "bayesian", "cyclic",
+        "stats_freq_gap", "chisquare_gof", "chisquare_independence",
+    ):
         model_type = "rule_based"
     elif model_name in ("xgboost_core", "lstm"):
         model_type = "ml"

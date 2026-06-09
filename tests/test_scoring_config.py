@@ -31,14 +31,16 @@ from src.xsmn_ensemble.ensemble_engine import (
 class TestScoringConfigValues(unittest.TestCase):
     """Verify scoring config values match expected production values."""
 
-    def test_borda_points_5_ranks(self):
-        """Borda points: rank 1=5, rank 5=1."""
+    def test_borda_points_10_ranks(self):
+        """Borda points support Top 10 model outputs."""
         self.assertEqual(BORDA_POINTS[1], 5)
         self.assertEqual(BORDA_POINTS[2], 4)
         self.assertEqual(BORDA_POINTS[3], 3)
         self.assertEqual(BORDA_POINTS[4], 2)
         self.assertEqual(BORDA_POINTS[5], 1)
-        self.assertEqual(len(BORDA_POINTS), 5)
+        self.assertEqual(BORDA_POINTS[6], 0.5)
+        self.assertEqual(BORDA_POINTS[10], 0.1)
+        self.assertEqual(len(BORDA_POINTS), 10)
 
     def test_default_weights(self):
         """All 5 models should have defined weights."""

@@ -296,13 +296,13 @@ def _get_lstm_model(db, region: str, province: Optional[str] = None) -> Optional
 
 def predict_lstm(
     db,
-    storage=None,
     province: Optional[str] = None,
     target_date: Optional[date] = None,
-    n_draws: int = 100,
+    n_draws: int = 250,
     seq_len: int = 30,
     top_n: int = 5,
     region: str = "XSMN",
+    storage=None,
     tmpdir: Optional[str] = None,
 ) -> Dict:
     """
@@ -409,8 +409,9 @@ def predict_lstm(
                 sequences, labels = training_data
                 if len(sequences) >= 10:
                     print(f"     🔄 Training LSTM on-the-fly ({len(sequences)} samples, val_split=20%)...")
+                    dynamic_seed = int(time.time()) % 10000
                     lstm.train_model(sequences, labels, epochs=80, lr=0.002,
-                                     val_split=0.2, patience=10, seed=42, verbose=False)
+                                     val_split=0.2, patience=10, seed=dynamic_seed, verbose=False)
                     model_version = "on_the_fly"
                 else:
                     return {

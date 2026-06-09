@@ -46,7 +46,7 @@ def run_train(region: str, province: str, weekday: int, dry_run: bool = False) -
     today = date.today().strftime("%Y%m%d")
     version = f"v3_retrain_{today}_wd{weekday}"
 
-    cmd = [
+    cmd_xgb = [
         sys.executable, "src/scripts/train_xgb.py",
         "--region", region,
         "--province", province,
@@ -55,25 +55,48 @@ def run_train(region: str, province: str, weekday: int, dry_run: bool = False) -
         "--force",   # cho phép train dù ít data (weekday models)
     ]
 
+    version_lstm = f"lstm_v4_{today}"
+    cmd_lstm = [
+        sys.executable, "src/scripts/train_lstm.py",
+        "--region", region,
+        "--province", province,
+        "--version", version_lstm,
+    ]
+
     if dry_run:
-        print(f"  [DRY-RUN] {label}: {' '.join(cmd)}")
+        print(f"  [DRY-RUN] {label} XGBoost: {' '.join(cmd_xgb)}")
+        print(f"  [DRY-RUN] {label} LSTM: {' '.join(cmd_lstm)}")
         return True
 
-    print(f"\n🚀 Training: {label}")
+    print(f"\n🚀 Training XGBoost: {label}")
+    success_xgb = False
     try:
-        result = subprocess.run(cmd, timeout=600)
-        if result.returncode == 0:
-            print(f"  ✅ Done: {label}")
-            return True
+        result_xgb = subprocess.run(cmd_xgb, timeout=600)
+        if result_xgb.returncode == 0:
+            print(f"  ✅ Done XGBoost: {label}")
+            success_xgb = True
         else:
-            print(f"  ❌ Failed (exit {result.returncode}): {label}")
-            return False
+            print(f"  ❌ Failed XGBoost (exit {result_xgb.returncode}): {label}")
     except subprocess.TimeoutExpired:
-        print(f"  ⏰ Timeout (600s): {label}")
-        return False
+        print(f"  ⏰ Timeout XGBoost (600s): {label}")
     except Exception as e:
-        print(f"  ❌ Error: {label}: {e}")
-        return False
+        print(f"  ❌ Error XGBoost: {label}: {e}")
+
+    print(f"\n🚀 Training LSTM: {label}")
+    success_lstm = False
+    try:
+        result_lstm = subprocess.run(cmd_lstm, timeout=600)
+        if result_lstm.returncode == 0:
+            print(f"  ✅ Done LSTM: {label}")
+            success_lstm = True
+        else:
+            print(f"  ❌ Failed LSTM (exit {result_lstm.returncode}): {label}")
+    except subprocess.TimeoutExpired:
+        print(f"  ⏰ Timeout LSTM (600s): {label}")
+    except Exception as e:
+        print(f"  ❌ Error LSTM: {label}: {e}")
+
+    return success_xgb and success_lstm
 
 
 def main():
