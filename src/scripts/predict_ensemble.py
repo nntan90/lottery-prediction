@@ -527,10 +527,11 @@ async def run_xsmb_ensemble(
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
         msg += f"🤖 <b>Multi-Model Ensemble v4.2 — 10 models</b>\n"
-        msg += f"📊 Top 3 tín hiệu: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if candidate_log_msg:
             msg += f"{candidate_log_msg}\n\n"
+
+        msg += f"🎯 Pick đồng thuận Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if scoring_log_msg:
             msg += f"{scoring_log_msg}\n"
@@ -634,10 +635,11 @@ async def run_xsmn_ensemble(
 
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
         msg += f"🤖 <b>Multi-Model Ensemble v3.2</b>\n"
-        msg += f"📊 Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if candidate_log_msg:
             msg += f"{candidate_log_msg}\n\n"
+
+        msg += f"🎯 Pick đồng thuận Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if scoring_log_msg:
             msg += f"{scoring_log_msg}\n"
