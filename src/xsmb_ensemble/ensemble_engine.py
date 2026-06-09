@@ -205,7 +205,7 @@ def _build_candidate_shortlist(
 ) -> tuple[list[dict], str]:
     """Build a compact Top-N candidate audit log for Telegram."""
     candidates = []
-    lines = ["📌 <b>Top 10 ứng viên multi-model</b>"]
+    lines = ["📌 <b>Top 10 ứng viên multi-model (mỗi model Top 2)</b>"]
 
     for rank, (pair, score) in enumerate(sorted_pairs[:limit], start=1):
         model_names = sorted(pair_unique_models.get(pair, set()))
