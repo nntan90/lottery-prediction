@@ -551,7 +551,8 @@ async def run_xsmb_ensemble(
         if model_top_log:
             msg += f"{model_top_log}\n"
 
-        await _send_chunked(notifier, msg, "predict_ensemble_xsmb")
+        if not await _send_chunked(notifier, msg, "predict_ensemble_xsmb"):
+            raise RuntimeError("Telegram notification failed for XSMB")
         print(f"\n📱 Telegram notification sent for XSMB!")
 
     print(f"\n✅ XSMB Ensemble v4.2 Prediction complete!")
@@ -659,18 +660,18 @@ async def run_xsmn_ensemble(
                 if model_top_log:
                     msg += f"{model_top_log}\n"
 
-        await _send_chunked(notifier, msg, "predict_ensemble_xsmn")
+        if not await _send_chunked(notifier, msg, "predict_ensemble_xsmn"):
+            raise RuntimeError("Telegram notification failed for XSMN")
         print(f"\n📱 Telegram notification sent for XSMN!")
 
     print(f"\n✅ XSMN Ensemble Prediction complete!")
 
 
-async def _send_chunked(notifier, msg: str, config_key: str):
+async def _send_chunked(notifier, msg: str, config_key: str) -> bool:
     """Send Telegram message, chunking if > 4000 chars."""
     max_len = 4000
     if len(msg) <= max_len:
-        await notifier.send_message(msg, config_key=config_key)
-        return
+        return await notifier.send_message(msg, config_key=config_key)
 
     current_chunk = ""
     for block in msg.split('\n\n'):
@@ -685,13 +686,17 @@ async def _send_chunked(notifier, msg: str, config_key: str):
             extra_len = len(separator) if current_chunk else 0
             if len(current_chunk) + len(chunk) + extra_len > max_len:
                 if current_chunk:
-                    await notifier.send_message(current_chunk, config_key=config_key)
+                    if not await notifier.send_message(current_chunk, config_key=config_key):
+                        return False
                 current_chunk = chunk
             else:
                 current_chunk += (separator + chunk) if current_chunk else chunk
 
     if current_chunk:
-        await notifier.send_message(current_chunk, config_key=config_key)
+        if not await notifier.send_message(current_chunk, config_key=config_key):
+            return False
+
+    return True
 
 
 async def main():
