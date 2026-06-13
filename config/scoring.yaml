@@ -205,15 +205,71 @@ xsmb_v4:
     max_weight: 0.35        # No model above 35%
 
 # =============================================================================
+# XSMB v5.0 — Precision Ensemble Scoring (Replaces v4.2)
+# =============================================================================
+# Key changes from v4.2:
+#   - Proportional raw score fusion (replaces Borda rank-based)
+#   - Continuous consensus multiplier (replaces additive threshold bonus)
+#   - Single-pass history guard (replaces double penalty)
+#   - No MMR diversity (clean scoring = natural diversity)
+# =============================================================================
+xsmb_v5:
+  # --- Weights (v5.0+CDM — 11 models, sum = 1.00) ---
+  weights:
+    frequency: 0.07             # ↓ overlap with XGBoost features
+    gap_overdue: 0.07           # ↓ overlap with XGBoost features
+    markov: 0.12                # independent transition matrix
+    xgboost_core: 0.14          # ML superset model
+    lstm: 0.10                  # deep learning sequence
+    bayesian: 0.14              # ↑ high hit rate observed
+    cyclic: 0.12                # ↑ high hit rate observed
+    stats_freq_gap: 0.06        # ↓ redundant with freq/gap
+    chisquare_gof: 0.05         # ↓ lower predictive value
+    chisquare_independence: 0.05 # ↓ lower predictive value
+    cdm: 0.08                   # 🆕 Dirichlet-Multinomial baseline
+
+  # --- Consensus Amplifier (v5.0 — continuous multiplicative) ---
+  # multiplier = 1 + alpha × (vote_count - 1), capped at max_multiplier
+  # vote=1: ×1.0, vote=2: ×1.2, vote=3: ×1.4, vote=4: ×1.6, vote=5+: ×1.8
+  consensus:
+    alpha: 0.20                 # Each additional vote adds 20% boost
+    max_multiplier: 1.80        # Cap to prevent explosion
+
+  # --- History Guard (v5.0 — single multiplicative modifier) ---
+  # One modifier applied once. No double penalty.
+  # count_5 = appearances in 5 same-weekday draws
+  # count_10 = appearances in 10 same-weekday draws
+  history_modifier:
+    hot_4_plus: 0.00            # count_5 >= 4 → EXCLUDE (pattern break)
+    hot_3: 0.40                 # count_5 == 3 → strong reduction
+    warm_2: 0.70                # count_5 == 2 → moderate reduction
+    neutral_1: 1.00             # count_5 == 1 → neutral
+    cold_pressure: 1.15         # count_5 == 0, count_10 >= 2 → pressure building
+    cold_mild: 1.05             # count_5 == 0, count_10 == 1 → mild pressure
+    toxic_cold: 0.60            # count_5 == 0, count_10 == 0 → too cold
+
+  history_lookback_same_weekday: 5   # Recent history window
+  history_extended_lookback: 10       # Extended history for toxic gap check
+
+  # --- Auto-Weight Tuning (inherited from v4.2) ---
+  auto_weight:
+    enabled: true
+    lookback_days: 30
+    smoothing: 0.7
+    min_weight: 0.05
+    max_weight: 0.35
+
+# =============================================================================
 # XSMN-Specific Overrides (v3.3 — Rebalanced Scoring)
 # =============================================================================
 xsmn_overrides:
   weights:
-    frequency: 0.15
-    gap_overdue: 0.15
-    markov: 0.20
-    xgboost_core: 0.30
-    lstm: 0.20
+    frequency: 0.13
+    gap_overdue: 0.13
+    markov: 0.18
+    xgboost_core: 0.25
+    lstm: 0.18
+    cdm: 0.13                   # 🆕 Dirichlet-Multinomial baseline
 
   consensus:
     gold_threshold: 4

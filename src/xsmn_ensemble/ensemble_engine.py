@@ -68,6 +68,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "lstm":         _w_cfg.get("lstm",         0.25),
     # v3.1 legacy fallback
     "freq_gap":     _w_cfg.get("freq_gap",     0.20),
+    # v3.3: CDM model
+    "cdm":          _w_cfg.get("cdm",          0.13),
 }
 
 # Consensus rules
@@ -320,6 +322,7 @@ MODEL_DISPLAY_NAME = {
     "markov":       "Markov",
     "xgboost_core": "XGB",
     "lstm":         "LSTM",
+    "cdm":          "CDM",
     # legacy
     "freq_gap":     "Freq/Gap",
 }
@@ -749,7 +752,7 @@ def format_model_prediction_log(
 
     # Determine model type
     model_name = model_result.get("model_name", "unknown")
-    if model_name in ("frequency", "gap_overdue", "markov", "freq_gap"):
+    if model_name in ("frequency", "gap_overdue", "markov", "freq_gap", "cdm"):
         model_type = "rule_based"
     elif model_name in ("xgboost_core", "lstm"):
         model_type = "ml"

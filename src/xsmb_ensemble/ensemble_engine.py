@@ -1,9 +1,9 @@
 """
-ensemble_engine.py — XSMB Adaptive Weighted Borda v4.2 (Statistical Tests)
+ensemble_engine.py — XSMB Precision Ensemble v5.0
 
-Kết hợp output từ 7 sub-models thành Top 3 cuối cùng.
+Kết hợp output từ 10 sub-models thành Top 3 cuối cùng.
 
-Models (v4.0):
+Models (v4.2 — 10 models):
   A. frequency      — Multi-window frequency analysis
   B. gap_overdue    — Weekday-specific gap/overdue
   C. markov         — Second-order Markov Chain
@@ -15,23 +15,21 @@ Models (v4.0):
   I. chisquare_gof  — Chi-square goodness-of-fit
   J. chisquare_independence — Chi-square independence/homogeneity
 
-Aggregation:
-  - Adaptive Weighted Borda Count
-  - Confidence-weighted scoring (from Bayesian model)
-  - Consensus bonus (unique model agreement) — v4.1: capped to base score
-  - History adjustment (same-weekday lookback) — v4.1: exponential penalty
-  - Recency Dampener — v4.1: score × decay^(count-1)
-  - MMR Diversity Selection
-  - Auto-weight integration (from auto_weight.py)
+Aggregation (v5.0 — Precision Ensemble):
+  1. Proportional Score Normalization — giữ raw score ratio giữa pick #1 và #2
+  2. Weighted Aggregation — weight × confidence × normalized_score
+  3. Continuous Consensus Amplifier — multiplicative, no threshold cliff
+  4. Single-pass History Guard — one multiplicative modifier, no double penalty
+  5. Pure Top 3 Selection — trust scoring, no artificial diversity
 
-v4.1 Changes (Anti-Echo & Recency Intelligence):
-  - Exponential history penalty: -0.5 × 2^(count-2) for count ≥ 3
-  - Consensus scaling cap: bonus ≤ |base_score|
-  - Recency dampener: score × 0.7^(count-1) for count ≥ 2
-  - Momentum 2/5 tuần: neutral (was +0.6)
-  - Enhanced scoring log with decay factor display
+v5.0 Changes (vs v4.2):
+  - Borda rank-based → Proportional raw score fusion
+  - Additive consensus threshold bonus → Continuous multiplicative amplifier
+  - Double penalty (additive + multiplicative) → Single multiplicative history guard
+  - MMR diversity selection → Removed (clean scoring = natural diversity)
+  - ~15 hyperparameters → ~6 hyperparameters
 
-Config: scoring.yaml → xsmb_v4 section
+Config: scoring.yaml → xsmb_v5 section
 """
 
 import os
@@ -56,59 +54,48 @@ def _load_scoring_config() -> dict:
 
 _CFG = _load_scoring_config()
 
-# Borda points by rank
-_DEFAULT_BORDA_POINTS = {
-    1: 5, 2: 4, 3: 3, 4: 2, 5: 1,
-    6: 0.5, 7: 0.4, 8: 0.3, 9: 0.2, 10: 0.1,
-}
-BORDA_POINTS = {int(k): v for k, v in _CFG.get("borda_points", _DEFAULT_BORDA_POINTS).items()}
+# XSMB v5 config
+_V5_CFG = _CFG.get("xsmb_v5", {})
 
-# XSMB v4 config
-_V4_CFG = _CFG.get("xsmb_v4", {})
-
-# Default weights (v4.2 — 10 models)
-_w_cfg = _V4_CFG.get("weights", {})
+# Default weights (10 models, sum ≈ 1.0)
+_w_cfg = _V5_CFG.get("weights", _CFG.get("xsmb_v4", {}).get("weights", {}))
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "frequency":    _w_cfg.get("frequency",    0.10),
-    "gap_overdue":  _w_cfg.get("gap_overdue",  0.10),
-    "markov":       _w_cfg.get("markov",       0.13),
-    "xgboost_core": _w_cfg.get("xgboost_core", 0.17),
-    "lstm":         _w_cfg.get("lstm",         0.12),
-    "bayesian":     _w_cfg.get("bayesian",     0.12),
-    "cyclic":       _w_cfg.get("cyclic",       0.10),
-    "stats_freq_gap": _w_cfg.get("stats_freq_gap", 0.09),
-    "chisquare_gof": _w_cfg.get("chisquare_gof", 0.08),
-    "chisquare_independence": _w_cfg.get("chisquare_independence", 0.09),
+    "frequency":    _w_cfg.get("frequency",    0.07),
+    "gap_overdue":  _w_cfg.get("gap_overdue",  0.07),
+    "markov":       _w_cfg.get("markov",       0.12),
+    "xgboost_core": _w_cfg.get("xgboost_core", 0.14),
+    "lstm":         _w_cfg.get("lstm",         0.10),
+    "bayesian":     _w_cfg.get("bayesian",     0.14),
+    "cyclic":       _w_cfg.get("cyclic",       0.12),
+    "stats_freq_gap": _w_cfg.get("stats_freq_gap", 0.06),
+    "chisquare_gof": _w_cfg.get("chisquare_gof", 0.05),
+    "chisquare_independence": _w_cfg.get("chisquare_independence", 0.05),
+    "cdm":          _w_cfg.get("cdm",          0.08),
 }
 
-# Consensus
-_cons_cfg = _V4_CFG.get("consensus", _CFG.get("xsmb_overrides", {}).get("consensus", {}))
-CONSENSUS_GOLD_THRESHOLD = _cons_cfg.get("gold_threshold", 4)
-CONSENSUS_SILVER_THRESHOLD = _cons_cfg.get("silver_threshold", 3)
-BONUS_GOLD = float(_cons_cfg.get("gold_bonus", 1.5))
-BONUS_SILVER = float(_cons_cfg.get("silver_bonus", 0.5))
-CONSENSUS_CAP_TO_BASE = bool(_cons_cfg.get("cap_to_base", True))  # v4.1
+# ─── v5.0 Scoring Parameters ────────────────────────────────────────────────
 
-# History
-_hist_cfg = _V4_CFG.get("history", _CFG.get("xsmb_overrides", {}).get("history", {}))
-HIST_OVERDUE = float(_hist_cfg.get("overdue_penalty", -0.5))
-HIST_SWEETSPOT = float(_hist_cfg.get("sweetspot_bonus", 0.5))
-HIST_POTENTIAL = float(_hist_cfg.get("potential_bonus", 0.3))
-HIST_EXPONENTIAL = bool(_hist_cfg.get("exponential", True))  # v4.1
+# Consensus Amplifier: score *= 1 + ALPHA * (vote_count - 1), capped at MAX
+_cons_cfg = _V5_CFG.get("consensus", {})
+CONSENSUS_ALPHA = float(_cons_cfg.get("alpha", 0.20))
+MAX_CONSENSUS_MULTIPLIER = float(_cons_cfg.get("max_multiplier", 1.8))
 
-# Diversity
-_div_cfg = _V4_CFG.get("diversity", _CFG.get("xsmb_overrides", {}).get("diversity", {}))
-DIVERSITY_ENABLED = bool(_div_cfg.get("enabled", True))
-DIVERSITY_LAMBDA = float(_div_cfg.get("lambda", 0.6))
+# History Guard: single multiplicative modifier
+_hist_cfg = _V5_CFG.get("history_modifier", {})
+HIST_HOT_4_PLUS = float(_hist_cfg.get("hot_4_plus", 0.00))
+HIST_HOT_3 = float(_hist_cfg.get("hot_3", 0.40))
+HIST_WARM_2 = float(_hist_cfg.get("warm_2", 0.70))
+HIST_NEUTRAL_1 = float(_hist_cfg.get("neutral_1", 1.00))
+HIST_COLD_PRESSURE = float(_hist_cfg.get("cold_pressure", 1.15))
+HIST_COLD_MILD = float(_hist_cfg.get("cold_mild", 1.05))
+HIST_TOXIC_COLD = float(_hist_cfg.get("toxic_cold", 0.60))
 
-# Recency Dampener (v4.1)
-_rd_cfg = _V4_CFG.get("recency_dampener", {})
-RECENCY_DAMPENER_ENABLED = bool(_rd_cfg.get("enabled", True))
-RECENCY_DAMPENER_THRESHOLD = int(_rd_cfg.get("threshold", 2))
-RECENCY_DAMPENER_DECAY = float(_rd_cfg.get("decay_base", 0.7))
+# History lookback
+HIST_LOOKBACK_SAME_WEEKDAY = int(_V5_CFG.get("history_lookback_same_weekday", 5))
+HIST_EXTENDED_LOOKBACK = int(_V5_CFG.get("history_extended_lookback", 10))
 
-# Auto-weight
-_aw_cfg = _V4_CFG.get("auto_weight", {})
+# Auto-weight (legacy, kept for compatibility)
+_aw_cfg = _V5_CFG.get("auto_weight", _CFG.get("xsmb_v4", {}).get("auto_weight", {}))
 AUTO_WEIGHT_ENABLED = bool(_aw_cfg.get("enabled", True))
 AUTO_WEIGHT_SMOOTHING = float(_aw_cfg.get("smoothing", 0.7))
 AUTO_WEIGHT_MIN = float(_aw_cfg.get("min_weight", 0.05))
@@ -128,77 +115,17 @@ MODEL_DISPLAY_NAME = {
     "stats_freq_gap": "StatsFG",
     "chisquare_gof": "ChiGOF",
     "chisquare_independence": "ChiInd",
+    "cdm":          "CDM",
 }
 
-TOTAL_MODELS = 10
+TOTAL_MODELS = 11
 
 
-# ─── Diversity Selection (MMR) ──────────────────────────────────────────────
-
-def _jaccard_similarity(set_a: set, set_b: set) -> float:
-    """Jaccard similarity giữa 2 tập model names."""
-    if not set_a and not set_b:
-        return 1.0
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / len(set_a | set_b)
-
-
-def _select_diverse_top_n(
-    scored_pairs: list[tuple[int, float]],
-    pair_unique_models: dict[int, set],
-    n: int = 3,
-    lambda_: float = 0.6,
-) -> list[tuple[int, float]]:
-    """
-    MMR (Maximal Marginal Relevance) selection cho diverse top-N.
-
-    Cân bằng giữa relevance (score cao) và diversity (model sources khác nhau).
-    """
-    if len(scored_pairs) <= n:
-        return scored_pairs
-
-    max_score = scored_pairs[0][1]
-    min_score = scored_pairs[-1][1]
-    score_range = max_score - min_score
-
-    def norm_score(s: float) -> float:
-        if score_range < 1e-10:
-            return 1.0
-        return (s - min_score) / score_range
-
-    # Pick #1: highest score
-    selected = [scored_pairs[0]]
-    selected_model_sets = [pair_unique_models.get(scored_pairs[0][0], set())]
-    remaining = list(scored_pairs[1:])
-
-    while len(selected) < n and remaining:
-        best_mmr = -float('inf')
-        best_idx = 0
-
-        for idx, (pair, score) in enumerate(remaining):
-            relevance = norm_score(score)
-            pair_models = pair_unique_models.get(pair, set())
-            max_sim = max(
-                _jaccard_similarity(pair_models, sel_models)
-                for sel_models in selected_model_sets
-            )
-            mmr = lambda_ * relevance - (1.0 - lambda_) * max_sim
-
-            if mmr > best_mmr:
-                best_mmr = mmr
-                best_idx = idx
-
-        chosen_pair, chosen_score = remaining.pop(best_idx)
-        selected.append((chosen_pair, chosen_score))
-        selected_model_sets.append(pair_unique_models.get(chosen_pair, set()))
-
-    return selected
-
+# ─── Candidate Shortlist (for Telegram audit log) ───────────────────────────
 
 def _build_candidate_shortlist(
     sorted_pairs: list[tuple[int, float]],
-    pair_model_count: dict[int, int],
+    pair_vote_count: dict[int, int],
     pair_unique_models: dict[int, set],
     *,
     limit: int = 10,
@@ -210,21 +137,21 @@ def _build_candidate_shortlist(
     for rank, (pair, score) in enumerate(sorted_pairs[:limit], start=1):
         model_names = sorted(pair_unique_models.get(pair, set()))
         display_models = [MODEL_DISPLAY_NAME.get(m, m) for m in model_names]
-        support_count = pair_model_count.get(pair, 0)
+        vote_count = pair_vote_count.get(pair, 0)
 
         candidates.append({
             "rank": rank,
             "pair": pair,
             "score": round(score, 4),
-            "support_count": support_count,
+            "vote_count": vote_count,
             "unique_model_count": len(model_names),
             "models": model_names,
         })
 
         source_str = ", ".join(display_models) if display_models else "-"
         lines.append(
-            f"   {rank:02d}. <code>{pair:02d}</code> = {score:.2f}đ"
-            f" | votes={support_count}, models={len(model_names)}"
+            f"   {rank:02d}. <code>{pair:02d}</code> = {score:.3f}đ"
+            f" | votes={vote_count}"
             f" | {source_str}"
         )
 
@@ -242,22 +169,24 @@ def compute_xsmb_ensemble(
     model_confidences: Optional[dict[str, float]] = None,
 ) -> Dict:
     """
-    XSMB v4 Adaptive Weighted Borda Ensemble.
+    XSMB v5.0 Precision Ensemble Scoring.
 
     Kết hợp output từ 10 models thành Top 3 cuối cùng.
 
-    Aggregation:
-      FinalScore(pair) = Σ w_m × conf_m × borda_pts(pair, m) + consensus + history
-      → MMR diversity selection for top 3
+    Scoring Pipeline:
+      1. Proportional Score Normalization — raw_score / sum(scores) per model
+      2. Weighted Aggregation — Σ weight_m × confidence_m × norm_score_m(pair)
+      3. Consensus Amplifier — score × (1 + α × (vote_count - 1))
+      4. History Guard — score × modifier (single multiplicative pass)
+      5. Sort & Pick Top 3
 
     Args:
-        model_results: List of dicts từ 10 sub-models
+        model_results: List of dicts từ 10 sub-models (each has top_pairs)
         recent_tails: tails từ 5 kỳ cùng thứ gần nhất
         weights: override weights (default from config)
         top_n_output: số cặp output (default 3)
         extended_tails: tails 10 kỳ cho Toxic Gap check
-        model_confidences: dict model_name → confidence [0,1]
-            (từ Bayesian model hoặc auto_weight)
+        model_confidences: dict model_name → confidence [0, 1.2]
 
     Returns:
         Dict chứa top_pairs, scoring_log, metadata
@@ -271,7 +200,7 @@ def compute_xsmb_ensemble(
         return {
             "top_pairs": [],
             "contributing_models": [],
-            "ensemble_method": "xsmb_borda_v4.2",
+            "ensemble_method": "xsmb_precision_v5.0",
             "borda_details": {},
             "consensus_pairs": [],
             "scoring_log": "",
@@ -281,7 +210,7 @@ def compute_xsmb_ensemble(
             "models_total": TOTAL_MODELS,
         }
 
-    # NEW: Re-normalize weights
+    # Re-normalize weights to active models only
     active_model_names = {r["model_name"] for r in valid_results}
     w = {k: v for k, v in w.items() if k in active_model_names}
     w_sum = sum(w.values())
@@ -290,71 +219,75 @@ def compute_xsmb_ensemble(
     print(f"     🔧 Active models: {len(active_model_names)}/{TOTAL_MODELS}, "
           f"weights re-normalized: {', '.join(f'{k}={v:.2f}' for k,v in w.items())}")
 
-    # ── Extract Bayesian confidence nếu available ──
     if model_confidences is None:
         model_confidences = {}
-    for result in valid_results:
-        if result.get("model_name") == "bayesian" and "confidence" in result:
-            # Broadcast Bayesian confidence to all models as a general signal
-            # Models that are confidence-aware get a boost/penalty
-            pass
 
-    # ── Tính Borda scores ──
+    # ── Step 1 & 2: Proportional Score Normalization + Weighted Aggregation ──
     pair_scores: dict[int, float] = {}
-    pair_model_count: dict[int, int] = {}
+    pair_vote_count: dict[int, int] = {}
     pair_unique_models: dict[int, set] = {}
-    pair_model_names: dict[int, list] = {}
+    pair_model_details: dict[int, list] = {}  # For scoring log
     contributing = []
 
-    active_models = set()
     for result in valid_results:
         model_name = result["model_name"]
-        active_models.add(model_name)
-        weight = w.get(model_name, 0.10)
         contributing.append(model_name)
-
-        # Model-specific confidence
+        weight = w.get(model_name, 0.10)
         conf = model_confidences.get(model_name, 1.0)
 
-        for rank_idx, (pair, raw_score) in enumerate(result["top_pairs"]):
-            rank = rank_idx + 1
-            borda_pts = BORDA_POINTS.get(rank, 0)
+        top_pairs = result["top_pairs"]
 
-            if borda_pts > 0:
-                # Confidence-weighted Borda: weight × confidence × rank_points
-                weighted_pts = weight * conf * borda_pts
+        # Proportional normalization: score / sum(scores)
+        # This preserves the confidence gap between pick #1 and #2
+        raw_scores = [abs(s) for _, s in top_pairs]
+        score_sum = sum(raw_scores)
 
-                pair_scores[pair] = pair_scores.get(pair, 0) + weighted_pts
-                pair_model_count[pair] = pair_model_count.get(pair, 0) + 1
-                if pair not in pair_unique_models:
-                    pair_unique_models[pair] = set()
-                pair_unique_models[pair].add(model_name)
-                if pair not in pair_model_names:
-                    pair_model_names[pair] = []
-                pair_model_names[pair].append(model_name)
+        for rank_idx, (pair, raw_score) in enumerate(top_pairs):
+            # Normalize: proportional share of model's total score output
+            if score_sum > 0:
+                norm_score = abs(raw_score) / score_sum
+            else:
+                # Equal split fallback
+                norm_score = 1.0 / max(len(top_pairs), 1)
 
-    # ── Consensus bonus (v4.1: capped to base score) ──
-    consensus_applied: dict[int, float] = {}  # track actual bonus applied
+            # Weighted contribution: weight × confidence × normalized_score
+            weighted_pts = weight * conf * norm_score
+
+            pair_scores[pair] = pair_scores.get(pair, 0) + weighted_pts
+            pair_vote_count[pair] = pair_vote_count.get(pair, 0) + 1
+
+            if pair not in pair_unique_models:
+                pair_unique_models[pair] = set()
+            pair_unique_models[pair].add(model_name)
+
+            if pair not in pair_model_details:
+                pair_model_details[pair] = []
+            pair_model_details[pair].append({
+                "model": model_name,
+                "rank": rank_idx + 1,
+                "raw_score": raw_score,
+                "norm_score": norm_score,
+                "weight": weight,
+                "conf": conf,
+                "contribution": weighted_pts,
+            })
+
+    # ── Step 3: Continuous Consensus Amplifier ──
+    consensus_applied: dict[int, float] = {}
     for pair in list(pair_scores.keys()):
-        unique_count = len(pair_unique_models.get(pair, set()))
-        base = pair_scores[pair]  # base score BEFORE consensus
+        vote_count = len(pair_unique_models.get(pair, set()))
+        if vote_count > 1:
+            # Multiplicative: 1 + α × (votes - 1), capped
+            multiplier = min(
+                1.0 + CONSENSUS_ALPHA * (vote_count - 1),
+                MAX_CONSENSUS_MULTIPLIER,
+            )
+            pair_scores[pair] *= multiplier
+            consensus_applied[pair] = multiplier
+        else:
+            consensus_applied[pair] = 1.0
 
-        if unique_count >= CONSENSUS_GOLD_THRESHOLD:
-            bonus = BONUS_GOLD
-            if CONSENSUS_CAP_TO_BASE:
-                cap = max(abs(base), 0.5)  # minimum cap = 0.5
-                bonus = min(bonus, cap)
-            pair_scores[pair] += bonus
-            consensus_applied[pair] = bonus
-        elif unique_count >= CONSENSUS_SILVER_THRESHOLD:
-            bonus = BONUS_SILVER
-            if CONSENSUS_CAP_TO_BASE:
-                cap = max(abs(base), 0.5)
-                bonus = min(bonus, cap)
-            pair_scores[pair] += bonus
-            consensus_applied[pair] = bonus
-
-    # ── History adjustment (v4.1: exponential penalty) ──
+    # ── Step 4: Single-pass History Guard ──
     recent_counts: dict[int, int] = {}
     for t in recent_tails:
         recent_counts[t] = recent_counts.get(t, 0) + 1
@@ -364,173 +297,116 @@ def compute_xsmb_ensemble(
         for t in extended_tails:
             extended_counts[t] = extended_counts.get(t, 0) + 1
 
-    history_applied: dict[int, float] = {}  # track history adjustment
-    for pair in pair_scores:
-        count = recent_counts.get(pair, 0)
+    history_applied: dict[int, tuple[float, str]] = {}  # modifier, label
+    for pair in list(pair_scores.keys()):
+        count_5 = recent_counts.get(pair, 0)
+        count_10 = extended_counts.get(pair, 0)
 
-        if count >= 3:
-            # v4.1: Exponential penalty — quá nóng, cooling aggressively
-            # count=3 → -2.0, count=4 → -4.0, count=5 → -8.0
-            if HIST_EXPONENTIAL:
-                penalty = HIST_OVERDUE * (2 ** (count - 2))
-            else:
-                penalty = HIST_OVERDUE
-            pair_scores[pair] += penalty
-            history_applied[pair] = penalty
-        elif count == 2:
-            # v4.1: Neutral — 2/5 không phải signal rõ ràng
-            pair_scores[pair] += 0.0
-            history_applied[pair] = 0.0
-        elif count == 1:
-            pair_scores[pair] += 0.3            # Moderate momentum
-            history_applied[pair] = 0.3
+        if count_5 >= 4:
+            modifier = HIST_HOT_4_PLUS
+            label = f"🔥 Loại (nổ {count_5}/5 tuần)"
+        elif count_5 == 3:
+            modifier = HIST_HOT_3
+            label = f"🔥 Giảm mạnh ({count_5}/5 tuần)"
+        elif count_5 == 2:
+            modifier = HIST_WARM_2
+            label = f"⚡ Giảm vừa ({count_5}/5 tuần)"
+        elif count_5 == 1:
+            modifier = HIST_NEUTRAL_1
+            label = f"● Trung lập ({count_5}/5 tuần)"
+        elif count_5 == 0 and count_10 >= 2:
+            modifier = HIST_COLD_PRESSURE
+            label = f"🧊 Áp suất tích lũy (0/5, {count_10}/10 tuần)"
+        elif count_5 == 0 and count_10 == 1:
+            modifier = HIST_COLD_MILD
+            label = f"❄️ Áp suất nhẹ (0/5, {count_10}/10 tuần)"
+        elif count_5 == 0 and count_10 == 0 and extended_tails:
+            modifier = HIST_TOXIC_COLD
+            label = f"💀 Quá lạnh (0/5, 0/10 tuần)"
         else:
-            # Check Toxic Gap (10 weeks)
-            ext_count = extended_counts.get(pair, 0)
-            if ext_count == 0 and extended_tails:
-                pair_scores[pair] += HIST_OVERDUE  # Dangerous cold streak
-                history_applied[pair] = HIST_OVERDUE
-            else:
-                pair_scores[pair] += HIST_POTENTIAL
-                history_applied[pair] = HIST_POTENTIAL
+            modifier = HIST_NEUTRAL_1
+            label = "● Trung lập"
 
-    # ── Recency Dampener (v4.1: multiplicative decay) ──
-    recency_decay_applied: dict[int, float] = {}  # track decay factor
-    if RECENCY_DAMPENER_ENABLED:
-        for pair in pair_scores:
-            count = recent_counts.get(pair, 0)
-            if count >= RECENCY_DAMPENER_THRESHOLD:
-                # decay = base ^ (count - 1)
-                # count=2 → ×0.7, count=3 → ×0.49, count=4 → ×0.343
-                decay = RECENCY_DAMPENER_DECAY ** (count - 1)
-                pair_scores[pair] *= decay
-                recency_decay_applied[pair] = decay
+        pair_scores[pair] *= modifier
+        history_applied[pair] = (modifier, label)
 
-    # ── Sort & pick top N (with diversity) ──
+        # Remove excluded pairs (modifier = 0.0)
+        if modifier == 0.0:
+            del pair_scores[pair]
+
+    # ── Step 5: Sort & Pick Top 3 ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_candidates, candidate_log = _build_candidate_shortlist(
-        sorted_pairs, pair_model_count, pair_unique_models, limit=10
+        sorted_pairs, pair_vote_count, pair_unique_models, limit=10
     )
 
-    if DIVERSITY_ENABLED and len(sorted_pairs) > top_n_output:
-        # Keep final Top 3 selectable only from the same Top 10 pool shown in Telegram.
-        mmr_pool = sorted_pairs[:10]
-        diverse_selection = _select_diverse_top_n(
-            mmr_pool, pair_unique_models, n=top_n_output, lambda_=DIVERSITY_LAMBDA
-        )
-        top_pairs = [(pair, round(score, 4)) for pair, score in diverse_selection]
-        print(f"     🎲 MMR diversity: selected {[f'{p:02d}' for p,_ in top_pairs]} (λ={DIVERSITY_LAMBDA})")
-    else:
-        top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
+    top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
+    print(f"     🎯 Top {top_n_output}: {[f'{p:02d}' for p, _ in top_pairs]}")
 
     # ── Scoring Log cho Telegram ──
     scoring_log = _build_scoring_log(
-        top_pairs, valid_results, w, pair_unique_models,
-        recent_counts, extended_counts, extended_tails,
-        model_confidences,
-        consensus_applied=consensus_applied,
-        history_applied=history_applied,
-        recency_decay_applied=recency_decay_applied,
+        top_pairs, pair_model_details, pair_unique_models,
+        consensus_applied, history_applied, model_confidences,
     )
 
-    consensus_list = [p for p, models in pair_unique_models.items()
-                      if len(models) >= CONSENSUS_SILVER_THRESHOLD]
+    consensus_list = [p for p, models in pair_unique_models.items() if len(models) >= 2]
 
     return {
         "top_pairs": top_pairs,
         "contributing_models": list(set(contributing)),
-        "ensemble_method": "xsmb_borda_v4.2",
+        "ensemble_method": "xsmb_precision_v5.0",
         "borda_details": {p: round(s, 4) for p, s in sorted_pairs},
         "consensus_pairs": consensus_list,
         "scoring_log": scoring_log,
         "candidate_log": candidate_log,
         "top_candidates": top_candidates,
-        "models_active": len(active_models),
+        "models_active": len(active_model_names),
         "models_total": TOTAL_MODELS,
     }
 
 
 def _build_scoring_log(
     top_pairs: list,
-    valid_results: list,
-    weights: dict,
+    pair_model_details: dict,
     pair_unique_models: dict,
-    recent_counts: dict,
-    extended_counts: dict,
-    extended_tails: list,
+    consensus_applied: dict,
+    history_applied: dict,
     model_confidences: dict,
-    *,
-    consensus_applied: Optional[dict] = None,
-    history_applied: Optional[dict] = None,
-    recency_decay_applied: Optional[dict] = None,
 ) -> str:
-    """Build human-readable scoring breakdown cho Telegram (v4.1 enhanced)."""
-    if consensus_applied is None:
-        consensus_applied = {}
-    if history_applied is None:
-        history_applied = {}
-    if recency_decay_applied is None:
-        recency_decay_applied = {}
-
+    """Build human-readable scoring breakdown cho Telegram (v5.0)."""
     log_entries = []
 
-    for pair, score in top_pairs:
+    for pair, final_score in top_pairs:
         lines = []
-        base_points = 0
-        models_hit = []
+        details = pair_model_details.get(pair, [])
 
-        for result in valid_results:
-            for r_idx, (p, raw_s) in enumerate(result.get("top_pairs", [])):
-                if p == pair:
-                    wt = weights.get(result["model_name"], 0.10)
-                    conf = model_confidences.get(result["model_name"], 1.0)
-                    pts = BORDA_POINTS.get(r_idx + 1, 0) * wt * conf
-                    base_points += pts
-                    m_name = MODEL_DISPLAY_NAME.get(result["model_name"], result["model_name"])
-                    lines_detail = f"{m_name}(T{r_idx + 1})"
-                    models_hit.append(lines_detail)
+        # Header
+        vote_count = len(pair_unique_models.get(pair, set()))
+        lines.append(f"🔸 <b>[{pair:02d}]</b> = {final_score:.3f}đ")
 
-        # v4.1: warning icon for overheated pairs
-        h_count = recent_counts.get(pair, 0)
-        heat_icon = "🔥" if h_count >= 3 else ""
-        lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ {heat_icon}")
-        lines.append(f"   ├ Cơ sở: {base_points:.2f}đ từ {', '.join(models_hit)}")
+        # Model contributions
+        base_sum = sum(d["contribution"] for d in details)
+        model_parts = []
+        for d in sorted(details, key=lambda x: x["contribution"], reverse=True):
+            m_name = MODEL_DISPLAY_NAME.get(d["model"], d["model"])
+            norm_pct = d["norm_score"] * 100
+            model_parts.append(f"{m_name}(T{d['rank']}, {norm_pct:.0f}%)")
+        lines.append(f"   ├ Cơ sở: {base_sum:.3f}đ từ {', '.join(model_parts)}")
 
-        # Consensus (v4.1: show actual bonus + cap info)
-        c_unique = len(pair_unique_models.get(pair, set()))
-        actual_bonus = consensus_applied.get(pair)
-        if actual_bonus is not None:
-            cap_tag = ""
-            if CONSENSUS_CAP_TO_BASE:
-                # Check if bonus was capped
-                if c_unique >= CONSENSUS_GOLD_THRESHOLD and actual_bonus < BONUS_GOLD:
-                    cap_tag = f" [capped ≤ {abs(base_points):.2f}]"
-                elif c_unique >= CONSENSUS_SILVER_THRESHOLD and actual_bonus < BONUS_SILVER:
-                    cap_tag = f" [capped ≤ {abs(base_points):.2f}]"
-            lines.append(f"   ├ Đồng thuận: +{actual_bonus:.2f}đ ({c_unique}/{TOTAL_MODELS} model){cap_tag}")
+        # Consensus
+        cons_mult = consensus_applied.get(pair, 1.0)
+        if cons_mult > 1.0:
+            pct_boost = (cons_mult - 1.0) * 100
+            lines.append(f"   ├ Đồng thuận: ×{cons_mult:.2f} (+{pct_boost:.0f}%, {vote_count} models)")
 
-        # History (v4.1: show exponential penalty detail)
-        hist_adj = history_applied.get(pair)
-        if hist_adj is not None:
-            if h_count >= 3:
-                exp_tag = " ← exponential" if HIST_EXPONENTIAL else ""
-                lines.append(f"   ├ Lịch sử: {hist_adj:.2f}đ (Nổ {h_count}/5 tuần{exp_tag})")
-            elif h_count == 2:
-                lines.append(f"   ├ Lịch sử: 0.00đ (Neutral {h_count}/5 tuần)")
-            elif h_count == 1:
-                lines.append(f"   ├ Lịch sử: +0.30đ (Momentum vừa {h_count}/5 tuần)")
+        # History
+        hist_info = history_applied.get(pair)
+        if hist_info:
+            modifier, label = hist_info
+            if modifier != 1.0:
+                lines.append(f"   ├ Lịch sử: ×{modifier:.2f} — {label}")
             else:
-                ext_count = extended_counts.get(pair, 0)
-                if ext_count == 0 and extended_tails:
-                    lines.append(f"   ├ Lịch sử: {hist_adj:.2f}đ (Gan nguy hiểm 10 tuần)")
-                else:
-                    lines.append(f"   ├ Lịch sử: +{hist_adj:.2f}đ (Đang nén)")
-
-        # Recency dampener (v4.1)
-        decay = recency_decay_applied.get(pair)
-        if decay is not None:
-            pct_reduction = (1.0 - decay) * 100
-            lines.append(f"   ├ 🔥 Recency Decay: ×{decay:.2f} (-{pct_reduction:.0f}% quá nóng)")
+                lines.append(f"   ├ Lịch sử: {label}")
 
         # Model sources
         pair_models = pair_unique_models.get(pair, set())
@@ -566,7 +442,7 @@ def format_ensemble_result(
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],
-        "model_version": "ensemble_v4.2",
+        "model_version": "ensemble_v5.0",
         "ensemble_method": ensemble_output["ensemble_method"],
         "contributing_models": ensemble_output["contributing_models"],
         "final_scores": [s for _, s in top[:3]],
@@ -592,7 +468,7 @@ def format_model_prediction_log(
     model_name = model_result.get("model_name", "unknown")
     if model_name in (
         "frequency", "gap_overdue", "markov", "bayesian", "cyclic",
-        "stats_freq_gap", "chisquare_gof", "chisquare_independence",
+        "stats_freq_gap", "chisquare_gof", "chisquare_independence", "cdm",
     ):
         model_type = "rule_based"
     elif model_name in ("xgboost_core", "lstm"):

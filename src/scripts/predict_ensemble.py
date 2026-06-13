@@ -1,9 +1,9 @@
 """
-predict_ensemble.py — v4.2 (10-Model XSMB + 5-Model XSMN)
+predict_ensemble.py — v5.0 (10-Model XSMB + 5-Model XSMN)
 Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
 Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
-XSMB (v4.2 — 10 models):
+XSMB (v5.0 — 10 models, Precision Ensemble):
   1. Frequency (multi-window)    → Top 2
   2. Gap/Overdue (weekday)       → Top 2
   3. Markov (second-order)       → Top 2
@@ -14,13 +14,13 @@ XSMB (v4.2 — 10 models):
   8. Stats Freq/Gap              → Top 2
   9. Chi-square GOF              → Top 2
   10. Chi-square Independence    → Top 2
-  → Adaptive Borda Ensemble      → Top 3
+  → Precision Score Fusion        → Top 3
 
 XSMN (v3.2 — 5 models, backward compatible):
   1-5. Frequency/Gap/Markov/XGB/LSTM → Borda+CombSUM → Top 3
 
 Flow mỗi ngày:
-  1. XSMB: chạy 10 models → v4 ensemble
+  1. XSMB: chạy 10 models → v5 precision ensemble
   2. XSMN: resolve provinces → chạy 5 models per province → v3.2 ensemble
   3. Ghi prediction_results + model_predictions
   4. Gửi Telegram notification
@@ -53,6 +53,7 @@ from src.xsmn_ensemble.model_gap import predict_gap as xsmn_predict_gap
 from src.xsmn_ensemble.model_markov import predict_markov as xsmn_predict_markov
 from src.xsmn_ensemble.model_xgboost import predict_xgboost as xsmn_predict_xgboost
 from src.xsmn_ensemble.model_lstm import predict_lstm as xsmn_predict_lstm
+from src.xsmn_ensemble.model_cdm import predict_cdm as xsmn_predict_cdm
 from src.xsmn_ensemble.ensemble_engine import (
     compute_global_borda,
     format_ensemble_result as xsmn_format_ensemble_result,
@@ -72,6 +73,7 @@ from src.xsmb_ensemble.model_chisquare_gof import predict_chisquare_gof as xsmb_
 from src.xsmb_ensemble.model_chisquare_independence import (
     predict_chisquare_independence as xsmb_predict_chisquare_independence,
 )
+from src.xsmb_ensemble.model_cdm import predict_cdm as xsmb_predict_cdm
 from src.xsmb_ensemble.ensemble_engine import (
     compute_xsmb_ensemble,
     format_ensemble_result as xsmb_format_ensemble_result,
@@ -83,10 +85,10 @@ from src.scoring.credibility_scorer import compute_credibility_scores
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-TOTAL_MODELS_XSMB = 10          # v4.2: 10 models for XSMB
-TOTAL_MODELS_PER_PROVINCE = 5   # v3.2: 5 models per XSMN province
+TOTAL_MODELS_XSMB = 11          # v5.0: 11 models for XSMB (added CDM)
+TOTAL_MODELS_PER_PROVINCE = 6   # v3.3: 6 models per XSMN province (added CDM)
 MODEL_OUTPUT_TOP_N = 10
-XSMB_MODEL_OUTPUT_TOP_N = 2
+XSMB_MODEL_OUTPUT_TOP_N = 3
 RULE_MODEL_LOOKBACK_DRAWS = 180
 XGB_FEATURE_LOOKBACK_DRAWS = 240
 LSTM_LOOKBACK_DRAWS = 180
@@ -102,6 +104,7 @@ MODEL_SHORT_NAMES = {
     "stats_freq_gap": "StatsFG",
     "chisquare_gof": "ChiGOF",
     "chisquare_independence": "ChiInd",
+    "cdm": "CDM",
 }
 
 XSMB_MODEL_SHORT_NAMES = {
@@ -277,6 +280,15 @@ async def run_xsmb_models(
     model_results.append(result)
     _log_model_result(result, "J")
 
+    # ── Model K: CDM (Dirichlet-Multinomial) ──
+    print(f"  🔹 Model K (CDM/Dirichlet-Multinomial)...")
+    result = xsmb_predict_cdm(
+        db, province=None, target_date=target_date,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    )
+    model_results.append(result)
+    _log_model_result(result, "K")
+
     # ── Summary ──
     success_count = sum(1 for r in model_results if r["status"] == "success")
     print(f"\n  📊 XSMB Models Active: {success_count}/{TOTAL_MODELS_XSMB}")
@@ -359,6 +371,15 @@ async def run_xsmn_models_for_target(
     model_results.append(result_5)
     _log_model_result(result_5, "5")
 
+    # ── Model 6: CDM (Dirichlet-Multinomial) ──
+    print(f"  🔹 Model 6 (CDM/Dirichlet-Multinomial)...")
+    result_6 = xsmn_predict_cdm(
+        db, province, target_date, region="XSMN",
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
+    )
+    model_results.append(result_6)
+    _log_model_result(result_6, "6")
+
     # ── Summary ──
     success_count = sum(1 for r in model_results if r["status"] == "success")
     print(f"\n  📊 XSMN Models Active: {success_count}/{TOTAL_MODELS_PER_PROVINCE}")
@@ -432,10 +453,10 @@ async def run_xsmb_ensemble(
     tmpdir: str,
 ):
     """
-    XSMB v4.2 — 10-Model Dedicated Ensemble Pipeline.
+    XSMB v5.0 — 10-Model Precision Ensemble Pipeline.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v4.2 (10 Models)")
+    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v5.0 (10 Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"{'='*60}")
 
@@ -477,7 +498,7 @@ async def run_xsmb_ensemble(
     print(f"  📅 Lấy lịch sử mở rộng 10 kỳ (Toxic Gap): {len(extended_tails)} số")
 
     print(f"\n  {'='*50}")
-    print(f"  🌍 XSMB ENSEMBLE v4.2")
+    print(f"  🌍 XSMB ENSEMBLE v5.0")
     print(f"  {'='*50}")
 
     ensemble_output = compute_xsmb_ensemble(
@@ -526,7 +547,7 @@ async def run_xsmb_ensemble(
 
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v4.2 — 10 models</b>\n"
+        msg += f"🤖 <b>Multi-Model Ensemble v5.0 — 10 models</b>\n"
 
         if candidate_log_msg:
             msg += f"{candidate_log_msg}\n\n"
@@ -555,7 +576,7 @@ async def run_xsmb_ensemble(
             raise RuntimeError("Telegram notification failed for XSMB")
         print(f"\n📱 Telegram notification sent for XSMB!")
 
-    print(f"\n✅ XSMB Ensemble v4.2 Prediction complete!")
+    print(f"\n✅ XSMB Ensemble v5.0 Prediction complete!")
 
 
 async def run_xsmn_ensemble(
@@ -700,7 +721,7 @@ async def _send_chunked(notifier, msg: str, config_key: str) -> bool:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v4.2 + XSMN v3.2)")
+    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v5.0 + XSMN v3.2)")
     parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
     args = parser.parse_args()
 
@@ -718,7 +739,7 @@ async def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         # XSMB — v4.2 (10 models)
         print(f"\n{'='*60}")
-        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v4.2 (10 Models)")
+        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.0 (10 Models)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir)
 
         # XSMN — v3.2 (5 models, backward compatible)
