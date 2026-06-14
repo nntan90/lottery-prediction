@@ -231,21 +231,20 @@ def compute_xsmb_ensemble(
 
     for result in valid_results:
         model_name = result["model_name"]
-        contributing.append(model_name)
         weight = w.get(model_name, 0.10)
         conf = model_confidences.get(model_name, 1.0)
 
         top_pairs = result["top_pairs"]
 
-        # ── FIX: Filter out None scores before normalization ──
-        # This prevents TypeError: bad operand type for abs(): 'NoneType'
-        valid_pairs = [(pair, score) for pair, score in top_pairs if score is not None]
-        
+        # Filter out entries with None pair or None score
+        valid_pairs = [(pair, score) for pair, score in top_pairs
+                       if pair is not None and score is not None]
+
         if not valid_pairs:
-            # Model returned all None scores → skip this model
-            print(f"     ⚠️  Model {model_name}: all scores are None, skipping")
-            contributing.remove(model_name)
+            print(f"     ⚠️  Model {model_name}: no valid pairs after None filter, skipping")
             continue
+
+        contributing.append(model_name)
 
         # Proportional normalization: score / sum(scores)
         # This preserves the confidence gap between pick #1 and #2
