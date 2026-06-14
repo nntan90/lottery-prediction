@@ -37,7 +37,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 
-# ─── Config ─────────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────[...]
 
 def _load_scoring_config() -> dict:
     """Load scoring config from config/scoring.yaml."""
@@ -237,18 +237,28 @@ def compute_xsmb_ensemble(
 
         top_pairs = result["top_pairs"]
 
+        # ── FIX: Filter out None scores before normalization ──
+        # This prevents TypeError: bad operand type for abs(): 'NoneType'
+        valid_pairs = [(pair, score) for pair, score in top_pairs if score is not None]
+        
+        if not valid_pairs:
+            # Model returned all None scores → skip this model
+            print(f"     ⚠️  Model {model_name}: all scores are None, skipping")
+            contributing.remove(model_name)
+            continue
+
         # Proportional normalization: score / sum(scores)
         # This preserves the confidence gap between pick #1 and #2
-        raw_scores = [abs(s) for _, s in top_pairs]
+        raw_scores = [abs(s) for _, s in valid_pairs]
         score_sum = sum(raw_scores)
 
-        for rank_idx, (pair, raw_score) in enumerate(top_pairs):
+        for rank_idx, (pair, raw_score) in enumerate(valid_pairs):
             # Normalize: proportional share of model's total score output
             if score_sum > 0:
                 norm_score = abs(raw_score) / score_sum
             else:
                 # Equal split fallback
-                norm_score = 1.0 / max(len(top_pairs), 1)
+                norm_score = 1.0 / max(len(valid_pairs), 1)
 
             # Weighted contribution: weight × confidence × normalized_score
             weighted_pts = weight * conf * norm_score
