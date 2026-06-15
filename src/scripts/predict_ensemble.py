@@ -474,13 +474,13 @@ async def run_xsmb_ensemble(
         credibility_log = credibility.get("scoring_log", "")
         print(credibility_log)
     except Exception as e:
-        print(f"  \u26a0\ufe0f  Credibility scoring failed, falling back to auto_weight: {e}")
+        print(f"  ⚠️  Credibility scoring failed, falling back to auto_weight: {e}")
         try:
             auto_weights = compute_optimal_weights(db, lookback_days=30, region="XSMB")
             if auto_weights:
-                print(f"  \ud83d\udd27 Auto-weights fallback applied: {', '.join(f'{k}={v:.2f}' for k,v in auto_weights.items())}")
+                print(f"  🔧 Auto-weights fallback applied: {', '.join(f'{k}={v:.2f}' for k,v in auto_weights.items())}")
         except Exception as e2:
-            print(f"  \u26a0\ufe0f  Auto-weight also failed (using defaults): {e2}")
+            print(f"  ⚠️  Auto-weight also failed (using defaults): {e2}")
 
     # Extract Bayesian confidence (merge with credibility confidences)
     for r in all_model_results:
@@ -616,10 +616,10 @@ async def run_xsmn_ensemble(
         xsmn_credibility_log = xsmn_credibility.get("scoring_log", "")
         print(xsmn_credibility_log)
     except Exception as e:
-        print(f"  \u26a0\ufe0f  XSMN Credibility scoring failed (using defaults): {e}")
+        print(f"  ⚠️  XSMN Credibility scoring failed (using defaults): {e}")
 
     print(f"\n  {'='*50}")
-    print(f"  \ud83c\udf0d GLOBAL ENSEMBLE (XSMN)")
+    print(f"  🌍 GLOBAL ENSEMBLE (XSMN)")
     print(f"  {'='*50}")
 
     ensemble_output = compute_global_borda(
