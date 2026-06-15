@@ -27,6 +27,7 @@ class MockQuery:
     def lt(self, *args, **kwargs): return self
     def order(self, *args, **kwargs): return self
     def limit(self, *args, **kwargs): return self
+    def range(self, *args, **kwargs): return self
 
     def execute(self):
         return MockResult(self.rows)
