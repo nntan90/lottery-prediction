@@ -216,24 +216,24 @@ xsmb_v4:
 xsmb_v5:
   # --- Weights (v5.0+CDM — 11 models, sum = 1.00) ---
   weights:
-    frequency: 0.07             # ↓ overlap with XGBoost features
-    gap_overdue: 0.07           # ↓ overlap with XGBoost features
-    markov: 0.12                # independent transition matrix
-    xgboost_core: 0.14          # ML superset model
-    lstm: 0.10                  # deep learning sequence
-    bayesian: 0.14              # ↑ high hit rate observed
-    cyclic: 0.12                # ↑ high hit rate observed
-    stats_freq_gap: 0.06        # ↓ redundant with freq/gap
-    chisquare_gof: 0.05         # ↓ lower predictive value
-    chisquare_independence: 0.05 # ↓ lower predictive value
-    cdm: 0.08                   # 🆕 Dirichlet-Multinomial baseline
+    frequency: 0.05             # ↓↓ overlap with XGBoost features
+    gap_overdue: 0.05           # ↓↓ overlap with XGBoost features
+    markov: 0.10                # ↓ independent but overlaps in pattern logic
+    xgboost_core: 0.22          # ↑↑ ML superset model (high reliability)
+    lstm: 0.18                  # ↑↑ deep learning sequence
+    bayesian: 0.12              # high hit rate observed
+    cyclic: 0.10                # high hit rate observed
+    stats_freq_gap: 0.04        # ↓ redundant with freq/gap
+    chisquare_gof: 0.04         # ↓ lower predictive value
+    chisquare_independence: 0.04 # ↓ lower predictive value
+    cdm: 0.06                   # ↓ Dirichlet-Multinomial baseline
 
   # --- Consensus Amplifier (v5.0 — continuous multiplicative) ---
   # multiplier = 1 + alpha × (vote_count - 1), capped at max_multiplier
-  # vote=1: ×1.0, vote=2: ×1.2, vote=3: ×1.4, vote=4: ×1.6, vote=5+: ×1.8
+  # vote=1: ×1.0, vote=2: ×1.1, vote=3: ×1.2, vote=4: ×1.3, vote=5+: ×1.4
   consensus:
-    alpha: 0.20                 # Each additional vote adds 20% boost
-    max_multiplier: 1.80        # Cap to prevent explosion
+    alpha: 0.10                 # ↓ Each additional vote adds only 10% boost (reduced False Consensus Trap)
+    max_multiplier: 1.40        # ↓ Cap to prevent explosion
 
   # --- History Guard (v5.0 — single multiplicative modifier) ---
   # One modifier applied once. No double penalty.
@@ -264,18 +264,18 @@ xsmb_v5:
 # =============================================================================
 xsmn_overrides:
   weights:
-    frequency: 0.13
-    gap_overdue: 0.13
-    markov: 0.18
-    xgboost_core: 0.25
-    lstm: 0.18
-    cdm: 0.13                   # 🆕 Dirichlet-Multinomial baseline
+    frequency: 0.08             # ↓ reduced to prevent consensus trap
+    gap_overdue: 0.08           # ↓ reduced to prevent consensus trap
+    markov: 0.10                # ↓ reduced
+    xgboost_core: 0.35          # ↑↑ highest reliability (80% hit rate)
+    lstm: 0.25                  # ↑↑ high reliability (70% hit rate)
+    cdm: 0.14                   # Dirichlet-Multinomial baseline
 
   consensus:
     gold_threshold: 4
     silver_threshold: 3
-    gold_bonus: 1.0
-    silver_bonus: 0.3
+    gold_bonus: 0.5             # ↓ drastically reduced to prevent consensus trap
+    silver_bonus: 0.1           # ↓ drastically reduced
 
   history:
     overdue_penalty: -0.5
@@ -286,8 +286,7 @@ xsmn_overrides:
     enabled: false           # Switch to Pure Borda (giống XSMB)
 
   diversity:
-    enabled: true
-    lambda: 0.7              # Ưu tiên score hơn diversity
+    enabled: false           # ❌ Disabled: MMR was rejecting good high-scoring pairs
 
 # =============================================================================
 # Model Credibility Scoring System
