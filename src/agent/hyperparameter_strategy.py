@@ -73,6 +73,7 @@ FULL_RESET_PARAMS = {
 }
 
 STRATEGY_MAP = {
+    "maintain":         DEFAULT_PARAMS,
     "boost_estimators": BOOST_ESTIMATORS_PARAMS,
     "conservative":     CONSERVATIVE_PARAMS,
     "scale_weight":     SCALE_WEIGHT_PARAMS,

@@ -1,10 +1,10 @@
 name: 04 - Evaluate Retrain Models
 
-# Chạy mỗi ngày lúc 22:37 VN (15:37 UTC), sau khi verify prediction đã xong.
+# Chạy mỗi ngày lúc 23:00 VN (16:00 UTC), sau khi verify prediction đã xong.
 # Agent đọc prediction_results đã verify mới nhất và đánh giá cả single + multi model.
 on:
   schedule:
-    - cron: '37 15 * * *'  # 22:37 GMT+7 (15:37 UTC)
+    - cron: '0 16 * * *'  # 23:00 GMT+7 (16:00 UTC)
   workflow_dispatch:  # Cho phép trigger thủ công
     inputs:
       target_date:
