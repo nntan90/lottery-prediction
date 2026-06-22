@@ -225,94 +225,74 @@ def _get_region_config(region: Optional[str] = None) -> dict:
 
 
 
-# ─── MMR Diversity Selection (v3.3) ─────────────────────────────────────────
+# ─── Unit Digit Diversity Selection (v3.4) ──────────────────────────────────
 
-def _jaccard_similarity(set_a: set, set_b: set) -> float:
-    """Jaccard similarity giữa 2 tập model names."""
-    if not set_a and not set_b:
-        return 1.0
-    if not set_a or not set_b:
-        return 0.0
-    intersection = len(set_a & set_b)
-    union = len(set_a | set_b)
-    return intersection / union if union > 0 else 0.0
-
-
-def _select_diverse_top_n(
-    scored_pairs: list[tuple[int, float]],
-    pair_unique_models: dict[int, set],
+def _select_unit_digit_diversity(
+    all_scored_pairs: list[tuple[int, float]],
     n: int = 3,
-    lambda_: float = 0.6,
-) -> list[tuple[int, float]]:
+    pool_size: int = 10,
+) -> tuple[list[tuple[int, float]], str]:
     """
-    MMR (Maximal Marginal Relevance) selection cho diverse top-N.
-
-    Thay vì lấy top-N theo score thuần, MMR cân bằng giữa:
-      - Relevance: score cao
-      - Diversity: supporting model set khác với các pairs đã chọn
-
-    Algorithm:
-      1. Pick #1: pair có score cao nhất
-      2. Pick #i: argmax(λ × norm_score - (1-λ) × max_sim_to_selected)
-         - norm_score: score normalized về [0,1]
-         - max_sim_to_selected: Jaccard similarity lớn nhất với các pairs đã chọn
-
+    Unit Digit (Hàng đơn vị) Diversity Selection.
+    
+    1. Gom tổng điểm của tất cả các cặp số theo hàng đơn vị (0-9).
+    2. Xếp hạng các hàng đơn vị từ điểm cao nhất đến thấp nhất.
+    3. Tìm trong Top `pool_size` (mặc định Top 10) các cặp số tốt nhất thoả mãn:
+       - Mỗi cặp số được chọn phải có hàng đơn vị ứng với các hàng đơn vị top đầu.
+       - Không chọn trùng hàng đơn vị.
+    4. Nếu Top 10 không đủ các hàng đơn vị khác nhau để lấy đủ N số, lấy thêm các số điểm cao nhất còn lại trong Top 10.
+    
     Args:
-        scored_pairs: sorted list of (pair, score) — descending by score
-        pair_unique_models: dict pair → set of model names that voted for it
-        n: number of pairs to select
-        lambda_: tradeoff parameter (0=max diversity, 1=max relevance)
-
+        all_scored_pairs: List of (pair, score) đã được sort theo score giảm dần
+        n: Số lượng cặp số cần chọn (mặc định 3)
+        pool_size: Kích thước danh sách ứng viên (mặc định 10)
+        
     Returns:
-        List of (pair, score) — diverse top-N selection
+        diverse_selection: List of (pair, score)
+        log_message: Thông báo log để in ra Telegram
     """
-    if len(scored_pairs) <= n:
-        return scored_pairs
-
-    # Normalize scores to [0, 1] cho MMR
-    max_score = scored_pairs[0][1]  # already sorted desc
-    min_score = scored_pairs[-1][1]
-    score_range = max_score - min_score
-
-    def norm_score(s: float) -> float:
-        if score_range < 1e-10:
-            return 1.0
-        return (s - min_score) / score_range
-
-    # Pick #1: highest score
-    selected = [scored_pairs[0]]
-    selected_model_sets = [pair_unique_models.get(scored_pairs[0][0], set())]
-    remaining = list(scored_pairs[1:])
-
-    # Pick #2..#n using MMR
-    while len(selected) < n and remaining:
-        best_mmr = -float('inf')
-        best_idx = 0
-
-        for idx, (pair, score) in enumerate(remaining):
-            # Relevance component
-            relevance = norm_score(score)
-
-            # Diversity component: max similarity to any already-selected pair
-            pair_models = pair_unique_models.get(pair, set())
-            max_sim = max(
-                _jaccard_similarity(pair_models, sel_models)
-                for sel_models in selected_model_sets
-            )
-
-            # MMR score: high relevance, low similarity to selected
-            mmr = lambda_ * relevance - (1.0 - lambda_) * max_sim
-
-            if mmr > best_mmr:
-                best_mmr = mmr
-                best_idx = idx
-
-        # Select the best MMR candidate
-        chosen_pair, chosen_score = remaining.pop(best_idx)
-        selected.append((chosen_pair, chosen_score))
-        selected_model_sets.append(pair_unique_models.get(chosen_pair, set()))
-
-    return selected
+    # 1. Tính điểm cho từng hàng đơn vị (0-9)
+    unit_digit_scores = {d: 0.0 for d in range(10)}
+    for pair, score in all_scored_pairs:
+        unit = pair % 10
+        unit_digit_scores[unit] += score
+        
+    # 2. Xếp hạng hàng đơn vị
+    ranked_units = sorted(unit_digit_scores.items(), key=lambda x: x[1], reverse=True)
+    unit_rank_list = [d for d, s in ranked_units]
+    
+    # Tạo chuỗi log
+    log_msg = f"🎲 Xếp hạng đuôi (Unit Digit): " + ", ".join([f"{d}" for d in unit_rank_list[:5]])
+    
+    # 3. Lấy Top 10 để chọn
+    pool = all_scored_pairs[:pool_size]
+    
+    selected = []
+    used_units = set()
+    
+    # Tìm theo thứ tự unit_rank_list
+    for target_unit in unit_rank_list:
+        if len(selected) >= n:
+            break
+            
+        # Tìm pair có target_unit trong pool (đã sort theo score giảm dần)
+        for pair, score in pool:
+            if pair % 10 == target_unit and pair not in [p for p, s in selected]:
+                selected.append((pair, score))
+                used_units.add(target_unit)
+                break  # Đã tìm được pair tốt nhất cho unit này, chuyển sang unit tiếp theo
+                
+    # 4. Fallback: Nếu vẫn chưa đủ n số (do pool 10 không đủ đa dạng đuôi)
+    # Lấy thêm các số điểm cao nhất trong pool mà chưa được pick
+    if len(selected) < n:
+        for pair, score in pool:
+            if len(selected) >= n:
+                break
+            if pair not in [p for p, s in selected]:
+                selected.append((pair, score))
+                used_units.add(pair % 10)
+                
+    return selected, log_msg
 
 
 # ─── Model Name Display Mapping ─────────────────────────────────────────────
@@ -597,14 +577,15 @@ def compute_global_borda(
     )
 
     if use_diversity and len(sorted_pairs) > top_n_output:
-        # MMR diversity selection uses the same Top 10 pool shown in Telegram.
-        mmr_pool = [(p, s) for p, s in sorted_pairs[:10]]
-        diverse_selection = _select_diverse_top_n(
-            mmr_pool, pair_unique_models, n=top_n_output, lambda_=diversity_lambda
+        # Unit Digit Diversity selection uses the same Top 10 pool shown in Telegram.
+        diverse_selection, div_log = _select_unit_digit_diversity(
+            sorted_pairs, n=top_n_output, pool_size=10
         )
         top_pairs = [(pair, round(score, 4)) for pair, score in diverse_selection]
-        print(f"     🎲 MMR diversity: selected {[f'{p:02d}' for p,_ in top_pairs]} "
-              f"(λ={diversity_lambda})")
+        print(f"     {div_log}")
+        print(f"     🎲 Diversity picked: {[f'{p:02d}' for p,_ in top_pairs]}")
+        # Thêm log message vào candidate_log để in ra Telegram
+        candidate_log = div_log + "\n" + candidate_log
     else:
         top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
 
