@@ -164,16 +164,18 @@ async def main():
     }).execute()
 
     # 8. Cập nhật training queue (tùy chọn)
-    tq_upd = db.supabase.table("training_queue")\
-        .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
-        .eq("region", args.region)\
-        .eq("status", "triggered")\
-        .like("model_name", "%lstm%")
-    if province is not None:
-        tq_upd = tq_upd.eq("province", province)
-    else:
-        tq_upd = tq_upd.is_("province", "null")
-    tq_upd.execute()
+    try:
+        tq_upd = db.supabase.table("training_queue")\
+            .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
+            .eq("region", args.region)\
+            .eq("status", "triggered")
+        if province is not None:
+            tq_upd = tq_upd.eq("province", province)
+        else:
+            tq_upd = tq_upd.is_("province", "null")
+        tq_upd.execute()
+    except Exception as e:
+        print(f"⚠️  Skip training_queue update: {e}")
 
     # 9. Gửi báo cáo qua Telegram
     msg = (
