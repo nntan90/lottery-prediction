@@ -56,6 +56,16 @@ STATIONS = [
 HISTORY_DRAWS = 240  # Lấy 240 kỳ lịch sử để giảm noise khi tính features
 MAX_RETRIES  = 5    # Số lần retry khi gặp lỗi kết nối
 RETRY_DELAY  = 3.0  # Giây chờ giữa mỗi retry (exponential backoff)
+XSMB_EXTRA_FEATURE_COLUMNS = {
+    "freq_3",
+    "freq_14",
+    "weekday_freq_30",
+    "gap_percentile",
+    "neighbor_freq_7",
+    "last_position_encoded",
+    "streak_length",
+    "cross_pair_corr",
+}
 
 
 def _execute_with_retry(fn_factory, label: str = "", max_retries: int = MAX_RETRIES):
@@ -102,17 +112,35 @@ def build_features_for_station(
 
     # Bước 1: Lấy lịch sử tails_2d
     def _fetch_history(db):
-        query = db.supabase.table("tails_2d")\
-            .select("draw_date,tail_2d")\
-            .eq("region", region)\
-            .lt("draw_date", target_date.isoformat())\
-            .order("draw_date", desc=True)\
-            .limit(HISTORY_DRAWS * 30)
-        if province:
-            query = query.eq("province", province)
-        else:
-            query = query.is_("province", "null")
-        return query.execute().data
+        limit = 1000
+        offset = 0
+        all_rows = []
+
+        while True:
+            query = db.supabase.table("tails_2d")\
+                .select("draw_date,tail_2d")\
+                .eq("region", region)\
+                .lt("draw_date", target_date.isoformat())\
+                .order("draw_date", desc=True)\
+                .range(offset, offset + limit - 1)
+            if province:
+                query = query.eq("province", province)
+            else:
+                query = query.is_("province", "null")
+
+            chunk = query.execute().data
+            if not chunk:
+                break
+
+            all_rows.extend(chunk)
+            unique_dates = {r["draw_date"] for r in all_rows}
+            if len(unique_dates) > HISTORY_DRAWS:
+                break
+            if len(chunk) < limit:
+                break
+            offset += limit
+
+        return all_rows
 
     history_rows = _execute_with_retry(_fetch_history, f"{label}/history")
     history_df = _extract_history(history_rows, max_rows=HISTORY_DRAWS)
@@ -149,8 +177,35 @@ def build_features_for_station(
             on_conflict="feature_date,region,province,pair"
         ).execute()
 
+    def _strip_xsmb_extra_columns(rows: list[dict]) -> list[dict]:
+        return [
+            {k: v for k, v in row.items() if k not in XSMB_EXTRA_FEATURE_COLUMNS}
+            for row in rows
+        ]
+
     try:
-        _execute_with_retry(_upsert, f"{label}/upsert")
+        try:
+            _execute_with_retry(_upsert, f"{label}/upsert")
+        except Exception as e:
+            err = str(e)
+            missing_xsmb_extra = (
+                region == "XSMB"
+                and "PGRST204" in err
+                and any(col in err for col in XSMB_EXTRA_FEATURE_COLUMNS)
+            )
+            if not missing_xsmb_extra:
+                raise
+
+            print(f"  ⚠️  {label}: DB chưa có XSMB v4 extra columns, upsert base features")
+            base_rows = _strip_xsmb_extra_columns(feature_rows)
+
+            def _upsert_base(db):
+                db.supabase.table("pair_features").upsert(
+                    base_rows,
+                    on_conflict="feature_date,region,province,pair"
+                ).execute()
+
+            _execute_with_retry(_upsert_base, f"{label}/upsert_base")
         tail_cnt = len(target_tail_set) if target_tail_set else 0
         print(f"  ✅ {label} | {target_date} | 100 pairs | history={len(history_df)}kỳ | tail_set={tail_cnt}")
         return 100

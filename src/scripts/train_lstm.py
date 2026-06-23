@@ -21,8 +21,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from src.database.supabase_client import LotteryDB
 from src.utils.storage import LotteryStorage
 from src.bot.telegram_bot import LotteryNotifier
-from src.xsmn_ensemble.data_utils import _load_tails_by_draws
+from src.xsmn_ensemble.data_utils import _load_tails_by_draws as load_xsmn_tails_by_draws
 from src.xsmn_ensemble.model_lstm import LotteryLSTM, _encode_draws_to_binary, _ensure_torch
+from src.xsmb_ensemble.data_utils import _load_tails_by_draws as load_xsmb_tails_by_draws
+from src.xsmb_ensemble.model_lstm import XSMBLSTMv4, _encode_draws_enriched
 
 
 async def main():
@@ -31,7 +33,7 @@ async def main():
     parser.add_argument("--province", default=None, help="Slug tỉnh, hoặc 'all' cho XSMB")
     parser.add_argument("--version", default=None, help="Version string, mặc định = ngày hôm nay")
     parser.add_argument("--n_draws", type=int, default=250, help="Số kỳ quay để lấy làm dataset")
-    parser.add_argument("--seq_len", type=int, default=30, help="Sequence length cho LSTM")
+    parser.add_argument("--seq_len", type=int, default=None, help="Sequence length cho LSTM")
     parser.add_argument("--epochs", type=int, default=100, help="Số epochs")
     parser.add_argument("--lr", type=float, default=0.002, help="Learning rate")
     args = parser.parse_args()
@@ -46,6 +48,7 @@ async def main():
     province = None if args.province in (None, "all", "") else args.province
     version = args.version or f"lstm_v4_{date.today().strftime('%Y%m%d')}"
     label = f"{args.region}/{province or 'all'}"
+    seq_len = args.seq_len if args.seq_len is not None else (60 if args.region == "XSMB" else 30)
 
     db = LotteryDB()
     storage = LotteryStorage()
@@ -56,17 +59,23 @@ async def main():
 
     # 1. Load data lịch sử
     print(f"📥 Đang tải {args.n_draws} kỳ lịch sử cho {label}...")
-    history_df = _load_tails_by_draws(db, args.region, province=province, n_draws=args.n_draws)
+    if args.region == "XSMB":
+        history_df = load_xsmb_tails_by_draws(db, args.region, province=province, n_draws=args.n_draws)
+    else:
+        history_df = load_xsmn_tails_by_draws(db, args.region, province=province, n_draws=args.n_draws)
 
-    if history_df.empty or len(history_df) < args.seq_len + 10:
-        msg = f"❌ Không đủ data cho {label}: có {len(history_df)} kỳ, cần tối thiểu {args.seq_len + 10} kỳ."
+    if history_df.empty or len(history_df) < seq_len + 10:
+        msg = f"❌ Không đủ data cho {label}: có {len(history_df)} kỳ, cần tối thiểu {seq_len + 10} kỳ."
         print(msg)
         await notifier.send_error_alert(msg)
         raise SystemExit(1)
 
     # 2. Encode sequences
-    print(f"⚙️  Encoding sequences (seq_len={args.seq_len})...")
-    last_seq, training_data = _encode_draws_to_binary(history_df, seq_len=args.seq_len)
+    print(f"⚙️  Encoding sequences (seq_len={seq_len})...")
+    if args.region == "XSMB":
+        last_seq, training_data = _encode_draws_enriched(history_df, seq_len=seq_len)
+    else:
+        last_seq, training_data = _encode_draws_to_binary(history_df, seq_len=seq_len)
 
     if not training_data:
         msg = f"❌ Lỗi encode training data cho {label}."
@@ -81,7 +90,10 @@ async def main():
 
     # 3. Khởi tạo và Train LSTM
     print("\n🏋️ Training LSTM (PyTorch)...")
-    lstm = LotteryLSTM(input_dim=100, hidden_dim=64, num_layers=1)
+    if args.region == "XSMB":
+        lstm = XSMBLSTMv4(input_dim=200, hidden_dim=64, num_layers=1, use_attention=True)
+    else:
+        lstm = LotteryLSTM(input_dim=100, hidden_dim=64, num_layers=1)
 
     dynamic_seed = int(time.time()) % 10000
 
@@ -139,6 +151,7 @@ async def main():
         "region":           args.region,
         "province":         province,
         "weekday":          None,
+        "model_name":       "lstm",
         "version":          version,
         "status":           "active",
         "file_path":        storage_path,
