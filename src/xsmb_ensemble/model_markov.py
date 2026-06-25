@@ -4,7 +4,7 @@ model_markov.py — Model C: Second-Order Markov Chain (XSMB v4)
 Enhanced Markov Chain cho XSMB:
   - Second-order: P(pair_j | kỳ t-1 context, kỳ t-2 context)
     State compression: chỉ track top-20 pairs per draw → 400×100 matrix
-  - Weekday-conditioned: ma trận transition riêng mỗi thứ
+  - Sequential-conditioned: ma trận transition theo các kỳ liên tiếp không phân biệt thứ
   - Decay-weighted: kỳ gần weight cao hơn (exponential decay λ=0.95)
   - Multi-context: avg P(j | context_t-1) + 0.3 × P(j | context_t-2)
 
@@ -58,48 +58,6 @@ def _load_tails_sequential(
     sorted_dates = sorted(date_groups.keys())[-n_draws:]
     return [frozenset(date_groups[d]) for d in sorted_dates]
 
-
-def _load_tails_sequential_by_weekday(
-    db,
-    weekday: int,
-    region: str = "XSMB",
-    province: Optional[str] = None,
-    n_draws: int = 60,
-    before_date: Optional[date] = None,
-) -> List[frozenset]:
-    """Load kỳ quay sequential, filter theo weekday."""
-    query = db.supabase.table("tails_2d") \
-        .select("draw_date,tail_2d") \
-        .eq("region", region) \
-        .order("draw_date", desc=True)
-
-    if province:
-        query = query.eq("province", province)
-    else:
-        query = query.is_("province", "null")
-
-    if before_date:
-        query = query.lt("draw_date", before_date.isoformat())
-
-    query = query.limit(n_draws * 8 * 30)
-    rows = query.execute().data
-
-    if not rows:
-        return []
-
-    date_groups: dict[str, set] = defaultdict(set)
-    for r in rows:
-        date_groups[r["draw_date"]].add(r["tail_2d"])
-
-    sorted_dates = sorted(date_groups.keys())
-    # Filter by weekday
-    from datetime import date as dt_date
-    filtered_dates = [
-        d for d in sorted_dates
-        if dt_date.fromisoformat(d).weekday() == weekday
-    ][-n_draws:]
-
-    return [frozenset(date_groups[d]) for d in filtered_dates]
 
 
 def predict_markov(
