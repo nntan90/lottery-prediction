@@ -88,7 +88,7 @@ from src.database.prediction_repo import save_prediction, save_model_prediction
 TOTAL_MODELS_XSMB = 11          # v5.0: 11 models for XSMB (added CDM)
 TOTAL_MODELS_PER_PROVINCE = 6   # v3.3: 6 models per XSMN province (added CDM)
 MODEL_OUTPUT_TOP_N = 5
-XSMB_MODEL_OUTPUT_TOP_N = 3
+XSMB_MODEL_OUTPUT_TOP_N = 5
 RULE_MODEL_LOOKBACK_DRAWS = 180
 XGB_FEATURE_LOOKBACK_DRAWS = 240
 LSTM_LOOKBACK_DRAWS = 180
