@@ -80,6 +80,11 @@ def _is_directly_trainable_prediction(region: str, province: Optional[str], mode
     """
     if region.upper() == "XSMN" and model_scope == "multi" and province in (None, "all"):
         return False
+        
+    # User disabled XGBoost/LSTM training for XSMB (only rule-based models active)
+    if region.upper() == "XSMB":
+        return False
+        
     return True
 
 

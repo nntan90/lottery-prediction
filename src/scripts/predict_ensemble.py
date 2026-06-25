@@ -239,13 +239,13 @@ async def run_xsmb_models(
     _log_model_result(result, "A")
 
     # ── Model B: Gap/Overdue (Weekday-specific) ──
-    print(f"  🔹 Model B (Gap/Weekday-specific)...")
-    result = xsmb_predict_gap(
-        db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
-    )
-    model_results.append(result)
-    _log_model_result(result, "B")
+    # print(f"  🔹 Model B (Gap/Weekday-specific) - DISABLED...")
+    # result = xsmb_predict_gap(
+    #     db, province=None, target_date=target_date,
+    #     n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "B")
 
     # ── Model C: Markov (Second-order) ──
     print(f"  🔹 Model C (Markov²)...")
@@ -257,54 +257,54 @@ async def run_xsmb_models(
     _log_model_result(result, "C")
 
     # ── Model D: XGBoost (25 features) ──
-    print(f"  🔹 Model D (XGBoost v4)...")
-    result = xsmb_predict_xgboost(
-        db, storage, province=None, target_date=target_date,
-        region="XSMB", n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
-    )
-    model_results.append(result)
-    _log_model_result(result, "D")
+    # print(f"  🔹 Model D (XGBoost v4) - DISABLED...")
+    # result = xsmb_predict_xgboost(
+    #     db, storage, province=None, target_date=target_date,
+    #     region="XSMB", n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "D")
 
     # ── Model E: BiLSTM + Attention ──
-    print(f"  🔹 Model E (BiLSTM+Attention)...")
-    result = xsmb_predict_lstm(
-        db, storage=storage, province=None, target_date=target_date,
-        region="XSMB", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=60, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
-    )
-    model_results.append(result)
-    _log_model_result(result, "E")
+    # print(f"  🔹 Model E (BiLSTM+Attention) - DISABLED...")
+    # result = xsmb_predict_lstm(
+    #     db, storage=storage, province=None, target_date=target_date,
+    #     region="XSMB", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=60, top_n=XSMB_MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "E")
 
     # ── Model F: Bayesian ──
-    print(f"  🔹 Model F (Bayesian)...")
-    result = xsmb_predict_bayesian(
-        db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
-    )
-    model_results.append(result)
-    if result["status"] == "success":
-        conf = result.get("confidence", 0)
-        pairs_str = ", ".join(f"{p:02d}" for p, _ in result["top_pairs"])
-        print(f"     ✅ Top {XSMB_MODEL_OUTPUT_TOP_N}: [{pairs_str}] (conf={conf:.2f}, {result['execution_time_ms']}ms)")
-    else:
-        print(f"     ❌ Error: {result['error_message']}")
+    # print(f"  🔹 Model F (Bayesian) - DISABLED...")
+    # result = xsmb_predict_bayesian(
+    #     db, province=None, target_date=target_date,
+    #     n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    # )
+    # model_results.append(result)
+    # if result["status"] == "success":
+    #     conf = result.get("confidence", 0)
+    #     pairs_str = ", ".join(f"{p:02d}" for p, _ in result["top_pairs"])
+    #     print(f"     ✅ Top {XSMB_MODEL_OUTPUT_TOP_N}: [{pairs_str}] (conf={conf:.2f}, {result['execution_time_ms']}ms)")
+    # else:
+    #     print(f"     ❌ Error: {result['error_message']}")
 
     # ── Model G: Cyclic (FFT) ──
-    print(f"  🔹 Model G (Cyclic/FFT)...")
-    result = xsmb_predict_cyclic(
-        db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
-    )
-    model_results.append(result)
-    _log_model_result(result, "G")
+    # print(f"  🔹 Model G (Cyclic/FFT) - DISABLED...")
+    # result = xsmb_predict_cyclic(
+    #     db, province=None, target_date=target_date,
+    #     n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "G")
 
     # ── Model H: Descriptive Frequency/Gap Stats ──
-    print(f"  🔹 Model H (Stats Freq/Gap)...")
-    result = xsmb_predict_stats_freq_gap(
-        db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
-    )
-    model_results.append(result)
-    _log_model_result(result, "H")
+    # print(f"  🔹 Model H (Stats Freq/Gap) - DISABLED...")
+    # result = xsmb_predict_stats_freq_gap(
+    #     db, province=None, target_date=target_date,
+    #     n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "H")
 
     # ── Model I: Chi-square Goodness-of-fit ──
     print(f"  🔹 Model I (Chi-square GOF)...")
@@ -316,13 +316,13 @@ async def run_xsmb_models(
     _log_model_result(result, "I")
 
     # ── Model J: Chi-square Independence/Homogeneity ──
-    print(f"  🔹 Model J (Chi-square Independence)...")
-    result = xsmb_predict_chisquare_independence(
-        db, province=None, target_date=target_date,
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
-    )
-    model_results.append(result)
-    _log_model_result(result, "J")
+    # print(f"  🔹 Model J (Chi-square Independence) - DISABLED...")
+    # result = xsmb_predict_chisquare_independence(
+    #     db, province=None, target_date=target_date,
+    #     n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    # )
+    # model_results.append(result)
+    # _log_model_result(result, "J")
 
     # ── Model K: CDM (Dirichlet-Multinomial) ──
     print(f"  🔹 Model K (CDM/Dirichlet-Multinomial)...")
