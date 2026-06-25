@@ -158,6 +158,64 @@ def _build_candidate_shortlist(
     return candidates, "\n".join(lines) if candidates else ""
 
 
+def _select_unit_digit_diversity(
+    all_scored_pairs: list[tuple[int, float]],
+    n: int = 3,
+    pool_size: int = 10,
+) -> tuple[list[tuple[int, float]], str]:
+    """
+    Unit Digit (Hàng đơn vị) Diversity Selection.
+    
+    1. Gom tổng điểm của tất cả các cặp số theo hàng đơn vị (0-9).
+    2. Xếp hạng các hàng đơn vị từ điểm cao nhất đến thấp nhất.
+    3. Tìm trong Top `pool_size` (mặc định Top 10) các cặp số tốt nhất thoả mãn:
+       - Mỗi cặp số được chọn phải có hàng đơn vị ứng với các hàng đơn vị top đầu.
+       - Không chọn trùng hàng đơn vị.
+    4. Nếu Top 10 không đủ các hàng đơn vị khác nhau để lấy đủ N số, lấy thêm các số điểm cao nhất còn lại trong Top 10.
+    
+    Args:
+        all_scored_pairs: List of (pair, score) đã được sort theo score giảm dần
+        n: Số lượng cặp số cần chọn (mặc định 3)
+        pool_size: Kích thước danh sách ứng viên (mặc định 10)
+        
+    Returns:
+        diverse_selection: List of (pair, score)
+        log_message: Thông báo log để in ra Telegram
+    """
+    unit_digit_scores = {d: 0.0 for d in range(10)}
+    for pair, score in all_scored_pairs:
+        unit = pair % 10
+        unit_digit_scores[unit] += score
+        
+    ranked_units = sorted(unit_digit_scores.items(), key=lambda x: x[1], reverse=True)
+    unit_rank_list = [d for d, s in ranked_units]
+    
+    log_msg = f"🎲 Xếp hạng đuôi (Unit Digit): " + ", ".join([f"{d}" for d in unit_rank_list[:5]])
+    
+    pool = all_scored_pairs[:pool_size]
+    selected = []
+    used_units = set()
+    
+    for target_unit in unit_rank_list:
+        if len(selected) >= n:
+            break
+        for pair, score in pool:
+            if pair % 10 == target_unit and pair not in [p for p, s in selected]:
+                selected.append((pair, score))
+                used_units.add(target_unit)
+                break
+                
+    if len(selected) < n:
+        for pair, score in pool:
+            if len(selected) >= n:
+                break
+            if pair not in [p for p, s in selected]:
+                selected.append((pair, score))
+                used_units.add(pair % 10)
+                
+    return selected, log_msg
+
+
 # ─── Main Ensemble Function ─────────────────────────────────────────────────
 
 def compute_xsmb_ensemble(
@@ -167,6 +225,7 @@ def compute_xsmb_ensemble(
     top_n_output: int = 3,
     extended_tails: Optional[List[int]] = None,
     model_confidences: Optional[dict[str, float]] = None,
+    last_7_days_tails: Optional[List[int]] = None,
 ) -> Dict:
     """
     XSMB v5.0 Precision Ensemble Scoring.
@@ -343,19 +402,43 @@ def compute_xsmb_ensemble(
         if modifier == 0.0:
             del pair_scores[pair]
 
-    # ── Step 5: Sort & Pick Top 3 ──
+    # ── Step 4.5: Recency Filter (7 Days) ──
+    recency_applied: dict[int, str] = {}
+    if last_7_days_tails:
+        recent_7d_counts: dict[int, int] = {}
+        for t in last_7_days_tails:
+            recent_7d_counts[t] = recent_7d_counts.get(t, 0) + 1
+            
+        for pair in list(pair_scores.keys()):
+            count_7d = recent_7d_counts.get(pair, 0)
+            # Nếu tần suất >= 30% trong 7 ngày (tức là >= 3 lần/7 ngày) -> Loại
+            if count_7d >= 3:
+                del pair_scores[pair]
+                recency_applied[pair] = f"❌ Loại (ra {count_7d} lần/7 ngày)"
+
+    # ── Step 5: Sort & Pick Top 3 (Unit Digit Diversity) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_candidates, candidate_log = _build_candidate_shortlist(
         sorted_pairs, pair_vote_count, pair_unique_models, limit=10
     )
 
-    top_pairs = [(pair, round(score, 4)) for pair, score in sorted_pairs[:top_n_output]]
-    print(f"     🎯 Top {top_n_output}: {[f'{p:02d}' for p, _ in top_pairs]}")
+    # Diversity selection
+    diverse_selection, div_log = _select_unit_digit_diversity(
+        sorted_pairs, n=top_n_output, pool_size=10
+    )
+    
+    # Append diversity log to candidate log
+    if div_log:
+        candidate_log += f"\n\n{div_log}"
+
+    top_pairs = [(pair, round(score, 4)) for pair, score in diverse_selection]
+    print(f"     🎯 Top {top_n_output} (Diverse): {[f'{p:02d}' for p, _ in top_pairs]}")
 
     # ── Scoring Log cho Telegram ──
     scoring_log = _build_scoring_log(
         top_pairs, pair_model_details, pair_unique_models,
         consensus_applied, history_applied, model_confidences,
+        recency_applied,
     )
 
     consensus_list = [p for p, models in pair_unique_models.items() if len(models) >= 2]
@@ -381,6 +464,7 @@ def _build_scoring_log(
     consensus_applied: dict,
     history_applied: dict,
     model_confidences: dict,
+    recency_applied: dict = None,
 ) -> str:
     """Build human-readable scoring breakdown cho Telegram (v5.0)."""
     log_entries = []
@@ -416,6 +500,10 @@ def _build_scoring_log(
                 lines.append(f"   ├ Lịch sử: ×{modifier:.2f} — {label}")
             else:
                 lines.append(f"   ├ Lịch sử: {label}")
+                
+        # Recency Filter
+        if recency_applied and pair in recency_applied:
+            lines.append(f"   ├ Gần đây: {recency_applied[pair]}")
 
         # Model sources
         pair_models = pair_unique_models.get(pair, set())

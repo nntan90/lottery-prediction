@@ -79,13 +79,14 @@ def _get_active_model(
 ) -> Optional[dict]:
     """
     Lấy model active cho XSMB.
-    Ưu tiên: weekday-specific → general → fallback.
+    v5.0 Unified Model: Bỏ qua weekday, luôn query model chung (weekday=None).
     """
     def _query(prov_value: Optional[str], wd: Optional[int]):
         q = db.supabase.table("model_registry") \
             .select("*") \
             .eq("region", region) \
             .eq("status", "active") \
+            .ilike("file_path", "%.pkl%") \
             .order("trained_at", desc=True) \
             .limit(1)
 
@@ -101,22 +102,13 @@ def _get_active_model(
 
         return q.execute().data
 
-    # 1. Weekday-specific model
-    if weekday is not None:
-        result = _query(province, weekday)
-        if result:
-            return result[0]
-
-    # 2. General model (no weekday)
+    # Luôn query model chung (weekday=None)
     result = _query(province, None)
     if result:
         return result[0]
 
-    # 3. Fallback: province=NULL + no weekday
+    # Fallback: province=NULL + no weekday
     if province is not None:
-        result = _query(None, weekday)
-        if result:
-            return result[0]
         result = _query(None, None)
         return result[0] if result else None
 
@@ -286,10 +278,8 @@ def predict_xgboost(
     _tmpdir = tmpdir or tempfile.mkdtemp()
 
     try:
-        weekday = target_date.weekday()
-
-        # 1. Tìm model active
-        registry = _get_active_model(db, region, province, weekday)
+        # 1. Tìm model active (v5.0 unified model, no weekday)
+        registry = _get_active_model(db, region, province, None)
         if not registry:
             return {
                 "model_name": "xgboost_core",
@@ -299,7 +289,7 @@ def predict_xgboost(
                 "n_draws_used": 0,
                 "model_version": None,
                 "status": "error",
-                "error_message": f"Không có model XSMB active cho weekday={weekday}",
+                "error_message": f"Không có model XSMB active chung",
                 "execution_time_ms": int((time.time() - start_ms) * 1000),
             }
 

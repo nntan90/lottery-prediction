@@ -201,8 +201,8 @@ async def run_agent(
 
         # Xác định weekday model cần check
         if region.upper() == "XSMB":
-            # XSMB giờ đã split theo weekday → pass weekday của ngày hiện tại
-            station_weekday = weekday
+            # XSMB v5.0 Unified Model: Không dùng weekday-specific model nữa
+            station_weekday = None
         else:
             station_weekday = _get_weekday_for_province(province or "", weekday)
 

@@ -169,6 +169,50 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
     return tails
 
 
+def get_last_7_days_tails(db: LotteryDB, region: str, provinces: list, target_date: date) -> list:
+    """Lấy lịch sử 2 số cuối trong 7 ngày gần nhất (tất cả các ngày, không phân biệt thứ)."""
+    tails = []
+    provs_to_check = provinces if provinces else [None]
+    
+    # Tính ngày bắt đầu (target_date - 7 days)
+    start_date = target_date - timedelta(days=7)
+
+    for prov in provs_to_check:
+        q1 = db.supabase.table("lottery_draws") \
+            .select("draw_date") \
+            .eq("region", region) \
+            .lt("draw_date", str(target_date)) \
+            .gte("draw_date", str(start_date)) \
+            .order("draw_date", desc=True)
+            
+        q1 = q1.eq("province", prov) if prov else q1.is_("province", "null")
+        draws = q1.execute()
+
+        if not draws.data:
+            continue
+
+        draw_dates = [d["draw_date"] for d in draws.data]
+
+        q2 = db.supabase.table("tails_2d") \
+            .select("tail_2d") \
+            .eq("region", region) \
+            .in_("draw_date", draw_dates)
+        q2 = q2.eq("province", prov) if prov else q2.is_("province", "null")
+        t_data = q2.execute()
+
+        if t_data.data:
+            per_date_pairs = {}
+            for row in t_data.data:
+                d = row.get("draw_date", "")
+                if d not in per_date_pairs:
+                    per_date_pairs[d] = set()
+                per_date_pairs[d].add(int(row["tail_2d"]))
+            for pairs in per_date_pairs.values():
+                tails.extend(pairs)
+
+    return tails
+
+
 async def run_xsmb_models(
     db: LotteryDB,
     storage: LotteryStorage,
@@ -497,6 +541,10 @@ async def run_xsmb_ensemble(
     extended_tails = get_recent_tails(db, "XSMB", [], target_date, limit_per_province=10)
     print(f"  📅 Lấy lịch sử mở rộng 10 kỳ (Toxic Gap): {len(extended_tails)} số")
 
+    # Last 7 calendar days tails for Recency Filter
+    last_7_days_tails = get_last_7_days_tails(db, "XSMB", [], target_date)
+    print(f"  📅 Lấy lịch sử 7 ngày gần nhất: {len(last_7_days_tails)} số")
+
     print(f"\n  {'='*50}")
     print(f"  🌍 XSMB ENSEMBLE v5.0")
     print(f"  {'='*50}")
@@ -507,6 +555,7 @@ async def run_xsmb_ensemble(
         top_n_output=3,
         extended_tails=extended_tails,
         model_confidences=model_confidences,
+        last_7_days_tails=last_7_days_tails,
     )
 
     if not ensemble_output["top_pairs"]:

@@ -125,6 +125,11 @@ async def main():
 
     province = None if args.province in (None, "all", "") else args.province
     weekday  = args.weekday  # None = không phân biệt
+    
+    # ── FORCE WEEKDAY=NONE FOR XSMB (v5.0 Unified Model) ──
+    if args.region == "XSMB":
+        weekday = None
+
     wd_suffix = f"_wd{weekday}" if weekday is not None else ""
     version = args.version or f"v3_{date.today().strftime('%Y%m%d')}{wd_suffix}"
     label = f"{args.region}/{province or 'all'}"
