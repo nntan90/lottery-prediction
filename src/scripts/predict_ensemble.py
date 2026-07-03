@@ -495,6 +495,7 @@ async def run_xsmb_ensemble(
     storage: LotteryStorage,
     notifier: LotteryNotifier,
     tmpdir: str,
+    dry_run: bool = False,
 ):
     """
     XSMB v5.0 — 10-Model Precision Ensemble Pipeline.
@@ -624,6 +625,23 @@ async def run_xsmb_ensemble(
         if not await _send_chunked(notifier, msg, "predict_ensemble_xsmb"):
             raise RuntimeError("Telegram notification failed for XSMB")
         print(f"\n📱 Telegram notification sent for XSMB!")
+        
+        # --- NEW: Phân tích Lô Tô ---
+        print("\n  🔍 Đang phân tích thống kê Lô Tô...")
+        try:
+            from src.xsmb_ensemble.xsmb_loto_analyzer import XSMBLotoAnalyzer
+            from src.xsmb_ensemble.xsmb_loto_report import format_loto_report_telegram
+            
+            analyzer = XSMBLotoAnalyzer(db, target_date, lookback=100)
+            loto_report = analyzer.generate_full_report()
+            
+            loto_messages = format_loto_report_telegram(loto_report, target_date)
+            for loto_msg in loto_messages:
+                if not await _send_chunked(notifier, loto_msg, "predict_ensemble_xsmb"):
+                    print("  ⚠️ Gửi báo cáo Lô Tô thất bại!")
+            print(f"  ✅ Đã gửi {len(loto_messages)} tin nhắn báo cáo Lô Tô!")
+        except Exception as e:
+            print(f"  ⚠️ Lỗi khi phân tích Lô Tô: {e}")
 
     print(f"\n✅ XSMB Ensemble v5.0 Prediction complete!")
 
@@ -635,6 +653,7 @@ async def run_xsmn_ensemble(
     storage: LotteryStorage,
     notifier: LotteryNotifier,
     tmpdir: str,
+    dry_run: bool = False,
 ):
     """
     XSMN v3.2 — 5-Model Ensemble (backward compatible, unchanged).
@@ -691,7 +710,9 @@ async def run_xsmn_ensemble(
     prediction = xsmn_format_ensemble_result("XSMN", "all", ensemble_output, target_date)
     scoring_log_msg = prediction.pop('scoring_log', '')
     candidate_log_msg = prediction.pop('candidate_log', '')
-    save_prediction(db, prediction)
+    
+    if not dry_run:
+        save_prediction(db, prediction)
 
     # Telegram
     if prediction:
@@ -718,6 +739,11 @@ async def run_xsmn_ensemble(
         msg += f"   Models Active: {active_count}/{total_expected}\n"
 
         for prov in provs_to_run:
+            missing = get_missing_models(db, "XSMN", prov, target_date, TOTAL_MODELS_PER_PROVINCE)
+            if missing:
+                msg += f"   ⚠️ Thiếu ({prov}): {', '.join(missing)}\n"
+
+        for prov in provs_to_run:
             prov_results = [r for r in all_model_results
                            if r.get("province") == prov and r.get("status") == "success"]
             if prov_results:
@@ -730,9 +756,12 @@ async def run_xsmn_ensemble(
                 if model_top_log:
                     msg += f"{model_top_log}\n"
 
-        if not await _send_chunked(notifier, msg, "predict_ensemble_xsmn"):
-            raise RuntimeError("Telegram notification failed for XSMN")
-        print(f"\n📱 Telegram notification sent for XSMN!")
+        if not dry_run:
+            if not await _send_chunked(notifier, msg, "predict_ensemble_xsmn"):
+                raise RuntimeError("Telegram notification failed for XSMN")
+            print(f"\n📱 Telegram notification sent for XSMN!")
+        else:
+            print(f"\n[DRY-RUN] Would send telegram message:\n{msg}")
 
     print(f"\n✅ XSMN Ensemble Prediction complete!")
 
@@ -772,6 +801,7 @@ async def _send_chunked(notifier, msg: str, config_key: str) -> bool:
 async def main():
     parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v5.0 + XSMN v3.2)")
     parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
+    parser.add_argument("--dry-run", action="store_true", help="Chạy thử không lưu DB và không gửi tin nhắn Telegram")
     args = parser.parse_args()
 
     # Target date
@@ -789,12 +819,12 @@ async def main():
         # XSMB — v4.2 (10 models)
         print(f"\n{'='*60}")
         print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.0 (10 Models)")
-        await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir)
+        await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir, dry_run=args.dry_run)
 
         # XSMN — v3.2 (5 models, backward compatible)
         xsmn_provinces = get_target_provinces(target_date)
         if xsmn_provinces:
-            await run_xsmn_ensemble(target_date, xsmn_provinces, db, storage, notifier, tmpdir)
+            await run_xsmn_ensemble(target_date, xsmn_provinces, db, storage, notifier, tmpdir, dry_run=args.dry_run)
         else:
             print(f"⚠️  Không có province nào cho XSMN ngày {target_date}")
 

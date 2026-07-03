@@ -264,18 +264,18 @@ xsmb_v5:
 # =============================================================================
 xsmn_overrides:
   weights:
-    frequency: 0.08             # ↓ reduced to prevent consensus trap
-    gap_overdue: 0.08           # ↓ reduced to prevent consensus trap
-    markov: 0.10                # ↓ reduced
-    xgboost_core: 0.35          # ↑↑ highest reliability (80% hit rate)
-    lstm: 0.25                  # ↑↑ high reliability (70% hit rate)
-    cdm: 0.14                   # Dirichlet-Multinomial baseline
+    frequency: 0.15             # ↑ tăng
+    gap_overdue: 0.15           # ↑ tăng
+    markov: 0.20                # ↑ tăng
+    xgboost_core: 0.20          # ↓ giảm vì model bị cũ
+    lstm: 0.15                  # ↓ giảm
+    cdm: 0.15                   # ↑ tăng
 
   consensus:
     gold_threshold: 4
     silver_threshold: 3
-    gold_bonus: 0.5             # ↓ drastically reduced to prevent consensus trap
-    silver_bonus: 0.1           # ↓ drastically reduced
+    gold_bonus: 1.5             # ↑ tăng (tương đương XSMB)
+    silver_bonus: 0.5           # ↑ tăng
 
   history:
     overdue_penalty: -0.5
@@ -283,10 +283,11 @@ xsmn_overrides:
     potential_bonus: 0.3
 
   combsum:
-    enabled: false           # Switch to Pure Borda (giống XSMB)
+    enabled: true            # ✅ Bật lại CombSUM để giữ thông tin độ tự tin
 
   diversity:
-    enabled: false           # ❌ Disabled: MMR was rejecting good high-scoring pairs
+    enabled: true            # ✅ Bật Diversity
+    lambda: 0.6
 
 # =============================================================================
 # Model Credibility Scoring System
