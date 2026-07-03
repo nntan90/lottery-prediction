@@ -111,3 +111,16 @@
 - **Adaptive Weighted Borda:** Borda Count kết hợp confidence/entropy calibration của model Bayesian và auto-weights từ backtest.
 - **Auto-Weight Tuning:** Tự động điều chỉnh weight của 7 models dựa trên rolling backtest performance (30 ngày gần nhất) qua `src/scripts/tune_weights.py`.
 
+## 🎯 8. XSMB Statistical Loto Analysis (Report Module)
+> **Scope**: Chỉ áp dụng cho XSMB. Tích hợp trực tiếp vào pipeline dự đoán hằng ngày.
+
+Bên cạnh việc dùng ML/AI để dự đoán Top 3, hệ thống cung cấp báo cáo thống kê xác suất toàn diện thông qua `xsmb_loto_analyzer.py`, bao gồm:
+- **Lô Nóng**: Top số về nhiều nhất trong 30 ngày.
+- **Lô Gan**: Top số lâu chưa về (cùng gap_zscore và avg_gap).
+- **Lô Rơi**: Dựa trên kết quả kỳ trước, tính xác suất rơi lại 1-2 ngày.
+- **Lô Kép**: Theo dõi chu kỳ nổ của 10 số kép (00-99).
+- **Đầu / Đuôi / Tổng / Chạm**: Tính toán sự phân bổ tần suất để tìm ra các nhóm số mạnh/yếu trong 14-30 ngày.
+- **Cặp Lộn & Xiên**: Gợi ý ghép cặp xiên 2 dựa trên đầu/đuôi mạnh và correlation.
+- **Dàn Số VIP (Top 3)**: Khác với model prediction (chấm bằng Machine Learning), đây là bộ 3 số được chấm điểm thuần bằng **đa tiêu chí thống kê** (Gap rơi vào sweet-spot 1-7 ngày, chạm/đầu/đuôi mạnh, tỷ lệ lô rơi cao).
+
+Báo cáo được tự động format và chia thành 2 tin nhắn gửi qua Telegram thông qua `xsmb_loto_report.py` để tránh giới hạn ký tự (4096 chars).
