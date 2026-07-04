@@ -319,9 +319,9 @@ class XSMBLotoAnalyzer:
             "xien_correlated": [], # Placeholder for correlation analysis
         }
 
-    def suggest_top_3_dan_so(self) -> Dict:
+    def suggest_top_3_dan_so(self, top_n: int = 3) -> Dict:
         """
-        Dàn số gợi ý: Pick 3 số có tỉ lệ ra cao nhất dựa trên chấm điểm đa tiêu chí:
+        Dàn số gợi ý: Pick top-N số có tỉ lệ ra cao nhất dựa trên chấm điểm đa tiêu chí:
         1. Nằm trong Chạm mạnh, Đầu/Đuôi mạnh
         2. Tần suất 30 ngày cao (Lô Nóng)
         3. Khoảng cách (Gap) rơi vào điểm rơi lý tưởng (1-7 ngày)
@@ -329,7 +329,7 @@ class XSMBLotoAnalyzer:
         """
         self._ensure_data_loaded()
         if self._n_draws == 0:
-            return {"top_3": [], "criteria": []}
+            return {"top_3": [], "top_scored": [], "criteria": []}
 
         # Lấy các chỉ số thống kê
         st_data = self.analyze_sum_touch(window=14)
@@ -387,12 +387,15 @@ class XSMBLotoAnalyzer:
 
             scores[pair] = score
 
-        # Lấy top 3 điểm cao nhất
+        # Lấy top-N điểm cao nhất. top_3 giữ nguyên để report cũ không đổi,
+        # top_scored phục vụ wrapper model đưa loto vào ensemble.
         sorted_pairs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         top_3 = [p for p, s in sorted_pairs[:3]]
+        top_scored = [(int(p), round(float(s), 4)) for p, s in sorted_pairs[:top_n]]
         
         return {
             "top_3": top_3,
+            "top_scored": top_scored,
             "criteria": [
                 "Chạm/Đầu/Đuôi mạnh (14 ngày)",
                 "Chu kỳ nổ lý tưởng (1-7 ngày)",

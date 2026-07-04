@@ -1,9 +1,9 @@
 """
-predict_ensemble.py — v5.0 (10-Model XSMB + 5-Model XSMN)
+predict_ensemble.py — v5.1 (12-Model XSMB + 6-Model XSMN)
 Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
 Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
-XSMB (v5.0 — 10 models, Precision Ensemble):
+XSMB (v5.1 — 12 models, Precision Ensemble):
   1. Frequency (multi-window)    → Top 2
   2. Gap/Overdue (weekday)       → Top 2
   3. Markov (second-order)       → Top 2
@@ -14,13 +14,15 @@ XSMB (v5.0 — 10 models, Precision Ensemble):
   8. Stats Freq/Gap              → Top 2
   9. Chi-square GOF              → Top 2
   10. Chi-square Independence    → Top 2
+  11. CDM                         → Top 5
+  12. Loto Statistical            → Top 5
   → Precision Score Fusion        → Top 3
 
 XSMN (v3.2 — 5 models, backward compatible):
   1-5. Frequency/Gap/Markov/XGB/LSTM → Borda+CombSUM → Top 3
 
 Flow mỗi ngày:
-  1. XSMB: chạy 10 models → v5 precision ensemble
+  1. XSMB: chạy 12 models → v5 precision ensemble
   2. XSMN: resolve provinces → chạy 5 models per province → v3.2 ensemble
   3. Ghi prediction_results + model_predictions
   4. Gửi Telegram notification
@@ -74,6 +76,9 @@ from src.xsmb_ensemble.model_chisquare_independence import (
     predict_chisquare_independence as xsmb_predict_chisquare_independence,
 )
 from src.xsmb_ensemble.model_cdm import predict_cdm as xsmb_predict_cdm
+from src.xsmb_ensemble.model_loto_statistical import (
+    predict_loto_statistical as xsmb_predict_loto_statistical,
+)
 from src.xsmb_ensemble.ensemble_engine import (
     compute_xsmb_ensemble,
     format_ensemble_result as xsmb_format_ensemble_result,
@@ -85,7 +90,7 @@ from src.scoring.credibility_scorer import compute_credibility_scores
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-TOTAL_MODELS_XSMB = 11          # v5.0: 11 models for XSMB (added CDM)
+TOTAL_MODELS_XSMB = 12          # v5.1: 12 models for XSMB (added Loto Statistical)
 TOTAL_MODELS_PER_PROVINCE = 6   # v3.3: 6 models per XSMN province (added CDM)
 MODEL_OUTPUT_TOP_N = 5
 XSMB_MODEL_OUTPUT_TOP_N = 5
@@ -105,12 +110,39 @@ MODEL_SHORT_NAMES = {
     "chisquare_gof": "ChiGOF",
     "chisquare_independence": "ChiInd",
     "cdm": "CDM",
+    "loto_statistical": "Loto",
 }
 
 XSMB_MODEL_SHORT_NAMES = {
     **MODEL_SHORT_NAMES,
     "markov": "Markov²",
     "lstm": "BiLSTM",
+    "loto_statistical": "Loto",
+}
+
+EXPECTED_MODEL_NAMES = {
+    "XSMB": [
+        "frequency",
+        "gap_overdue",
+        "markov",
+        "xgboost_core",
+        "lstm",
+        "bayesian",
+        "cyclic",
+        "stats_freq_gap",
+        "chisquare_gof",
+        "chisquare_independence",
+        "cdm",
+        "loto_statistical",
+    ],
+    "XSMN": [
+        "frequency",
+        "gap_overdue",
+        "markov",
+        "xgboost_core",
+        "lstm",
+        "cdm",
+    ],
 }
 
 
@@ -220,7 +252,7 @@ async def run_xsmb_models(
     tmpdir: str,
 ) -> list:
     """
-    Chạy 10 models XSMB v4.2. Trả về list model_results.
+    Chạy các model XSMB v5.1. Trả về list model_results.
     Fault-tolerant: model lỗi → ensemble vẫn chạy với model còn lại.
     """
     print(f"\n  {'='*50}")
@@ -332,6 +364,15 @@ async def run_xsmb_models(
     )
     model_results.append(result)
     _log_model_result(result, "K")
+
+    # ── Model L: Loto Statistical Analyzer ──
+    print(f"  🔹 Model L (Loto Statistical)...")
+    result = xsmb_predict_loto_statistical(
+        db, province=None, target_date=target_date,
+        n_draws=100, top_n=XSMB_MODEL_OUTPUT_TOP_N, region="XSMB",
+    )
+    model_results.append(result)
+    _log_model_result(result, "L")
 
     # ── Summary ──
     success_count = sum(1 for r in model_results if r["status"] == "success")
@@ -489,6 +530,46 @@ def _format_model_top_log(
     return "\n".join(lines) if has_success else ""
 
 
+def get_missing_models(
+    db: LotteryDB,
+    region: str,
+    province: str | None,
+    target_date: date,
+    expected_count: int | None = None,
+) -> list[str]:
+    """
+    Return expected sub-models that did not produce a successful log row.
+
+    This is used only for Telegram audit text. It must never fail the
+    prediction job after predictions were already generated and saved.
+    """
+    region_key = region.upper()
+    expected_models = EXPECTED_MODEL_NAMES.get(region_key, [])
+    if expected_count is not None and expected_count > 0:
+        expected_models = expected_models[:expected_count]
+
+    if not expected_models:
+        return []
+
+    try:
+        q = db.supabase.table("model_predictions") \
+            .select("model_name,status") \
+            .eq("prediction_date", target_date.isoformat()) \
+            .eq("region", region_key)
+        q = q.is_("province", "null") if province is None else q.eq("province", province)
+        rows = q.execute().data or []
+    except Exception as e:
+        print(f"   ⚠️  Không kiểm tra được missing models ({region_key}/{province or 'all'}): {e}")
+        return []
+
+    successful = {
+        row.get("model_name")
+        for row in rows
+        if row.get("status") == "success"
+    }
+    return [model for model in expected_models if model not in successful]
+
+
 async def run_xsmb_ensemble(
     target_date: date,
     db: LotteryDB,
@@ -498,14 +579,14 @@ async def run_xsmb_ensemble(
     dry_run: bool = False,
 ):
     """
-    XSMB v5.0 — 10-Model Precision Ensemble Pipeline.
+    XSMB v5.1 — Precision Ensemble Pipeline.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v5.0 (10 Models)")
+    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v5.1 ({TOTAL_MODELS_XSMB} Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"{'='*60}")
 
-    # Run 10 models
+    # Run XSMB models
     all_model_results = await run_xsmb_models(db, storage, target_date, tmpdir)
 
     # Credibility Scoring (pre-prediction — replaces auto_weight)
@@ -547,7 +628,7 @@ async def run_xsmb_ensemble(
     print(f"  📅 Lấy lịch sử 7 ngày gần nhất: {len(last_7_days_tails)} số")
 
     print(f"\n  {'='*50}")
-    print(f"  🌍 XSMB ENSEMBLE v5.0")
+    print(f"  🌍 XSMB ENSEMBLE v5.1")
     print(f"  {'='*50}")
 
     ensemble_output = compute_xsmb_ensemble(
@@ -597,7 +678,7 @@ async def run_xsmb_ensemble(
 
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v5.0 — 10 models</b>\n"
+        msg += f"🤖 <b>Multi-Model Ensemble v5.1 — {TOTAL_MODELS_XSMB} models</b>\n"
 
         if candidate_log_msg:
             msg += f"{candidate_log_msg}\n\n"
@@ -643,7 +724,7 @@ async def run_xsmb_ensemble(
         except Exception as e:
             print(f"  ⚠️ Lỗi khi phân tích Lô Tô: {e}")
 
-    print(f"\n✅ XSMB Ensemble v5.0 Prediction complete!")
+    print(f"\n✅ XSMB Ensemble v5.1 Prediction complete!")
 
 
 async def run_xsmn_ensemble(
@@ -799,7 +880,7 @@ async def _send_chunked(notifier, msg: str, config_key: str) -> bool:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v5.0 + XSMN v3.2)")
+    parser = argparse.ArgumentParser(description="Multi-Model Ensemble Prediction (XSMB v5.1 + XSMN v3.3)")
     parser.add_argument("--date", type=str, help="Ngày xếp hạng tín hiệu (YYYY-MM-DD). Mặc định = hôm nay")
     parser.add_argument("--dry-run", action="store_true", help="Chạy thử không lưu DB và không gửi tin nhắn Telegram")
     args = parser.parse_args()
@@ -816,9 +897,9 @@ async def main():
     notifier = LotteryNotifier(db, default_config_key="predict_ensemble")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # XSMB — v4.2 (10 models)
+        # XSMB — v5.1
         print(f"\n{'='*60}")
-        print("🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.0 (10 Models)")
+        print(f"🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.1 ({TOTAL_MODELS_XSMB} Models)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir, dry_run=args.dry_run)
 
         # XSMN — v3.2 (5 models, backward compatible)

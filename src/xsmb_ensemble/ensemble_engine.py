@@ -1,9 +1,9 @@
 """
-ensemble_engine.py — XSMB Precision Ensemble v5.0
+ensemble_engine.py — XSMB Precision Ensemble v5.1
 
-Kết hợp output từ 10 sub-models thành Top 3 cuối cùng.
+Kết hợp output từ 12 sub-models thành Top 3 cuối cùng.
 
-Models (v4.2 — 10 models):
+Models (v5.1 — 12 models):
   A. frequency      — Multi-window frequency analysis
   B. gap_overdue    — Weekday-specific gap/overdue
   C. markov         — Second-order Markov Chain
@@ -14,15 +14,17 @@ Models (v4.2 — 10 models):
   H. stats_freq_gap — Descriptive frequency/gap statistics
   I. chisquare_gof  — Chi-square goodness-of-fit
   J. chisquare_independence — Chi-square independence/homogeneity
+  K. cdm            — Dirichlet-Multinomial baseline
+  L. loto_statistical — Loto statistical analyzer
 
-Aggregation (v5.0 — Precision Ensemble):
+Aggregation (v5.1 — Precision Ensemble):
   1. Proportional Score Normalization — giữ raw score ratio giữa pick #1 và #2
   2. Weighted Aggregation — weight × confidence × normalized_score
   3. Continuous Consensus Amplifier — multiplicative, no threshold cliff
   4. Single-pass History Guard — one multiplicative modifier, no double penalty
   5. Pure Top 3 Selection — trust scoring, no artificial diversity
 
-v5.0 Changes (vs v4.2):
+v5.0+ Changes (vs v4.2):
   - Borda rank-based → Proportional raw score fusion
   - Additive consensus threshold bonus → Continuous multiplicative amplifier
   - Double penalty (additive + multiplicative) → Single multiplicative history guard
@@ -57,23 +59,24 @@ _CFG = _load_scoring_config()
 # XSMB v5 config
 _V5_CFG = _CFG.get("xsmb_v5", {})
 
-# Default weights (10 models, sum ≈ 1.0)
+# Default weights (12 models, sum ≈ 1.0)
 _w_cfg = _V5_CFG.get("weights", _CFG.get("xsmb_v4", {}).get("weights", {}))
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "frequency":    _w_cfg.get("frequency",    0.07),
-    "gap_overdue":  _w_cfg.get("gap_overdue",  0.07),
-    "markov":       _w_cfg.get("markov",       0.12),
-    "xgboost_core": _w_cfg.get("xgboost_core", 0.14),
-    "lstm":         _w_cfg.get("lstm",         0.10),
-    "bayesian":     _w_cfg.get("bayesian",     0.14),
-    "cyclic":       _w_cfg.get("cyclic",       0.12),
-    "stats_freq_gap": _w_cfg.get("stats_freq_gap", 0.06),
-    "chisquare_gof": _w_cfg.get("chisquare_gof", 0.05),
-    "chisquare_independence": _w_cfg.get("chisquare_independence", 0.05),
-    "cdm":          _w_cfg.get("cdm",          0.08),
+    "frequency":    _w_cfg.get("frequency",    0.05),
+    "gap_overdue":  _w_cfg.get("gap_overdue",  0.05),
+    "markov":       _w_cfg.get("markov",       0.10),
+    "xgboost_core": _w_cfg.get("xgboost_core", 0.20),
+    "lstm":         _w_cfg.get("lstm",         0.16),
+    "bayesian":     _w_cfg.get("bayesian",     0.12),
+    "cyclic":       _w_cfg.get("cyclic",       0.10),
+    "stats_freq_gap": _w_cfg.get("stats_freq_gap", 0.04),
+    "chisquare_gof": _w_cfg.get("chisquare_gof", 0.04),
+    "chisquare_independence": _w_cfg.get("chisquare_independence", 0.04),
+    "cdm":          _w_cfg.get("cdm",          0.05),
+    "loto_statistical": _w_cfg.get("loto_statistical", 0.05),
 }
 
-# ─── v5.0 Scoring Parameters ────────────────────────────────────────────────
+# ─── v5.x Scoring Parameters ────────────────────────────────────────────────
 
 # Consensus Amplifier: score *= 1 + ALPHA * (vote_count - 1), capped at MAX
 _cons_cfg = _V5_CFG.get("consensus", {})
@@ -116,9 +119,10 @@ MODEL_DISPLAY_NAME = {
     "chisquare_gof": "ChiGOF",
     "chisquare_independence": "ChiInd",
     "cdm":          "CDM",
+    "loto_statistical": "Loto",
 }
 
-TOTAL_MODELS = 11
+TOTAL_MODELS = 12
 
 
 # ─── Candidate Shortlist (for Telegram audit log) ───────────────────────────
@@ -228,9 +232,9 @@ def compute_xsmb_ensemble(
     last_7_days_tails: Optional[List[int]] = None,
 ) -> Dict:
     """
-    XSMB v5.0 Precision Ensemble Scoring.
+    XSMB v5.1 Precision Ensemble Scoring.
 
-    Kết hợp output từ 10 models thành Top 3 cuối cùng.
+    Kết hợp output từ 12 models thành Top 3 cuối cùng.
 
     Scoring Pipeline:
       1. Proportional Score Normalization — raw_score / sum(scores) per model
@@ -250,7 +254,9 @@ def compute_xsmb_ensemble(
     Returns:
         Dict chứa top_pairs, scoring_log, metadata
     """
-    w = weights if weights else DEFAULT_WEIGHTS.copy()
+    w = DEFAULT_WEIGHTS.copy()
+    if weights:
+        w.update(weights)
 
     # Filter successful results
     valid_results = [r for r in model_results if r.get("status") == "success" and r.get("top_pairs")]
@@ -259,7 +265,7 @@ def compute_xsmb_ensemble(
         return {
             "top_pairs": [],
             "contributing_models": [],
-            "ensemble_method": "xsmb_precision_v5.0",
+            "ensemble_method": "xsmb_precision_v5.1",
             "borda_details": {},
             "consensus_pairs": [],
             "scoring_log": "",
@@ -446,7 +452,7 @@ def compute_xsmb_ensemble(
     return {
         "top_pairs": top_pairs,
         "contributing_models": list(set(contributing)),
-        "ensemble_method": "xsmb_precision_v5.0",
+        "ensemble_method": "xsmb_precision_v5.1",
         "borda_details": {p: round(s, 4) for p, s in sorted_pairs},
         "consensus_pairs": consensus_list,
         "scoring_log": scoring_log,
@@ -466,7 +472,7 @@ def _build_scoring_log(
     model_confidences: dict,
     recency_applied: dict = None,
 ) -> str:
-    """Build human-readable scoring breakdown cho Telegram (v5.0)."""
+    """Build human-readable scoring breakdown cho Telegram (v5.x)."""
     log_entries = []
 
     for pair, final_score in top_pairs:
@@ -539,7 +545,7 @@ def format_ensemble_result(
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],
-        "model_version": "ensemble_v5.0",
+        "model_version": "ensemble_v5.1",
         "ensemble_method": ensemble_output["ensemble_method"],
         "contributing_models": ensemble_output["contributing_models"],
         "final_scores": [s for _, s in top[:3]],
@@ -566,6 +572,7 @@ def format_model_prediction_log(
     if model_name in (
         "frequency", "gap_overdue", "markov", "bayesian", "cyclic",
         "stats_freq_gap", "chisquare_gof", "chisquare_independence", "cdm",
+        "loto_statistical",
     ):
         model_type = "rule_based"
     elif model_name in ("xgboost_core", "lstm"):

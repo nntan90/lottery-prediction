@@ -214,19 +214,20 @@ xsmb_v4:
 #   - No MMR diversity (clean scoring = natural diversity)
 # =============================================================================
 xsmb_v5:
-  # --- Weights (v5.0+CDM — 11 models, sum = 1.00) ---
+  # --- Weights (v5.1+Loto — 12 models, sum = 1.00) ---
   weights:
     frequency: 0.05             # ↓↓ overlap with XGBoost features
     gap_overdue: 0.05           # ↓↓ overlap with XGBoost features
     markov: 0.10                # ↓ independent but overlaps in pattern logic
-    xgboost_core: 0.22          # ↑↑ ML superset model (high reliability)
-    lstm: 0.18                  # ↑↑ deep learning sequence
+    xgboost_core: 0.20          # ↑↑ ML superset model (high reliability)
+    lstm: 0.16                  # ↑↑ deep learning sequence
     bayesian: 0.12              # high hit rate observed
     cyclic: 0.10                # high hit rate observed
     stats_freq_gap: 0.04        # ↓ redundant with freq/gap
     chisquare_gof: 0.04         # ↓ lower predictive value
     chisquare_independence: 0.04 # ↓ lower predictive value
-    cdm: 0.06                   # ↓ Dirichlet-Multinomial baseline
+    cdm: 0.05                   # ↓ Dirichlet-Multinomial baseline
+    loto_statistical: 0.05      # statistical loto analyzer consensus signal
 
   # --- Consensus Amplifier (v5.0 — continuous multiplicative) ---
   # multiplier = 1 + alpha × (vote_count - 1), capped at max_multiplier
