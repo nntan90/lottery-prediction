@@ -1,28 +1,21 @@
 """
-predict_ensemble.py — v5.1 (12-Model XSMB + 6-Model XSMN)
+predict_ensemble.py — v5.1 (4-Model + Loto XSMB, 6-Model XSMN)
 Orchestration script cho Multi-Model Ensemble pipeline (XSMB & XSMN).
 Chạy bởi GitHub Actions workflow: 02-predict-ensemble.yml
 
-XSMB (v5.1 — 12 models, Precision Ensemble):
-  1. Frequency (multi-window)    → Top 2
-  2. Gap/Overdue (weekday)       → Top 2
-  3. Markov (second-order)       → Top 2
-  4. XGBoost (25 features)       → Top 2
-  5. BiLSTM + Attention          → Top 2
-  6. Bayesian (posterior)        → Top 2
-  7. Cyclic (FFT patterns)       → Top 2
-  8. Stats Freq/Gap              → Top 2
-  9. Chi-square GOF              → Top 2
-  10. Chi-square Independence    → Top 2
-  11. CDM                         → Top 5
-  12. Loto Statistical            → Top 5
+XSMB (v5.1 — 4 active models + Loto):
+  1. Frequency (multi-window)     → Top 5
+  2. Markov (second-order)        → Top 5
+  3. Chi-square GOF               → Top 5
+  4. CDM                          → Top 5
+  5. Loto Statistical             → Top 5
   → Precision Score Fusion        → Top 3
 
 XSMN (v3.2 — 5 models, backward compatible):
   1-5. Frequency/Gap/Markov/XGB/LSTM → Borda+CombSUM → Top 3
 
 Flow mỗi ngày:
-  1. XSMB: chạy 12 models → v5 precision ensemble
+  1. XSMB: chạy 4 model + Loto → v5 precision ensemble
   2. XSMN: resolve provinces → chạy 5 models per province → v3.2 ensemble
   3. Ghi prediction_results + model_predictions
   4. Gửi Telegram notification
@@ -90,7 +83,14 @@ from src.scoring.credibility_scorer import compute_credibility_scores
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
 
-TOTAL_MODELS_XSMB = 12          # v5.1: 12 models for XSMB (added Loto Statistical)
+XSMB_ACTIVE_MODEL_NAMES = [
+    "frequency",
+    "markov",
+    "chisquare_gof",
+    "cdm",
+    "loto_statistical",
+]
+TOTAL_MODELS_XSMB = len(XSMB_ACTIVE_MODEL_NAMES)
 TOTAL_MODELS_PER_PROVINCE = 6   # v3.3: 6 models per XSMN province (added CDM)
 MODEL_OUTPUT_TOP_N = 5
 XSMB_MODEL_OUTPUT_TOP_N = 5
@@ -121,20 +121,7 @@ XSMB_MODEL_SHORT_NAMES = {
 }
 
 EXPECTED_MODEL_NAMES = {
-    "XSMB": [
-        "frequency",
-        "gap_overdue",
-        "markov",
-        "xgboost_core",
-        "lstm",
-        "bayesian",
-        "cyclic",
-        "stats_freq_gap",
-        "chisquare_gof",
-        "chisquare_independence",
-        "cdm",
-        "loto_statistical",
-    ],
+    "XSMB": XSMB_ACTIVE_MODEL_NAMES,
     "XSMN": [
         "frequency",
         "gap_overdue",
@@ -256,7 +243,7 @@ async def run_xsmb_models(
     Fault-tolerant: model lỗi → ensemble vẫn chạy với model còn lại.
     """
     print(f"\n  {'='*50}")
-    print(f"  📍 XSMB v4.2 — 10-Model Pipeline")
+    print(f"  📍 XSMB v5.1 — 4 Models + Loto Pipeline")
     print(f"  {'='*50}")
 
     model_results = []
@@ -582,7 +569,7 @@ async def run_xsmb_ensemble(
     XSMB v5.1 — Precision Ensemble Pipeline.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v5.1 ({TOTAL_MODELS_XSMB} Models)")
+    print(f"🎯 XSMB MULTI-MODEL ENSEMBLE v5.1 (4 Models + Loto)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"{'='*60}")
 
@@ -647,7 +634,7 @@ async def run_xsmb_ensemble(
     consensus_str = ", ".join(f"{p:02d}" for p in ensemble_output.get("consensus_pairs", []))
 
     print(f"     ✅ Top 3 statistical signals: [{top3_str}]")
-    print(f"     📊 Models Active: {ensemble_output.get('models_active', 0)}/{TOTAL_MODELS_XSMB}")
+    print(f"     📊 Sources Active: {ensemble_output.get('models_active', 0)}/{TOTAL_MODELS_XSMB}")
     if consensus_str:
         print(f"     🤝 Consensus: [{consensus_str}]")
 
@@ -678,7 +665,7 @@ async def run_xsmb_ensemble(
 
         # Ensemble
         ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v5.1 — {TOTAL_MODELS_XSMB} models</b>\n"
+        msg += f"🤖 <b>Đồng thuận v5.1 — 4 model + Loto</b>\n"
 
         if candidate_log_msg:
             msg += f"{candidate_log_msg}\n\n"
@@ -686,13 +673,19 @@ async def run_xsmb_ensemble(
         msg += f"🎯 Pick đồng thuận Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
 
         if scoring_log_msg:
-            msg += f"{scoring_log_msg}\n"
+            msg += f"{scoring_log_msg}\n\n"
 
-        msg += f"   Models Active: {active}/{TOTAL_MODELS_XSMB}\n\n"
+        active_weights = ensemble_output.get("active_weights", {})
+        if active_weights:
+            weight_parts = []
+            for model_name in XSMB_ACTIVE_MODEL_NAMES:
+                if model_name in active_weights:
+                    label = XSMB_MODEL_SHORT_NAMES.get(model_name, model_name)
+                    weight_parts.append(f"{html.escape(label)} {active_weights[model_name]:.2f}")
+            if weight_parts:
+                msg += f"⚖️ Active weights: {' | '.join(weight_parts)}\n"
 
-        # Credibility scorecard
-        if credibility_log:
-            msg += f"{credibility_log}\n\n"
+        msg += f"📊 Sources Active: {active}/{TOTAL_MODELS_XSMB}\n\n"
 
         model_top_log = _format_model_top_log(
             all_model_results,
@@ -899,7 +892,7 @@ async def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         # XSMB — v5.1
         print(f"\n{'='*60}")
-        print(f"🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.1 ({TOTAL_MODELS_XSMB} Models)")
+        print(f"🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.1 (4 Models + Loto)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir, dry_run=args.dry_run)
 
         # XSMN — v3.2 (5 models, backward compatible)

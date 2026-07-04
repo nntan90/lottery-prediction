@@ -214,7 +214,9 @@ xsmb_v4:
 #   - No MMR diversity (clean scoring = natural diversity)
 # =============================================================================
 xsmb_v5:
-  # --- Weights (v5.1+Loto — 12 models, sum = 1.00) ---
+  # --- Weights (v5.1+Loto)
+  # Current production uses: frequency, markov, chisquare_gof, cdm, loto_statistical.
+  # Other weights are retained for disabled models so they can be re-enabled safely.
   weights:
     frequency: 0.05             # ↓↓ overlap with XGBoost features
     gap_overdue: 0.05           # ↓↓ overlap with XGBoost features

@@ -1,19 +1,12 @@
 """
 ensemble_engine.py — XSMB Precision Ensemble v5.1
 
-Kết hợp output từ 12 sub-models thành Top 3 cuối cùng.
+Kết hợp output từ 4 model thống kê + Loto thành Top 3 cuối cùng.
 
-Models (v5.1 — 12 models):
+Active models (v5.1):
   A. frequency      — Multi-window frequency analysis
-  B. gap_overdue    — Weekday-specific gap/overdue
   C. markov         — Second-order Markov Chain
-  D. xgboost_core   — XGBoost v4 (25 features)
-  E. lstm           — Bi-LSTM + Attention
-  F. bayesian       — Bayesian posterior estimation
-  G. cyclic         — Cyclic Pattern FFT detector
-  H. stats_freq_gap — Descriptive frequency/gap statistics
   I. chisquare_gof  — Chi-square goodness-of-fit
-  J. chisquare_independence — Chi-square independence/homogeneity
   K. cdm            — Dirichlet-Multinomial baseline
   L. loto_statistical — Loto statistical analyzer
 
@@ -59,7 +52,8 @@ _CFG = _load_scoring_config()
 # XSMB v5 config
 _V5_CFG = _CFG.get("xsmb_v5", {})
 
-# Default weights (12 models, sum ≈ 1.0)
+# Default weights for all known models. Production currently filters to
+# ACTIVE_MODEL_NAMES through the successful model_results passed in.
 _w_cfg = _V5_CFG.get("weights", _CFG.get("xsmb_v4", {}).get("weights", {}))
 DEFAULT_WEIGHTS: dict[str, float] = {
     "frequency":    _w_cfg.get("frequency",    0.05),
@@ -122,7 +116,14 @@ MODEL_DISPLAY_NAME = {
     "loto_statistical": "Loto",
 }
 
-TOTAL_MODELS = 12
+ACTIVE_MODEL_NAMES = [
+    "frequency",
+    "markov",
+    "chisquare_gof",
+    "cdm",
+    "loto_statistical",
+]
+TOTAL_MODELS = len(ACTIVE_MODEL_NAMES)
 
 
 # ─── Candidate Shortlist (for Telegram audit log) ───────────────────────────
@@ -136,7 +137,7 @@ def _build_candidate_shortlist(
 ) -> tuple[list[dict], str]:
     """Build a compact Top-N candidate audit log for Telegram."""
     candidates = []
-    lines = ["📌 <b>Top 10 ứng viên multi-model (mỗi model Top 2)</b>"]
+    lines = [f"📌 <b>Top {limit} ứng viên đồng thuận</b>"]
 
     for rank, (pair, score) in enumerate(sorted_pairs[:limit], start=1):
         model_names = sorted(pair_unique_models.get(pair, set()))
@@ -154,8 +155,8 @@ def _build_candidate_shortlist(
 
         source_str = ", ".join(display_models) if display_models else "-"
         lines.append(
-            f"   {rank:02d}. <code>{pair:02d}</code> = {score:.3f}đ"
-            f" | votes={vote_count}"
+            f"   {rank}. <code>{pair:02d}</code> {score:.3f}đ"
+            f" | {vote_count} nguồn"
             f" | {source_str}"
         )
 
@@ -234,7 +235,7 @@ def compute_xsmb_ensemble(
     """
     XSMB v5.1 Precision Ensemble Scoring.
 
-    Kết hợp output từ 12 models thành Top 3 cuối cùng.
+    Kết hợp output từ 4 model thống kê + Loto thành Top 3 cuối cùng.
 
     Scoring Pipeline:
       1. Proportional Score Normalization — raw_score / sum(scores) per model
@@ -273,6 +274,7 @@ def compute_xsmb_ensemble(
             "top_candidates": [],
             "models_active": 0,
             "models_total": TOTAL_MODELS,
+            "active_weights": {},
         }
 
     # Re-normalize weights to active models only
@@ -425,7 +427,7 @@ def compute_xsmb_ensemble(
     # ── Step 5: Sort & Pick Top 3 (Unit Digit Diversity) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_candidates, candidate_log = _build_candidate_shortlist(
-        sorted_pairs, pair_vote_count, pair_unique_models, limit=10
+        sorted_pairs, pair_vote_count, pair_unique_models, limit=5
     )
 
     # Diversity selection
@@ -460,6 +462,7 @@ def compute_xsmb_ensemble(
         "top_candidates": top_candidates,
         "models_active": len(active_model_names),
         "models_total": TOTAL_MODELS,
+        "active_weights": {k: round(v, 4) for k, v in w.items()},
     }
 
 
@@ -472,53 +475,39 @@ def _build_scoring_log(
     model_confidences: dict,
     recency_applied: dict = None,
 ) -> str:
-    """Build human-readable scoring breakdown cho Telegram (v5.x)."""
+    """Build compact human-readable scoring breakdown cho Telegram."""
     log_entries = []
 
     for pair, final_score in top_pairs:
-        lines = []
         details = pair_model_details.get(pair, [])
-
-        # Header
         vote_count = len(pair_unique_models.get(pair, set()))
-        lines.append(f"🔸 <b>[{pair:02d}]</b> = {final_score:.3f}đ")
 
-        # Model contributions
-        base_sum = sum(d["contribution"] for d in details)
         model_parts = []
         for d in sorted(details, key=lambda x: x["contribution"], reverse=True):
             m_name = MODEL_DISPLAY_NAME.get(d["model"], d["model"])
-            norm_pct = d["norm_score"] * 100
-            model_parts.append(f"{m_name}(T{d['rank']}, {norm_pct:.0f}%)")
-        lines.append(f"   ├ Cơ sở: {base_sum:.3f}đ từ {', '.join(model_parts)}")
+            model_parts.append(f"{m_name} T{d['rank']}")
 
-        # Consensus
+        modifiers = []
         cons_mult = consensus_applied.get(pair, 1.0)
         if cons_mult > 1.0:
-            pct_boost = (cons_mult - 1.0) * 100
-            lines.append(f"   ├ Đồng thuận: ×{cons_mult:.2f} (+{pct_boost:.0f}%, {vote_count} models)")
+            modifiers.append(f"đồng thuận ×{cons_mult:.2f}/{vote_count} nguồn")
 
-        # History
         hist_info = history_applied.get(pair)
         if hist_info:
             modifier, label = hist_info
             if modifier != 1.0:
-                lines.append(f"   ├ Lịch sử: ×{modifier:.2f} — {label}")
-            else:
-                lines.append(f"   ├ Lịch sử: {label}")
+                modifiers.append(f"lịch sử ×{modifier:.2f}")
                 
-        # Recency Filter
         if recency_applied and pair in recency_applied:
-            lines.append(f"   ├ Gần đây: {recency_applied[pair]}")
+            modifiers.append("lọc 7 ngày")
 
-        # Model sources
-        pair_models = pair_unique_models.get(pair, set())
-        model_tags = sorted([MODEL_DISPLAY_NAME.get(m, m) for m in pair_models])
-        lines.append(f"   └ Sources: {', '.join(model_tags)}")
+        sources = ", ".join(model_parts) if model_parts else "-"
+        modifier_text = f" | {'; '.join(modifiers)}" if modifiers else ""
+        log_entries.append(
+            f"🔸 <code>{pair:02d}</code> {final_score:.3f}đ | {sources}{modifier_text}"
+        )
 
-        log_entries.append("\n".join(lines))
-
-    return "\n\n".join(log_entries)
+    return "\n".join(log_entries)
 
 
 # ─── Format Functions (compatible with XSMN ensemble_engine interface) ──────

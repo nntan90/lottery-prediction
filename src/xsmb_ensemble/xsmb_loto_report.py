@@ -1,125 +1,110 @@
 from datetime import date
 from typing import Dict, List
 
+
 def format_loto_report_telegram(report: Dict, target_date: date) -> List[str]:
     """
-    Chuyển dict báo cáo từ XSMBLotoAnalyzer thành list chuỗi HTML.
-    Chia thành 2 tin nhắn để tránh giới hạn 4096 ký tự của Telegram.
-    
-    Tin nhắn 1: Báo cáo Chính (Lô Nóng, Lô Gan, Lô Rơi, Kép)
-    Tin nhắn 2: Phân Tích Nâng Cao (Đầu/Đuôi, Xiên, Dàn đề)
+    Format XSMB loto report as one compact Telegram message.
+
+    The analyzer still computes all detailed sections; Telegram receives the
+    strongest signals only to avoid three long XSMB messages every day.
     """
-    messages = []
-    
     date_str = target_date.strftime("%d/%m/%Y")
-    
-    # ─── TIN NHẮN 1: BÁO CÁO CHÍNH ───
-    msg1 = f"🎯 <b>BÁO CÁO PHÂN TÍCH LÔ TÔ XSMB</b>\n"
-    msg1 += f"📅 <b>Ngày: {date_str}</b>\n"
-    msg1 += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    # 1. Lô Nóng
+    lines = [
+        "🎯 <b>BÁO CÁO LÔ TÔ XSMB</b>",
+        f"📅 <b>Ngày: {date_str}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
     hot = report.get("hot_numbers", {})
-    if hot.get("pairs"):
-        window = hot.get("window_size", 30)
-        msg1 += f"🔥 <b>LÔ NÓNG (Top 10 ra nhiều {window} ngày)</b>\n"
-        hot_str = ", ".join([f"<code>{p:02d}</code>({c}lần-{f}%)" for p, c, f in hot["pairs"][:5]])
-        msg1 += f"  • Top 1-5: {hot_str}\n"
-        if len(hot["pairs"]) > 5:
-            hot_str_2 = ", ".join([f"<code>{p:02d}</code>({c}lần)" for p, c, f in hot["pairs"][5:10]])
-            msg1 += f"  • Top 6-10: {hot_str_2}\n"
-        msg1 += "\n"
-        
-    # 2. Lô Gan
+    hot_pairs = hot.get("pairs", [])
+    if hot_pairs:
+        hot_text = ", ".join(
+            f"<code>{p:02d}</code>({c}l-{freq}%)"
+            for p, c, freq in hot_pairs[:5]
+        )
+        lines.append(f"🔥 <b>Nóng 30 ngày:</b> {hot_text}")
+
     overdue = report.get("overdue_numbers", {})
-    if overdue.get("pairs"):
-        msg1 += f"🕳️ <b>LÔ GAN (Top 10 lâu chưa về)</b>\n"
-        ov_str = ", ".join([f"<code>{p:02d}</code>({g} ngày)" for p, g, _ in overdue["pairs"][:5]])
-        msg1 += f"  • Max Gan: {ov_str}\n"
-        if len(overdue["pairs"]) > 5:
-            ov_str_2 = ", ".join([f"<code>{p:02d}</code>({g}n)" for p, g, _ in overdue["pairs"][5:10]])
-            msg1 += f"  • Gan tiếp: {ov_str_2}\n"
-        msg1 += "\n"
-        
-    # 3. Lô Rơi
+    overdue_pairs = overdue.get("pairs", [])
+    if overdue_pairs:
+        gan_text = ", ".join(
+            f"<code>{p:02d}</code>({gap}n)"
+            for p, gap, _ in overdue_pairs[:5]
+        )
+        lines.append(f"🕳️ <b>Gan:</b> {gan_text}")
+
     falling = report.get("falling_numbers", {})
-    if falling.get("yesterday_pairs"):
-        msg1 += f"🔻 <b>LÔ RƠI (Dự đoán từ kết quả hôm qua)</b>\n"
-        y_pairs = ", ".join([f"{p:02d}" for p in falling["yesterday_pairs"][:15]])
-        msg1 += f"  • Các số ra hôm qua: {y_pairs}...\n"
-        
-        f1_str = ", ".join([f"<code>{p:02d}</code>({prob}%)" for p, prob in falling.get("fall_1day_probs", [])[:3] if prob > 0])
-        f2_str = ", ".join([f"<code>{p:02d}</code>({prob}%)" for p, prob in falling.get("fall_2day_probs", [])[:3] if prob > 0])
-        
-        if f1_str:
-            msg1 += f"  • XS rơi lại 1 ngày cao: {f1_str}\n"
-        if f2_str:
-            msg1 += f"  • XS rơi lại 2 ngày cao: {f2_str}\n"
-        msg1 += "\n"
-        
-    # 4. Lô Kép
+    fall_1 = [(p, prob) for p, prob in falling.get("fall_1day_probs", []) if prob > 0]
+    fall_2 = [(p, prob) for p, prob in falling.get("fall_2day_probs", []) if prob > 0]
+    if fall_1 or fall_2:
+        fall_parts = []
+        if fall_1:
+            fall_parts.append(
+                "1 ngày: " + ", ".join(f"<code>{p:02d}</code>({prob}%)" for p, prob in fall_1[:3])
+            )
+        if fall_2:
+            fall_parts.append(
+                "2 ngày: " + ", ".join(f"<code>{p:02d}</code>({prob}%)" for p, prob in fall_2[:3])
+            )
+        lines.append(f"🔻 <b>Lô rơi:</b> {' | '.join(fall_parts)}")
+
     doubles = report.get("doubles", {})
-    if doubles.get("doubles_status"):
-        msg1 += f"🎲 <b>LÔ KÉP (00-99)</b>\n"
-        overdue_doubles = [f"<code>{p:02d}</code>({g}n)" for p, g, avg, is_ov in doubles["doubles_status"] if is_ov]
+    overdue_doubles = [
+        f"<code>{p:02d}</code>({gap}n)"
+        for p, gap, _avg, is_overdue in doubles.get("doubles_status", [])
+        if is_overdue
+    ]
+    recent_doubles = [
+        f"<code>{p:02d}</code>"
+        for p, gap, _avg, _is_overdue in doubles.get("doubles_status", [])
+        if gap <= 2
+    ]
+    if overdue_doubles or recent_doubles:
+        parts = []
         if overdue_doubles:
-            msg1 += f"  • Kép đang gan: {', '.join(overdue_doubles)}\n"
-        
-        recent_doubles = [f"{p:02d}" for p, g, avg, is_ov in doubles["doubles_status"] if g <= 2]
+            parts.append(f"gan: {', '.join(overdue_doubles[:5])}")
         if recent_doubles:
-            msg1 += f"  • Kép vừa ra (≤2 ngày): {', '.join(recent_doubles)}\n"
-        
-    messages.append(msg1.strip())
-    
-    # ─── TIN NHẮN 2: PHÂN TÍCH NÂNG CAO ───
-    msg2 = f"🔍 <b>PHÂN TÍCH NÂNG CAO XSMB ({date_str})</b>\n"
-    msg2 += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    # 5. Đầu/Đuôi Mạnh
-    ht = report.get("head_tail", {})
-    if ht.get("strong_heads"):
-        msg2 += f"🔢 <b>ĐẦU - ĐUÔI ({ht.get('window_size', 30)} ngày)</b>\n"
-        msg2 += f"  • Đầu mạnh: {', '.join(map(str, ht['strong_heads']))}  |  Đuôi mạnh: {', '.join(map(str, ht['strong_tails']))}\n"
-        msg2 += f"  • Đầu yếu: {', '.join(map(str, ht['weak_heads']))}  |  Đuôi yếu: {', '.join(map(str, ht['weak_tails']))}\n"
-        msg2 += "\n"
-        
-    # 6. Cặp Lộn
-    rev = report.get("reverse_pairs", {})
-    if rev.get("active_reverse_pairs"):
-        msg2 += f"🔀 <b>CẶP LỘN TIỀM NĂNG</b>\n"
-        for p_a, p_b, g_a, g_b, reason in rev["active_reverse_pairs"][:3]:
-            msg2 += f"  • <code>{p_a:02d}</code> - <code>{p_b:02d}</code>: {reason}\n"
-        msg2 += "\n"
-        
-    # 7. Tổng / Chạm
-    st = report.get("sum_touch", {})
-    if st.get("strong_sums"):
-        msg2 += f"🎯 <b>TỔNG - CHẠM MẠNH ({st.get('window_size', 30)} ngày)</b>\n"
-        msg2 += f"  • Tổng mạnh nhất: {', '.join(map(str, st['strong_sums']))}\n"
-        msg2 += f"  • Chạm ra nhiều nhất: {', '.join(map(str, st['strong_touches']))}\n"
-        msg2 += "\n"
-        
-    # 8. Xiên Tiềm Năng
+            parts.append(f"vừa ra: {', '.join(recent_doubles[:5])}")
+        lines.append(f"🎲 <b>Kép:</b> {' | '.join(parts)}")
+
+    head_tail = report.get("head_tail", {})
+    if head_tail.get("strong_heads"):
+        lines.append(
+            "🔢 <b>Đầu/đuôi mạnh:</b> "
+            f"đầu {', '.join(map(str, head_tail['strong_heads']))} | "
+            f"đuôi {', '.join(map(str, head_tail['strong_tails']))}"
+        )
+
+    sum_touch = report.get("sum_touch", {})
+    if sum_touch.get("strong_sums"):
+        lines.append(
+            "🎯 <b>Tổng/chạm:</b> "
+            f"tổng {', '.join(map(str, sum_touch['strong_sums']))} | "
+            f"chạm {', '.join(map(str, sum_touch['strong_touches']))}"
+        )
+
+    reverse = report.get("reverse_pairs", {})
+    reverse_pairs = reverse.get("active_reverse_pairs", [])
+    if reverse_pairs:
+        rev_text = ", ".join(
+            f"<code>{p_a:02d}</code>-<code>{p_b:02d}</code>"
+            for p_a, p_b, _g_a, _g_b, _reason in reverse_pairs[:3]
+        )
+        lines.append(f"🔀 <b>Cặp lộn:</b> {rev_text}")
+
     xien = report.get("xien", {})
-    if xien.get("xien_same_head") or xien.get("xien_same_tail"):
-        msg2 += f"✂️ <b>XIÊN 2 GỢI Ý</b>\n"
-        for p_a, p_b, reason in xien.get("xien_same_head", []):
-            msg2 += f"  • <code>{p_a:02d}</code> xiên <code>{p_b:02d}</code> ({reason})\n"
-        for p_a, p_b, reason in xien.get("xien_same_tail", []):
-            msg2 += f"  • <code>{p_a:02d}</code> xiên <code>{p_b:02d}</code> ({reason})\n"
-        msg2 += "\n"
-        
-    # 9. Dàn Số Gợi Ý (Top 3)
+    xien_pairs = xien.get("xien_same_head", []) + xien.get("xien_same_tail", [])
+    if xien_pairs:
+        xien_text = ", ".join(
+            f"<code>{p_a:02d}</code>x<code>{p_b:02d}</code>"
+            for p_a, p_b, _reason in xien_pairs[:3]
+        )
+        lines.append(f"✂️ <b>Xiên:</b> {xien_text}")
+
     dan = report.get("dan_de", {})
     if dan.get("top_3"):
-        msg2 += f"📋 <b>DÀN SỐ GỢI Ý (TOP 3 VIP)</b>\n"
-        dd_list = [f"<code>{p:02d}</code>" for p in dan["top_3"]]
-        msg2 += f"  👉 {', '.join(dd_list)}\n"
-        
-        msg2 += f"  <i>Bộ lọc đa tiêu chí đã áp dụng:</i>\n"
-        for f in dan.get("criteria", []):
-            msg2 += f"   - {f}\n"
-            
-    messages.append(msg2.strip())
-    
-    return messages
+        top_3 = ", ".join(f"<code>{p:02d}</code>" for p in dan["top_3"])
+        lines.append(f"📋 <b>Top 3 VIP:</b> {top_3}")
+
+    return ["\n".join(lines)]
