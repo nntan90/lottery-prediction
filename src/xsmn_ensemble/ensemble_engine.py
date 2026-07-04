@@ -554,12 +554,13 @@ def compute_global_borda(
                 else:
                     pair_scores[pair] += hist_potential
         else:
-            # XSMN (v3.2): 3 tuần
-            if count >= 2:
+            # XSMN: chỉ phạt khi nổ đủ 3/3 kỳ cùng thứ gần nhất.
+            # 2/3 là tín hiệu còn nhịp, nhưng không boost để tránh chasing.
+            if count >= 3:
                 pair_scores[pair] += hist_overdue
             elif count == 1:
                 pair_scores[pair] += hist_sweetspot
-            else:
+            elif count == 0:
                 pair_scores[pair] += hist_potential
                 
     # ── Recency Dampener ──
@@ -638,8 +639,10 @@ def compute_global_borda(
                 else:
                     log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
         else:
-            if h_count >= 2:
+            if h_count >= 3:
                 log_lines.append(f"   └ Lịch sử: {hist_overdue}đ (Nổ {h_count} lần/{n_weeks} tuần)")
+            elif h_count == 2:
+                log_lines.append(f"   └ Lịch sử: 0đ (Nổ 2/{n_weeks}, chưa phạt)")
             elif h_count == 1:
                 log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ đúng 1 nhịp/{n_weeks} tuần)")
             else:

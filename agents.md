@@ -121,6 +121,14 @@ Bên cạnh việc dùng ML/AI để dự đoán Top 3, hệ thống cung cấp 
 - **Lô Kép**: Theo dõi chu kỳ nổ của 10 số kép (00-99).
 - **Đầu / Đuôi / Tổng / Chạm**: Tính toán sự phân bổ tần suất để tìm ra các nhóm số mạnh/yếu trong 14-30 ngày.
 - **Cặp Lộn & Xiên**: Gợi ý ghép cặp xiên 2 dựa trên đầu/đuôi mạnh và correlation.
-- **Dàn Số VIP (Top 3)**: Khác với model prediction (chấm bằng Machine Learning), đây là bộ 3 số được chấm điểm thuần bằng **đa tiêu chí thống kê** (Gap rơi vào sweet-spot 1-7 ngày, chạm/đầu/đuôi mạnh, tỷ lệ lô rơi cao).
+- **Dàn Số VIP (Top 3)**: Bộ 3 số được chấm điểm thuần bằng **đa tiêu chí thống kê** trong `XSMBLotoAnalyzer.suggest_top_3_dan_so()`. Module chấm toàn bộ 100 cặp `00-99`, sort theo điểm giảm dần và lấy Top 3. Logic scoring hiện tại:
+  - **Gap lý tưởng**: nếu cặp có `gap` từ 1-7 ngày thì `+3.0` điểm.
+  - **Phạt quá gan**: nếu `gap > 15` ngày thì `-5.0` điểm để tránh chọn số quá lạnh.
+  - **Đầu mạnh / Đuôi mạnh / Chạm mạnh**: dùng thống kê 14 ngày gần nhất; đầu mạnh `+2.0`, đuôi mạnh `+2.0`, nếu đầu hoặc đuôi thuộc nhóm chạm mạnh thì `+1.5`.
+  - **Lô nóng**: dùng Top 30 số nóng trong 30 ngày; nếu cặp thuộc nhóm này thì cộng `freq_pct / 10.0` điểm.
+  - **Lô rơi**: nếu cặp vừa xuất hiện ở kỳ gần nhất (`gap == 0`) và có xác suất rơi lại 1 ngày thì cộng `fall_1day_prob / 10.0` điểm.
+  - Output gồm `top_3` cho Telegram report và `top_scored` cho wrapper model `loto_statistical`.
 
-Báo cáo được tự động format và chia thành 2 tin nhắn gửi qua Telegram thông qua `xsmb_loto_report.py` để tránh giới hạn ký tự (4096 chars).
+`loto_statistical` bọc logic Top 3 VIP này thành một sub-model XSMB, trả `top_pairs` chuẩn để tham gia cơ chế đồng thuận cùng 4 model production hiện tại: `frequency`, `markov`, `chisquare_gof`, `cdm`.
+
+Báo cáo được tự động format thành 1 tin nhắn compact gửi qua Telegram thông qua `xsmb_loto_report.py`.
