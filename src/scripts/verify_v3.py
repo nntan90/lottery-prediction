@@ -34,6 +34,21 @@ from src.xsmn_ensemble.resolve_provinces import get_target_provinces
 COST_DA_VONG = 328000
 REVENUE_PER_VONG = 1100000
 
+
+def _format_prediction_list(pairs: list[int], limit: int) -> tuple[str, list[int]]:
+    """Return display text and displayed pairs for a prediction list."""
+    display_pairs = pairs[:limit]
+    pairs_str = "[" + ", ".join(f"{p:02d}" for p in display_pairs) + "]"
+    return pairs_str, display_pairs
+
+
+def _format_matched_pairs(matched: list[int], display_pairs: list[int]) -> tuple[str, list[int]]:
+    """Filter matched pairs to the pairs actually shown in Telegram."""
+    display_set = set(display_pairs)
+    visible_matched = [p for p in matched if p in display_set]
+    match_str = ", ".join(f"{p:02d}" for p in visible_matched) if visible_matched else "—"
+    return match_str, visible_matched
+
 def calculate_station_profit(region, pairs, tail_rows):
     """
     Calculate cost, revenue, profit for 'Đá vòng 3 con' (Xiên vòng 3).
@@ -360,9 +375,9 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                     model_name = sm['model_name']
                     short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "xgboost_single": "XGB", "lstm_gru": "LSTM", "lstm": "LSTM", "bayesian": "Bayes", "cyclic": "Cyclic", "stats_freq_gap": "StatsFG", "chisquare_gof": "ChiGOF", "chisquare_independence": "ChiInd"}
                     disp_name = short_map.get(model_name, model_name)
-                    sm_icon = "🟢" if sm["hit"] else "🔴"
-                    sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:3]) + "]"
-                    sm_match = ", ".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
+                    sm_pairs_str, display_pairs = _format_prediction_list(sm["pairs"], 3)
+                    sm_match, visible_matched = _format_matched_pairs(sm["matched"], display_pairs)
+                    sm_icon = "🟢" if visible_matched else "🔴"
                     msg += f"             └ {sm_icon} {disp_name}: {sm_pairs_str} → {sm_match}\n"
         else:
             # XSMN in sub-models theo từng đài
@@ -379,9 +394,9 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                     model_name = sm['model_name']
                     short_map = {"frequency": "Freq", "gap_overdue": "Gap", "markov": "Markov", "xgboost_core": "XGB", "xgboost_single": "XGB", "lstm_gru": "LSTM", "lstm": "LSTM", "cdm": "CDM"}
                     disp_name = short_map.get(model_name, model_name)
-                    sm_icon = "🟢" if sm["hit"] else "🔴"
-                    sm_pairs_str = "[" + ", ".join(f"{p:02d}" for p in sm["pairs"][:5]) + "]"
-                    sm_match = ", ".join(f"{p:02d}" for p in sm["matched"]) if sm["matched"] else "—"
+                    sm_pairs_str, display_pairs = _format_prediction_list(sm["pairs"], 5)
+                    sm_match, visible_matched = _format_matched_pairs(sm["matched"], display_pairs)
+                    sm_icon = "🟢" if visible_matched else "🔴"
                     msg += f"             └ {sm_icon} {disp_name}: {sm_pairs_str} → {sm_match}\n"
                     
         msg += "\n"
