@@ -292,6 +292,10 @@ xsmn_overrides:
     enabled: true            # ✅ Bật Diversity
     lambda: 0.6
 
+  recent_repeat_penalty:
+    enabled: true            # Phạt nhẹ số vừa ra ở kỳ gần nhất của cùng tỉnh
+    penalty: -0.25           # Áp dụng cho đài xổ >1 lần/tuần như TP.HCM
+
 # =============================================================================
 # Model Credibility Scoring System
 # =============================================================================

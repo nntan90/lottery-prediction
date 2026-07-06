@@ -124,6 +124,8 @@ def _get_region_config(region: Optional[str] = None) -> dict:
         "recency_dampener_enabled": False,
         "recency_dampener_threshold": 2,
         "recency_dampener_decay": 0.7,
+        "recent_repeat_penalty_enabled": False,
+        "recent_repeat_penalty": -0.25,
     }
 
     if region and region.upper() == "XSMB":
@@ -220,6 +222,11 @@ def _get_region_config(region: Optional[str] = None) -> dict:
             cfg["recency_dampener_enabled"] = bool(xsmn_rd.get("enabled", False))
             cfg["recency_dampener_threshold"] = int(xsmn_rd.get("threshold", 2))
             cfg["recency_dampener_decay"] = float(xsmn_rd.get("decay_base", 0.7))
+
+        xsmn_rr = xsmn.get("recent_repeat_penalty", {})
+        if xsmn_rr:
+            cfg["recent_repeat_penalty_enabled"] = bool(xsmn_rr.get("enabled", False))
+            cfg["recent_repeat_penalty"] = float(xsmn_rr.get("penalty", cfg["recent_repeat_penalty"]))
 
     return cfg
 
@@ -385,6 +392,7 @@ def compute_global_borda(
     top_n_output: int = 3,
     region: Optional[str] = None,
     extended_tails: Optional[List[int]] = None,
+    recent_province_tails: Optional[dict[str, set[int]]] = None,
 ) -> Dict:
     """
     Tính Global Weighted Borda Count + CombSUM từ tất cả model results.
@@ -426,6 +434,8 @@ def compute_global_borda(
     rd_enabled = rcfg["recency_dampener_enabled"]
     rd_threshold = rcfg["recency_dampener_threshold"]
     rd_decay = rcfg["recency_dampener_decay"]
+    repeat_penalty_enabled = rcfg["recent_repeat_penalty_enabled"]
+    repeat_penalty = rcfg["recent_repeat_penalty"]
 
     is_xsmb = region and region.upper() == "XSMB"
     if is_xsmb:
@@ -571,6 +581,24 @@ def compute_global_borda(
                 decay = rd_decay ** (count - 1)
                 pair_scores[pair] *= decay
 
+    # ── XSMN Recent Repeat Penalty ──
+    # Same-weekday history misses stations that draw twice per week (e.g. TP.HCM).
+    # Penalize lightly if a pair appeared in the station's most recent draw.
+    repeat_penalty_applied: dict[int, set[str]] = {}
+    if (not is_xsmb) and repeat_penalty_enabled and recent_province_tails:
+        for pair in list(pair_scores.keys()):
+            repeat_provinces = set()
+            for source in pair_unique_models.get(pair, set()):
+                if "@" not in source:
+                    continue
+                _model_name, province = source.split("@", 1)
+                if pair in recent_province_tails.get(province, set()):
+                    repeat_provinces.add(province)
+
+            if repeat_provinces:
+                pair_scores[pair] += repeat_penalty * len(repeat_provinces)
+                repeat_penalty_applied[pair] = repeat_provinces
+
     # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_candidates, candidate_log = _build_candidate_shortlist(
@@ -647,6 +675,12 @@ def compute_global_borda(
                 log_lines.append(f"   └ Lịch sử: +{hist_sweetspot}đ (Nổ đúng 1 nhịp/{n_weeks} tuần)")
             else:
                 log_lines.append(f"   └ Lịch sử: +{hist_potential}đ (Đang nén {n_weeks} tuần chưa ra)")
+
+            if pair in repeat_penalty_applied:
+                provs = ", ".join(sorted(repeat_penalty_applied[pair]))
+                log_lines.append(
+                    f"   └ Gần nhất: {repeat_penalty:+.2f}đ (vừa ra ở {provs})"
+                )
 
         # 4. Diversity tag (XSMB v3.3)
         if use_diversity:

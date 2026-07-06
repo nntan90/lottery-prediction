@@ -232,6 +232,54 @@ def get_last_7_days_tails(db: LotteryDB, region: str, provinces: list, target_da
     return tails
 
 
+def get_recent_province_tails(
+    db: LotteryDB,
+    region: str,
+    provinces: list[str],
+    target_date: date,
+    max_days_back: int = 3,
+) -> dict[str, set[int]]:
+    """
+    Lấy tail_set của kỳ quay gần nhất theo từng tỉnh trong vòng max_days_back.
+
+    Dùng cho XSMN để xử lý các đài xổ nhiều hơn 1 lần/tuần như TP.HCM:
+    thứ Hai cần biết các số đã ra ở TP.HCM thứ Bảy gần nhất để giảm rank nhẹ.
+    """
+    result: dict[str, set[int]] = {}
+    start_date = target_date - timedelta(days=max_days_back)
+
+    for province in provinces:
+        q = db.supabase.table("lottery_draws") \
+            .select("draw_date") \
+            .eq("region", region) \
+            .eq("province", province) \
+            .lt("draw_date", target_date.isoformat()) \
+            .gte("draw_date", start_date.isoformat()) \
+            .order("draw_date", desc=True) \
+            .limit(1)
+
+        rows = q.execute().data or []
+        if not rows:
+            continue
+
+        last_draw_date = rows[0]["draw_date"]
+        t_rows = db.supabase.table("tails_2d") \
+            .select("tail_2d") \
+            .eq("region", region) \
+            .eq("province", province) \
+            .eq("draw_date", last_draw_date) \
+            .execute().data or []
+
+        if t_rows:
+            result[province] = {int(row["tail_2d"]) for row in t_rows}
+            print(
+                f"  📅 {province}: kỳ gần nhất {last_draw_date}, "
+                f"{len(result[province])} số để giảm repeat"
+            )
+
+    return result
+
+
 async def run_xsmb_models(
     db: LotteryDB,
     storage: LotteryStorage,
@@ -764,9 +812,14 @@ async def run_xsmn_ensemble(
     print(f"  🌍 GLOBAL ENSEMBLE (XSMN)")
     print(f"  {'='*50}")
 
+    recent_province_tails = get_recent_province_tails(
+        db, "XSMN", provinces, target_date, max_days_back=3
+    )
+
     ensemble_output = compute_global_borda(
         all_model_results, recent_tails, top_n_output=3, region="XSMN",
         weights=xsmn_weights,
+        recent_province_tails=recent_province_tails,
     )
 
     if not ensemble_output["top_pairs"]:
