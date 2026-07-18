@@ -32,6 +32,7 @@ Guardrails:
 """
 
 import os
+from itertools import combinations
 from typing import List, Dict, Tuple, Optional
 
 
@@ -385,6 +386,153 @@ def _build_candidate_shortlist(
     return candidates, "\n".join(lines) if candidates else ""
 
 
+def _candidate_hit_strength(candidate: dict, max_support: int) -> float:
+    """Convert an ensemble candidate into a bounded hit-strength proxy."""
+    score_strength = float(candidate.get("score_norm", 0.0))
+    support_count = int(candidate.get("support_count", 0))
+    unique_model_count = int(candidate.get("unique_model_count", 0))
+    support_strength = min(support_count / max(max_support, 1), 1.0)
+    model_strength = min(unique_model_count / max(max_support, 1), 1.0)
+
+    strength = (
+        0.65 * score_strength
+        + 0.25 * support_strength
+        + 0.10 * model_strength
+    )
+    return max(0.01, min(0.99, strength))
+
+
+def _combo_history_strength(combo: tuple[int, ...], history_tail_sets: Optional[list[set[int]]] = None) -> float:
+    """Score how often a combo and its internal pairs co-hit in matched history."""
+    if not history_tail_sets:
+        return 0.0
+
+    combo_hits = 0
+    pair_hits = 0
+    pair_checks = 0
+    combo_set = set(combo)
+    combo_pairs = list(combinations(combo, 2))
+
+    for tail_set in history_tail_sets:
+        hits = len(combo_set & tail_set)
+        if hits >= 2:
+            combo_hits += 1
+        for pair_a, pair_b in combo_pairs:
+            pair_checks += 1
+            if pair_a in tail_set and pair_b in tail_set:
+                pair_hits += 1
+
+    combo_rate = combo_hits / len(history_tail_sets)
+    pair_rate = pair_hits / max(pair_checks, 1)
+    return 0.70 * combo_rate + 0.30 * pair_rate
+
+
+def _score_two_of_three_combo(
+    combo: tuple[int, ...],
+    candidate_by_pair: dict[int, dict],
+    history_tail_sets: Optional[list[set[int]]] = None,
+) -> float:
+    """Estimate the relative chance that at least two numbers in a combo hit."""
+    probs = [_candidate_hit_strength(candidate_by_pair[p], max_support=6) for p in combo]
+    p1, p2, p3 = probs
+    p_exact_two = (
+        p1 * p2 * (1.0 - p3)
+        + p1 * p3 * (1.0 - p2)
+        + p2 * p3 * (1.0 - p1)
+    )
+    p_three = p1 * p2 * p3
+    support_bonus = sum(candidate_by_pair[p].get("support_count", 0) for p in combo) * 0.001
+    # Same province-pair history is directly aligned with the XSMN/all win
+    # rule, so it must be strong enough to break pure individual-score ties.
+    history_strength = _combo_history_strength(combo, history_tail_sets)
+    history_bonus = (history_strength ** 2) * 0.90
+    return p_exact_two + p_three + support_bonus + history_bonus
+
+
+def _select_best_two_of_three_combo(
+    candidates: list[dict],
+    *,
+    top_n_output: int = 3,
+    candidate_pool_size: int = 10,
+    history_tail_sets: Optional[list[set[int]]] = None,
+) -> dict:
+    """Pick the 3-number combo with the strongest estimated >=2/3 hit chance."""
+    pool = candidates[:candidate_pool_size]
+    if len(pool) < top_n_output:
+        top_pairs = [
+            (int(candidate["pair"]), float(candidate.get("score", 0.0)))
+            for candidate in pool
+        ]
+        return {
+            "top_pairs": top_pairs,
+            "combo_score": sum(score for _, score in top_pairs),
+            "candidate_pool": pool,
+        }
+
+    scores = [float(candidate.get("score", 0.0)) for candidate in pool]
+    score_min = min(scores)
+    score_max = max(scores)
+    score_range = score_max - score_min
+    normalized_pool = []
+    for candidate in pool:
+        normalized = candidate.copy()
+        raw_score = float(candidate.get("score", 0.0))
+        normalized["score_norm"] = (
+            1.0 if score_range < 1e-10 else (raw_score - score_min) / score_range
+        )
+        normalized_pool.append(normalized)
+
+    candidate_by_pair = {int(candidate["pair"]): candidate for candidate in normalized_pool}
+    best_combo: Optional[tuple[int, ...]] = None
+    best_score = -1.0
+    best_strength = -1.0
+
+    for combo in combinations(candidate_by_pair.keys(), top_n_output):
+        combo_score = _score_two_of_three_combo(combo, candidate_by_pair, history_tail_sets)
+        combo_strength = sum(
+            _candidate_hit_strength(candidate_by_pair[p], max_support=6)
+            for p in combo
+        )
+        if (
+            combo_score > best_score
+            or (
+                abs(combo_score - best_score) < 1e-12
+                and combo_strength > best_strength
+            )
+        ):
+            best_combo = combo
+            best_score = combo_score
+            best_strength = combo_strength
+
+    selected_pairs = list(best_combo or tuple(candidate_by_pair.keys())[:top_n_output])
+    selected_pairs.sort(
+        key=lambda pair: (
+            candidate_by_pair[pair].get("score", 0.0),
+            candidate_by_pair[pair].get("support_count", 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "top_pairs": [
+            (pair, round(float(candidate_by_pair[pair].get("score", 0.0)), 4))
+            for pair in selected_pairs
+        ],
+        "combo_score": round(best_score, 6),
+        "candidate_pool": normalized_pool,
+        "combo_candidates": [
+            {
+                **candidate_by_pair[pair],
+                "hit_strength": round(
+                    _candidate_hit_strength(candidate_by_pair[pair], max_support=6),
+                    4,
+                ),
+            }
+            for pair in selected_pairs
+        ],
+        "history_strength": round(_combo_history_strength(tuple(selected_pairs), history_tail_sets), 4),
+    }
+
+
 def compute_global_borda(
     model_results: List[Dict],
     recent_tails: List[int],
@@ -707,6 +855,457 @@ def compute_global_borda(
         'scoring_log': '\n\n'.join(scoring_log),
         'candidate_log': candidate_log,
         'top_candidates': top_candidates,
+    }
+
+
+def compute_xsmn_province_representative_ensemble(
+    model_results: List[Dict],
+    provinces: List[str],
+    recent_tails_by_province: Optional[dict[str, List[int]]] = None,
+    weights: Optional[dict[str, float]] = None,
+    top_n_output: int = 3,
+    representatives_per_province: int = 2,
+    recent_province_tails: Optional[dict[str, set[int]]] = None,
+) -> Dict:
+    """
+    XSMN province-first consensus picker.
+
+    Quy tắc:
+      1. Chấm điểm riêng từng tỉnh để ưu tiên nguồn cùng tỉnh, cùng nhịp.
+      2. Mỗi tỉnh cử ``representatives_per_province`` số điểm cao nhất.
+      3. Merge các đại diện; nếu trùng số giữa nhiều tỉnh thì cộng thêm phần
+         điểm cross-province nhẹ.
+      4. Chọn ``top_n_output`` số có điểm đại diện cao nhất.
+
+    This keeps local station signal quality from being buried by global
+    model@province vote counting.
+    """
+    recent_tails_by_province = recent_tails_by_province or {}
+
+    if not provinces:
+        flattened_recent = [
+            tail
+            for tails in recent_tails_by_province.values()
+            for tail in tails
+        ]
+        return compute_global_borda(
+            model_results,
+            flattened_recent,
+            weights=weights,
+            top_n_output=top_n_output,
+            region="XSMN",
+            recent_province_tails=recent_province_tails,
+        )
+
+    province_outputs: dict[str, Dict] = {}
+    representatives: list[dict] = []
+    contributing: set[str] = set()
+
+    for province in provinces:
+        province_results = [
+            r for r in model_results
+            if r.get("province") == province
+            and r.get("status") == "success"
+            and r.get("top_pairs")
+        ]
+        if not province_results:
+            continue
+
+        province_repeat_tails = None
+        if recent_province_tails and province in recent_province_tails:
+            province_repeat_tails = {province: recent_province_tails[province]}
+
+        province_output = compute_global_borda(
+            province_results,
+            recent_tails_by_province.get(province, []),
+            weights=weights,
+            top_n_output=max(top_n_output, representatives_per_province),
+            region="XSMN",
+            recent_province_tails=province_repeat_tails,
+        )
+        province_outputs[province] = province_output
+
+        for source in province_output.get("contributing_models", []):
+            contributing.add(source)
+
+        province_candidates = province_output.get("top_candidates", [])
+        if not province_candidates:
+            province_candidates = [
+                {
+                    "rank": idx + 1,
+                    "pair": pair,
+                    "score": score,
+                    "support_count": 0,
+                    "unique_model_count": 0,
+                    "models": [],
+                    "sources": [],
+                }
+                for idx, (pair, score) in enumerate(province_output.get("top_pairs", []))
+            ]
+
+        for candidate in province_candidates[:representatives_per_province]:
+            representatives.append({
+                "province": province,
+                "pair": int(candidate["pair"]),
+                "province_rank": int(candidate["rank"]),
+                "province_score": float(candidate["score"]),
+                "support_count": int(candidate.get("support_count", 0)),
+                "unique_model_count": int(candidate.get("unique_model_count", 0)),
+                "sources": list(candidate.get("sources") or candidate.get("models") or []),
+            })
+
+    if not representatives:
+        return {
+            "top_pairs": [],
+            "contributing_models": [],
+            "ensemble_method": "xsmn_province_representative_v3.4",
+            "borda_details": {},
+            "consensus_pairs": [],
+            "scoring_log": "",
+            "candidate_log": "",
+            "top_candidates": [],
+            "province_outputs": province_outputs,
+            "province_representatives": [],
+        }
+
+    merged: dict[int, dict] = {}
+    for rep in representatives:
+        pair = rep["pair"]
+        item = merged.setdefault(pair, {
+            "pair": pair,
+            "representatives": [],
+            "best_score": 0.0,
+            "combined_score": 0.0,
+            "province_count": 0,
+            "sources": set(),
+        })
+        item["representatives"].append(rep)
+        item["best_score"] = max(item["best_score"], rep["province_score"])
+        item["sources"].update(rep["sources"])
+
+    for item in merged.values():
+        reps = item["representatives"]
+        scores = sorted((rep["province_score"] for rep in reps), reverse=True)
+        best_score = scores[0]
+        secondary_score = sum(scores[1:])
+        province_count = len({rep["province"] for rep in reps})
+        cross_province_bonus = 0.35 * secondary_score
+        duplicate_bonus = 0.25 * max(province_count - 1, 0)
+
+        item["province_count"] = province_count
+        item["combined_score"] = best_score + cross_province_bonus + duplicate_bonus
+
+    sorted_items = sorted(
+        merged.values(),
+        key=lambda item: (
+            item["combined_score"],
+            item["province_count"],
+            -min(rep["province_rank"] for rep in item["representatives"]),
+            -item["pair"],
+        ),
+        reverse=True,
+    )
+
+    top_items = sorted_items[:top_n_output]
+    top_pairs = [
+        (item["pair"], round(item["combined_score"], 4))
+        for item in top_items
+    ]
+
+    top_candidates = []
+    for rank, item in enumerate(sorted_items, start=1):
+        reps = item["representatives"]
+        sources = sorted(item["sources"])
+        top_candidates.append({
+            "rank": rank,
+            "pair": item["pair"],
+            "score": round(item["combined_score"], 4),
+            "support_count": sum(rep["support_count"] for rep in reps),
+            "unique_model_count": len(sources),
+            "province_count": item["province_count"],
+            "models": sources,
+            "sources": sources,
+            "representatives": reps,
+        })
+
+    candidate_lines = [
+        f"📌 <b>Đại diện XSMN theo tỉnh (Top {representatives_per_province}/tỉnh)</b>"
+    ]
+    for province in provinces:
+        reps = [rep for rep in representatives if rep["province"] == province]
+        if not reps:
+            candidate_lines.append(f"   • {province}: không có ứng viên hợp lệ")
+            continue
+        formatted = ", ".join(
+            f"<code>{rep['pair']:02d}</code>({rep['province_score']:.2f}đ)"
+            for rep in reps
+        )
+        candidate_lines.append(f"   • {province}: {formatted}")
+
+    candidate_lines.append("📌 <b>Top ứng viên sau merge đại diện</b>")
+    for candidate in top_candidates[:10]:
+        provs = sorted({
+            rep["province"]
+            for rep in candidate["representatives"]
+        })
+        prov_str = ", ".join(provs)
+        candidate_lines.append(
+            f"   {candidate['rank']:02d}. <code>{candidate['pair']:02d}</code>"
+            f" = {candidate['score']:.2f}đ | tỉnh={candidate['province_count']}"
+            f" | {prov_str}"
+        )
+
+    scoring_logs = []
+    for item in top_items:
+        reps = item["representatives"]
+        detail = ", ".join(
+            f"{rep['province']}#{rep['province_rank']}={rep['province_score']:.2f}đ"
+            for rep in reps
+        )
+        source_labels = sorted({_display_source(src) for src in item["sources"]})
+        scoring_logs.append(
+            f"🔸 <b>[{item['pair']:02d}]</b> = {item['combined_score']:.2f}đ\n"
+            f"   ├ Đại diện tỉnh: {detail}\n"
+            f"   ├ Số tỉnh cử: {item['province_count']}\n"
+            f"   └ Sources: {', '.join(source_labels) if source_labels else '-'}"
+        )
+
+    consensus_pairs = [
+        item["pair"]
+        for item in sorted_items
+        if item["province_count"] > 1
+    ]
+
+    return {
+        "top_pairs": top_pairs,
+        "contributing_models": sorted(contributing),
+        "ensemble_method": "xsmn_province_representative_v3.4",
+        "borda_details": {
+            item["pair"]: round(item["combined_score"], 4)
+            for item in sorted_items
+        },
+        "consensus_pairs": consensus_pairs,
+        "scoring_log": "\n\n".join(scoring_logs),
+        "candidate_log": "\n".join(candidate_lines),
+        "top_candidates": top_candidates,
+        "province_outputs": province_outputs,
+        "province_representatives": representatives,
+    }
+
+
+def compute_xsmn_merged_combo_selector_ensemble(
+    model_results: List[Dict],
+    provinces: List[str],
+    recent_tails_by_province: Optional[dict[str, List[int]]] = None,
+    weights: Optional[dict[str, float]] = None,
+    top_n_output: int = 3,
+    representatives_per_province: int = 2,
+    recent_province_tails: Optional[dict[str, set[int]]] = None,
+    combo_history_tail_sets: Optional[list[set[int]]] = None,
+) -> Dict:
+    """
+    XSMN merged-province combo picker.
+
+    Quy tắc:
+      1. Chấm điểm pool chung cho toàn bộ tỉnh XSMN xổ trong ngày.
+      2. Lấy Top 10 ứng viên merged từ tất cả model@province sources.
+      3. Sinh toàn bộ combo 3 số trong pool và score mục tiêu >=2/3.
+      4. Chọn combo có expected hit-strength cao nhất trên tail set merged.
+
+    This matches the configured XSMN/all rule where target provinces for a day
+    are merged before counting whether at least 2 of 3 numbers hit.
+    """
+    recent_tails_by_province = recent_tails_by_province or {}
+
+    if not provinces:
+        flattened_recent = [
+            tail
+            for tails in recent_tails_by_province.values()
+            for tail in tails
+        ]
+        return compute_global_borda(
+            model_results,
+            flattened_recent,
+            weights=weights,
+            top_n_output=top_n_output,
+            region="XSMN",
+            recent_province_tails=recent_province_tails,
+        )
+
+    flattened_recent = [
+        tail
+        for tails in recent_tails_by_province.values()
+        for tail in tails
+    ]
+    global_output = compute_global_borda(
+        model_results,
+        flattened_recent,
+        weights=weights,
+        top_n_output=top_n_output,
+        region="XSMN",
+        recent_province_tails=recent_province_tails,
+    )
+
+    province_outputs: dict[str, Dict] = {}
+    representatives: list[dict] = []
+    contributing: set[str] = set()
+
+    for province in provinces:
+        province_results = [
+            r for r in model_results
+            if r.get("province") == province
+            and r.get("status") == "success"
+            and r.get("top_pairs")
+        ]
+        if not province_results:
+            continue
+
+        province_repeat_tails = None
+        if recent_province_tails and province in recent_province_tails:
+            province_repeat_tails = {province: recent_province_tails[province]}
+
+        province_output = compute_global_borda(
+            province_results,
+            recent_tails_by_province.get(province, []),
+            weights=weights,
+            top_n_output=max(top_n_output, representatives_per_province),
+            region="XSMN",
+            recent_province_tails=province_repeat_tails,
+        )
+        province_outputs[province] = province_output
+
+        for source in province_output.get("contributing_models", []):
+            contributing.add(source)
+
+        # Representatives must be the highest scored candidates, not the
+        # diversity-filtered top_pairs.
+        province_candidates = province_output.get("top_candidates", [])
+        if not province_candidates:
+            province_candidates = [
+                {
+                    "rank": idx + 1,
+                    "pair": pair,
+                    "score": score,
+                    "support_count": 0,
+                    "unique_model_count": 0,
+                    "models": [],
+                    "sources": [],
+                }
+                for idx, (pair, score) in enumerate(province_output.get("top_pairs", []))
+            ]
+
+        for candidate in province_candidates[:representatives_per_province]:
+            representatives.append({
+                "province": province,
+                "pair": int(candidate["pair"]),
+                "province_rank": int(candidate["rank"]),
+                "province_score": float(candidate["score"]),
+                "support_count": int(candidate.get("support_count", 0)),
+                "unique_model_count": int(candidate.get("unique_model_count", 0)),
+                "sources": list(candidate.get("sources") or candidate.get("models") or []),
+            })
+
+    merged_candidates = global_output.get("top_candidates", [])
+    if not merged_candidates:
+        return {
+            "top_pairs": [],
+            "contributing_models": [],
+            "ensemble_method": "xsmn_merged_combo_selector_v3.5",
+            "borda_details": {},
+            "consensus_pairs": [],
+            "scoring_log": "",
+            "candidate_log": "",
+            "top_candidates": [],
+            "province_outputs": province_outputs,
+            "merged_combo_output": {},
+            "province_representatives": [],
+        }
+
+    merged_combo_output = _select_best_two_of_three_combo(
+        merged_candidates,
+        top_n_output=top_n_output,
+        candidate_pool_size=10,
+        history_tail_sets=combo_history_tail_sets,
+    )
+    top_pairs = merged_combo_output["top_pairs"]
+
+    province_presence: dict[int, set[str]] = {}
+    for candidate in merged_combo_output.get("candidate_pool", []):
+        for source in candidate.get("sources", []):
+            if "@" not in source:
+                continue
+            _model_name, province = source.split("@", 1)
+            province_presence.setdefault(int(candidate["pair"]), set()).add(province)
+
+    merged_top_candidates = []
+    for candidate in merged_combo_output.get("candidate_pool", []):
+        candidate_with_provinces = candidate.copy()
+        candidate_provinces = sorted(province_presence.get(int(candidate["pair"]), set()))
+        candidate_with_provinces["province_count"] = len(candidate_provinces)
+        candidate_with_provinces["provinces"] = candidate_provinces
+        merged_top_candidates.append(candidate_with_provinces)
+
+    candidate_lines = [
+        "📌 <b>XSMN merged combo selector: chọn bộ 3 tối ưu mục tiêu ≥2/3</b>"
+    ]
+    combo_pairs = ", ".join(
+        f"<code>{pair:02d}</code>"
+        for pair, _score in merged_combo_output.get("top_pairs", [])
+    )
+    candidate_lines.append(
+        f"   • Merged provinces: {', '.join(provinces)}"
+        f" | combo [{combo_pairs}]"
+        f" | score={merged_combo_output.get('combo_score', 0.0):.4f}"
+        f" | history={merged_combo_output.get('history_strength', 0.0):.2f}"
+    )
+    candidate_lines.append("📌 <b>Top 10 ứng viên merged</b>")
+    formatted = ", ".join(
+        f"<code>{int(candidate['pair']):02d}</code>({float(candidate.get('score', 0.0)):.2f})"
+        for candidate in merged_combo_output.get("candidate_pool", [])[:10]
+    )
+    candidate_lines.append(f"   • all: {formatted}")
+
+    scoring_logs = []
+    selected_candidates = {
+        int(candidate["pair"]): candidate
+        for candidate in merged_combo_output.get("combo_candidates", [])
+    }
+    for pair, score in top_pairs:
+        candidate = selected_candidates.get(pair, {})
+        source_labels = sorted(
+            {_display_source(src) for src in candidate.get("sources", [])}
+        )
+        scoring_logs.append(
+            f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ\n"
+            f"   ├ Scope: merged XSMN/all\n"
+            f"   ├ Hit-strength: {candidate.get('hit_strength', 0.0):.2f}\n"
+            f"   ├ Support: {candidate.get('support_count', 0)} nguồn\n"
+            f"   └ Sources: {', '.join(source_labels) if source_labels else '-'}"
+        )
+
+    consensus_pairs = [
+        pair
+        for pair, province_set in province_presence.items()
+        if len(province_set) > 1
+    ]
+
+    return {
+        "top_pairs": top_pairs,
+        "contributing_models": sorted(set(contributing) | set(global_output.get("contributing_models", []))),
+        "ensemble_method": "xsmn_merged_combo_selector_v3.5",
+        "borda_details": {
+            int(candidate["pair"]): round(float(candidate.get("score", 0.0)), 4)
+            for candidate in merged_combo_output.get("candidate_pool", [])
+        },
+        "consensus_pairs": consensus_pairs,
+        "scoring_log": "\n\n".join(scoring_logs),
+        "candidate_log": "\n".join(candidate_lines),
+        "top_candidates": merged_top_candidates,
+        "selected_province": "all",
+        "combo_score": merged_combo_output.get("combo_score", 0.0),
+        "province_outputs": province_outputs,
+        "merged_combo_output": merged_combo_output,
+        "province_representatives": representatives,
     }
 
 

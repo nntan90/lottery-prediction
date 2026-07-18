@@ -50,7 +50,7 @@ from src.xsmn_ensemble.model_xgboost import predict_xgboost as xsmn_predict_xgbo
 from src.xsmn_ensemble.model_lstm import predict_lstm as xsmn_predict_lstm
 from src.xsmn_ensemble.model_cdm import predict_cdm as xsmn_predict_cdm
 from src.xsmn_ensemble.ensemble_engine import (
-    compute_global_borda,
+    compute_xsmn_merged_combo_selector_ensemble,
     format_ensemble_result as xsmn_format_ensemble_result,
     format_model_prediction_log as xsmn_format_model_prediction_log,
 )
@@ -278,6 +278,63 @@ def get_recent_province_tails(
             )
 
     return result
+
+
+def get_recent_merged_tail_sets_for_province_pair(
+    db: LotteryDB,
+    region: str,
+    provinces: list[str],
+    target_date: date,
+    limit: int = 10,
+) -> list[set[int]]:
+    """
+    Lấy tail_set merged của các kỳ trước có cùng cặp tỉnh XSMN.
+
+    Ví dụ target Thứ Tư: Đồng Nai + Cần Thơ. Hàm lấy 10 Thứ Tư trước,
+    merge tails của hai tỉnh này cho từng ngày, rồi trả về list[set[int]].
+    """
+    if not provinces:
+        return []
+
+    anchor_province = provinces[0]
+    fetch_limit = limit * 3
+    draw_rows = db.supabase.table("lottery_draws") \
+        .select("draw_date") \
+        .eq("region", region) \
+        .eq("province", anchor_province) \
+        .lt("draw_date", target_date.isoformat()) \
+        .order("draw_date", desc=True) \
+        .limit(fetch_limit) \
+        .execute().data or []
+
+    same_weekday_dates = []
+    for row in draw_rows:
+        draw_date = date.fromisoformat(row["draw_date"])
+        if draw_date.weekday() != target_date.weekday():
+            continue
+        same_weekday_dates.append(row["draw_date"])
+        if len(same_weekday_dates) == limit:
+            break
+
+    if not same_weekday_dates:
+        return []
+
+    tail_rows = db.supabase.table("tails_2d") \
+        .select("draw_date,tail_2d") \
+        .eq("region", region) \
+        .in_("province", provinces) \
+        .in_("draw_date", same_weekday_dates) \
+        .execute().data or []
+
+    tails_by_date: dict[str, set[int]] = {draw_date: set() for draw_date in same_weekday_dates}
+    for row in tail_rows:
+        tails_by_date.setdefault(row["draw_date"], set()).add(int(row["tail_2d"]))
+
+    return [
+        tails_by_date[draw_date]
+        for draw_date in same_weekday_dates
+        if tails_by_date.get(draw_date)
+    ]
 
 
 async def run_xsmb_models(
@@ -793,8 +850,17 @@ async def run_xsmn_ensemble(
         results = await run_xsmn_models_for_target(db, storage, province, target_date, tmpdir)
         all_model_results.extend(results)
 
-    # History (3 kỳ cùng thứ)
-    recent_tails = get_recent_tails(db, "XSMN", provinces, target_date, limit_per_province=3)
+    # History (3 kỳ cùng thứ) — province-first để tránh trộn nhịp giữa các đài.
+    recent_tails_by_province = {
+        province: get_recent_tails(db, "XSMN", [province], target_date, limit_per_province=3)
+        for province in provs_to_run
+        if province is not None
+    }
+    recent_tails = [
+        tail
+        for tails in recent_tails_by_province.values()
+        for tail in tails
+    ]
     print(f"  📅 Lấy lịch sử 3 kỳ quay cùng thứ: {len(recent_tails)} số")
 
     # Credibility Scoring for XSMN (pre-prediction)
@@ -815,11 +881,23 @@ async def run_xsmn_ensemble(
     recent_province_tails = get_recent_province_tails(
         db, "XSMN", provinces, target_date, max_days_back=3
     )
+    combo_history_tail_sets = get_recent_merged_tail_sets_for_province_pair(
+        db, "XSMN", provinces, target_date, limit=10
+    )
+    print(
+        f"  📅 Lấy lịch sử combo merged cùng cặp tỉnh: "
+        f"{len(combo_history_tail_sets)} kỳ"
+    )
 
-    ensemble_output = compute_global_borda(
-        all_model_results, recent_tails, top_n_output=3, region="XSMN",
+    ensemble_output = compute_xsmn_merged_combo_selector_ensemble(
+        all_model_results,
+        provinces=provs_to_run,
+        recent_tails_by_province=recent_tails_by_province,
+        top_n_output=3,
+        representatives_per_province=2,
         weights=xsmn_weights,
         recent_province_tails=recent_province_tails,
+        combo_history_tail_sets=combo_history_tail_sets,
     )
 
     if not ensemble_output["top_pairs"]:

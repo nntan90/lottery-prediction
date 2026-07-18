@@ -48,23 +48,25 @@ class MockDB:
 class TestDecisionEngine(unittest.TestCase):
     """Tests for DecisionEngine.analyze and _pick_strategy."""
 
-    def test_hit_today_no_action(self):
-        """If hit today, should return no_action."""
+    def test_hit_today_triggers_maintain_retrain(self):
+        """Continuous learning retrains after a hit with maintain strategy."""
         engine = DecisionEngine()
         db = MockDB()
         result = engine.analyze("XSMB", None, 0, True, db, date(2026, 5, 10))
-        self.assertFalse(result.should_retrain)
-        self.assertEqual(result.action_type, "no_action")
+        self.assertTrue(result.should_retrain)
+        self.assertEqual(result.action_type, "retrain_triggered")
+        self.assertEqual(result.strategy, "maintain")
 
-    def test_miss_but_metric_ok_skipped(self):
-        """Miss today but metrics above threshold → skipped."""
+    def test_miss_but_metric_ok_still_retrains_for_continuous_learning(self):
+        """Continuous learning retrains on miss even when metrics are OK."""
         engine = DecisionEngine(auc_threshold=0.55, hit_rate_threshold=0.40)
         db = MockDB({
             "model_registry": [{"metric_auc": 0.65, "metric_hit_rate": 0.50, "trained_at": "2026-05-01T00:00:00Z", "version": "v3"}],
         })
         result = engine.analyze("XSMB", None, 0, False, db, date(2026, 5, 10))
-        self.assertFalse(result.should_retrain)
-        self.assertEqual(result.action_type, "skipped")
+        self.assertTrue(result.should_retrain)
+        self.assertEqual(result.action_type, "retrain_triggered")
+        self.assertEqual(result.strategy, "boost_estimators")
 
     def test_three_recent_misses_trigger_retrain_even_when_metric_ok(self):
         """3 kỳ gần nhất đều miss → retrain dù validation metric cũ vẫn OK."""
@@ -110,7 +112,7 @@ class TestDecisionEngine(unittest.TestCase):
         result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 10))
 
         self.assertTrue(result.should_retrain)
-        self.assertIn("cooldown_override", result.reason)
+        self.assertIn("3_miss_streak", result.reason)
 
     def test_miss_metric_bad_no_model_retrain(self):
         """Miss + no model found (no metrics) → retrain triggered."""

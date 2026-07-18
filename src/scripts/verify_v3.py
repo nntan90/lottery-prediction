@@ -149,7 +149,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         tail_set_cache[(region, province)] = tail_set
         pairs = [pred["pair_1"], pred["pair_2"], pred["pair_3"]]
         matched = [p for p in pairs if p in tail_set]
-        hit = len(matched) > 0
+        hit = len(matched) >= 2
 
         # Update DB for prediction_results
         db.supabase.table("prediction_results")\

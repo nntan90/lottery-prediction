@@ -8,7 +8,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
-from src.xsmn_ensemble.ensemble_engine import compute_global_borda, BORDA_POINTS
+from src.xsmn_ensemble.ensemble_engine import (
+    compute_global_borda,
+    compute_xsmn_province_representative_ensemble,
+    compute_xsmn_merged_combo_selector_ensemble,
+    _select_best_two_of_three_combo,
+    BORDA_POINTS,
+)
 from src.xsmb_ensemble.ensemble_engine import compute_xsmb_ensemble
 
 
@@ -89,6 +95,91 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertIn("frequency@dong-thap", candidate_42["sources"])
         self.assertIn("Freq/tp-hcm", out["candidate_log"])
         self.assertIn("Freq/dong-thap", out["candidate_log"])
+
+    def test_xsmn_combo_selector_scores_merged_province_pool(self):
+        """XSMN picker should choose a 3-number combo from the merged province pool."""
+        results = [
+            self._make_result("frequency", "ben-tre", [78, 72, 31, 64, 50]),
+            self._make_result("gap_overdue", "ben-tre", [48, 6, 86, 4, 76]),
+            self._make_result("markov", "ben-tre", [82, 64, 72, 31, 94]),
+            self._make_result("cdm", "ben-tre", [68, 72, 20, 92, 32]),
+            self._make_result("frequency", "vung-tau", [77, 85, 48, 20, 73]),
+            self._make_result("gap_overdue", "vung-tau", [38, 69, 50, 49, 87]),
+            self._make_result("lstm", "vung-tau", [79, 32, 73, 47, 43]),
+            self._make_result("cdm", "vung-tau", [36, 1, 48, 14, 27]),
+        ]
+
+        out = compute_xsmn_merged_combo_selector_ensemble(
+            results,
+            provinces=["ben-tre", "vung-tau"],
+            recent_tails_by_province={"ben-tre": [], "vung-tau": []},
+            top_n_output=3,
+            representatives_per_province=2,
+        )
+
+        reps_by_province = {}
+        for rep in out["province_representatives"]:
+            reps_by_province.setdefault(rep["province"], []).append(rep["pair"])
+
+        self.assertEqual(len(reps_by_province["ben-tre"]), 2)
+        self.assertEqual(len(reps_by_province["vung-tau"]), 2)
+        self.assertEqual(len(out["top_pairs"]), 3)
+        self.assertEqual(out["selected_province"], "all")
+        self.assertGreater(out["combo_score"], 0)
+        self.assertTrue(
+            {p for p, _ in out["top_pairs"]}.issubset(
+                {
+                    int(candidate["pair"])
+                    for candidate in out["merged_combo_output"]["candidate_pool"]
+                }
+            )
+        )
+        self.assertEqual(out["ensemble_method"], "xsmn_merged_combo_selector_v3.5")
+        self.assertIn("combo selector", out["candidate_log"])
+
+    def test_xsmn_representative_picker_merges_duplicate_pairs(self):
+        """A pair represented by two provinces should be merged into one stronger candidate."""
+        results = [
+            self._make_result("frequency", "ben-tre", [42, 10, 11, 12, 13]),
+            self._make_result("markov", "ben-tre", [42, 20, 21, 22, 23]),
+            self._make_result("frequency", "vung-tau", [42, 30, 31, 32, 33]),
+            self._make_result("markov", "vung-tau", [42, 40, 41, 42, 43]),
+        ]
+
+        out = compute_xsmn_province_representative_ensemble(
+            results,
+            provinces=["ben-tre", "vung-tau"],
+            recent_tails_by_province={"ben-tre": [], "vung-tau": []},
+            top_n_output=3,
+            representatives_per_province=2,
+        )
+
+        top_candidate = out["top_candidates"][0]
+        self.assertEqual(top_candidate["pair"], 42)
+        self.assertEqual(top_candidate["province_count"], 2)
+        self.assertIn(42, out["consensus_pairs"])
+
+    def test_xsmn_combo_selector_uses_matched_pair_history(self):
+        """Combo history should favor a lower-ranked combo with repeated 2/3 hits."""
+        candidates = [
+            {"pair": 10, "score": 10.0, "support_count": 6, "unique_model_count": 6},
+            {"pair": 11, "score": 9.8, "support_count": 6, "unique_model_count": 6},
+            {"pair": 12, "score": 9.6, "support_count": 6, "unique_model_count": 6},
+            {"pair": 20, "score": 9.4, "support_count": 6, "unique_model_count": 6},
+            {"pair": 21, "score": 9.2, "support_count": 6, "unique_model_count": 6},
+            {"pair": 22, "score": 9.0, "support_count": 6, "unique_model_count": 6},
+        ]
+        history = [{20, 21}, {20, 22}, {21, 22}, {20, 21, 22}]
+
+        out = _select_best_two_of_three_combo(
+            candidates,
+            top_n_output=3,
+            candidate_pool_size=6,
+            history_tail_sets=history,
+        )
+
+        self.assertEqual({p for p, _ in out["top_pairs"]}, {20, 21, 22})
+        self.assertGreater(out["history_strength"], 0.0)
 
     def test_history_penalty_overdue(self):
         """Pair appearing >=2 times in recent tails should get penalty."""

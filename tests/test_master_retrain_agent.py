@@ -58,7 +58,7 @@ def test_xsmn_global_multi_is_monitor_only_for_direct_retrain():
     assert not _is_directly_trainable_prediction("XSMN", "all", "multi")
     assert not _is_directly_trainable_prediction("XSMN", None, "multi")
     assert _is_directly_trainable_prediction("XSMN", "dong-nai", "single")
-    assert _is_directly_trainable_prediction("XSMB", None, "multi")
+    assert not _is_directly_trainable_prediction("XSMB", None, "multi")
 
 
 def test_latest_verified_date_reads_most_recent_verified_row():
