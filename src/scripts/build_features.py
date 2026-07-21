@@ -133,13 +133,24 @@ def build_features_for_station(
                 break
 
             all_rows.extend(chunk)
-            unique_dates = {r["draw_date"] for r in all_rows}
+            target_weekday = target_date.weekday() if region == "XSMN" else None
+            unique_dates = {
+                r["draw_date"]
+                for r in all_rows
+                if target_weekday is None
+                or date.fromisoformat(r["draw_date"]).weekday() == target_weekday
+            }
             if len(unique_dates) > HISTORY_DRAWS:
                 break
             if len(chunk) < limit:
                 break
             offset += limit
 
+        if region == "XSMN":
+            return [
+                row for row in all_rows
+                if date.fromisoformat(row["draw_date"]).weekday() == target_date.weekday()
+            ]
         return all_rows
 
     history_rows = _execute_with_retry(_fetch_history, f"{label}/history")

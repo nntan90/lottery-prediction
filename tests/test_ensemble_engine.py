@@ -12,6 +12,7 @@ from src.xsmn_ensemble.ensemble_engine import (
     compute_global_borda,
     compute_xsmn_province_representative_ensemble,
     compute_xsmn_merged_combo_selector_ensemble,
+    _combo_history_strength,
     _select_best_two_of_three_combo,
     BORDA_POINTS,
 )
@@ -77,8 +78,8 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertIn(42, [p for p, _ in out["top_pairs"]])
         self.assertIn(42, out["consensus_pairs"])
 
-    def test_xsmn_consensus_pool_counts_model_province_sources(self):
-        """XSMN should pool two provinces before scoring and count model@province sources."""
+    def test_xsmn_consensus_separates_sources_from_model_families(self):
+        """Cross-province copies remain sources but not independent model votes."""
         results = [
             self._make_result("frequency", "tp-hcm", [42, 20, 30, 40, 50]),
             self._make_result("frequency", "dong-thap", [42, 21, 31, 41, 51]),
@@ -89,8 +90,10 @@ class TestComputeGlobalBorda(unittest.TestCase):
         candidate_42 = next(c for c in out["top_candidates"] if c["pair"] == 42)
 
         self.assertIn(42, [p for p, _ in out["top_pairs"]])
-        self.assertIn(42, out["consensus_pairs"])
+        self.assertNotIn(42, out["consensus_pairs"])
         self.assertEqual(candidate_42["unique_model_count"], 3)
+        self.assertEqual(candidate_42["model_family_count"], 2)
+        self.assertEqual(candidate_42["province_count"], 2)
         self.assertIn("frequency@tp-hcm", candidate_42["sources"])
         self.assertIn("frequency@dong-thap", candidate_42["sources"])
         self.assertIn("Freq/tp-hcm", out["candidate_log"])
@@ -159,8 +162,8 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertEqual(top_candidate["province_count"], 2)
         self.assertIn(42, out["consensus_pairs"])
 
-    def test_xsmn_combo_selector_uses_matched_pair_history(self):
-        """Combo history should favor a lower-ranked combo with repeated 2/3 hits."""
+    def test_xsmn_combo_selector_shrinks_sparse_pair_history(self):
+        """Four history rows must not override much stronger current evidence."""
         candidates = [
             {"pair": 10, "score": 10.0, "support_count": 6, "unique_model_count": 6},
             {"pair": 11, "score": 9.8, "support_count": 6, "unique_model_count": 6},
@@ -178,8 +181,10 @@ class TestComputeGlobalBorda(unittest.TestCase):
             history_tail_sets=history,
         )
 
-        self.assertEqual({p for p, _ in out["top_pairs"]}, {20, 21, 22})
-        self.assertGreater(out["history_strength"], 0.0)
+        self.assertEqual({p for p, _ in out["top_pairs"]}, {10, 11, 12})
+        self.assertEqual(out["history_strength"], 0.0)
+        self.assertGreater(_combo_history_strength((20, 21, 22), history), 0.0)
+        self.assertEqual(out["score_type"], "ranking_score_uncalibrated")
 
     def test_history_penalty_overdue(self):
         """Pair appearing >=2 times in recent tails should get penalty."""

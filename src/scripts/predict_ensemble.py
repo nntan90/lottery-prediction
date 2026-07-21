@@ -11,12 +11,12 @@ XSMB (v5.1 — 4 active models + Loto):
   5. Loto Statistical             → Top 5
   → Precision Score Fusion        → Top 3
 
-XSMN (v3.2 — 5 models, backward compatible):
-  1-5. Frequency/Gap/Markov/XGB/LSTM → Borda+CombSUM → Top 3
+XSMN (v3.5 — 6 models, backward-compatible contracts):
+  1-6. Frequency/Gap/Markov/XGB/LSTM/CDM → CombSUM + combo ranking → Top 3
 
 Flow mỗi ngày:
   1. XSMB: chạy 4 model + Loto → v5 precision ensemble
-  2. XSMN: resolve provinces → chạy 5 models per province → v3.2 ensemble
+  2. XSMN: resolve provinces → chạy 6 models per province → merged ensemble
   3. Ghi prediction_results + model_predictions
   4. Gửi Telegram notification
 
@@ -27,7 +27,6 @@ Usage:
 
 import argparse
 import asyncio
-import html
 import os
 import sys
 import tempfile
@@ -37,10 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
 from src.utils.storage import LotteryStorage
+from src.bot.ensemble_messages import format_compact_ensemble_message
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces, get_dow_label
+from src.xsmn_coupled import generate_shadow_prediction
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -93,6 +94,7 @@ XSMB_ACTIVE_MODEL_NAMES = [
 TOTAL_MODELS_XSMB = len(XSMB_ACTIVE_MODEL_NAMES)
 TOTAL_MODELS_PER_PROVINCE = 6   # v3.3: 6 models per XSMN province (added CDM)
 MODEL_OUTPUT_TOP_N = 5
+MODEL_ENSEMBLE_TOP_N = 10
 XSMB_MODEL_OUTPUT_TOP_N = 5
 RULE_MODEL_LOOKBACK_DRAWS = 180
 XGB_FEATURE_LOOKBACK_DRAWS = 240
@@ -133,6 +135,33 @@ EXPECTED_MODEL_NAMES = {
 }
 
 
+def _flatten_tail_rows_by_draw(rows: list[dict]) -> list[int]:
+    """Flatten unique tails per draw while preserving repeat counts across draws."""
+    per_draw: dict[str, set[int]] = {}
+    for row in rows:
+        draw_date = row.get("draw_date")
+        if not draw_date:
+            raise ValueError("tail history row is missing draw_date")
+        per_draw.setdefault(str(draw_date), set()).add(int(row["tail_2d"]))
+
+    flattened: list[int] = []
+    for draw_date in sorted(per_draw):
+        flattened.extend(sorted(per_draw[draw_date]))
+    return flattened
+
+
+def _execute_paged_rows(query, page_size: int = 1000) -> list[dict]:
+    """Execute a Supabase query without truncating history at the API row cap."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = query.range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
 def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: date, limit_per_province: int = 3) -> list:
     """Lấy lịch sử 2 số cuối trong N kỳ quay gần nhất CÙNG THỨ (cùng ngày trong tuần)."""
     tails = []
@@ -169,21 +198,14 @@ def get_recent_tails(db: LotteryDB, region: str, provinces: list, target_date: d
 
         # Lấy tails của các kỳ này
         q2 = db.supabase.table("tails_2d") \
-            .select("tail_2d") \
+            .select("draw_date,tail_2d") \
             .eq("region", region) \
             .in_("draw_date", same_weekday_dates)
         q2 = q2.eq("province", prov) if prov else q2.is_("province", "null")
         t_data = q2.execute()
 
         if t_data.data:
-            per_date_pairs = {}
-            for row in t_data.data:
-                d = row.get("draw_date", "")
-                if d not in per_date_pairs:
-                    per_date_pairs[d] = set()
-                per_date_pairs[d].add(int(row["tail_2d"]))
-            for pairs in per_date_pairs.values():
-                tails.extend(pairs)
+            tails.extend(_flatten_tail_rows_by_draw(t_data.data))
 
     return tails
 
@@ -213,21 +235,14 @@ def get_last_7_days_tails(db: LotteryDB, region: str, provinces: list, target_da
         draw_dates = [d["draw_date"] for d in draws.data]
 
         q2 = db.supabase.table("tails_2d") \
-            .select("tail_2d") \
+            .select("draw_date,tail_2d") \
             .eq("region", region) \
             .in_("draw_date", draw_dates)
         q2 = q2.eq("province", prov) if prov else q2.is_("province", "null")
         t_data = q2.execute()
 
         if t_data.data:
-            per_date_pairs = {}
-            for row in t_data.data:
-                d = row.get("draw_date", "")
-                if d not in per_date_pairs:
-                    per_date_pairs[d] = set()
-                per_date_pairs[d].add(int(row["tail_2d"]))
-            for pairs in per_date_pairs.values():
-                tails.extend(pairs)
+            tails.extend(_flatten_tail_rows_by_draw(t_data.data))
 
     return tails
 
@@ -319,21 +334,30 @@ def get_recent_merged_tail_sets_for_province_pair(
     if not same_weekday_dates:
         return []
 
-    tail_rows = db.supabase.table("tails_2d") \
-        .select("draw_date,tail_2d") \
+    tail_query = db.supabase.table("tails_2d") \
+        .select("draw_date,province,tail_2d") \
         .eq("region", region) \
         .in_("province", provinces) \
-        .in_("draw_date", same_weekday_dates) \
-        .execute().data or []
+        .in_("draw_date", same_weekday_dates)
+    tail_rows = _execute_paged_rows(tail_query)
 
     tails_by_date: dict[str, set[int]] = {draw_date: set() for draw_date in same_weekday_dates}
+    provinces_by_date: dict[str, set[str]] = {draw_date: set() for draw_date in same_weekday_dates}
+    row_counts: dict[tuple[str, str], int] = {}
     for row in tail_rows:
         tails_by_date.setdefault(row["draw_date"], set()).add(int(row["tail_2d"]))
+        if row.get("province"):
+            province = str(row["province"])
+            provinces_by_date.setdefault(row["draw_date"], set()).add(province)
+            key = (row["draw_date"], province)
+            row_counts[key] = row_counts.get(key, 0) + 1
 
     return [
         tails_by_date[draw_date]
         for draw_date in same_weekday_dates
         if tails_by_date.get(draw_date)
+        and provinces_by_date.get(draw_date) == set(provinces)
+        and all(row_counts.get((draw_date, province), 0) >= 18 for province in provinces)
     ]
 
 
@@ -495,7 +519,7 @@ async def run_xsmn_models_for_target(
     tmpdir: str,
 ) -> list:
     """
-    Chạy 5 models XSMN (v3.2) cho 1 province. Backward compatible.
+    Chạy 6 models XSMN cho một tỉnh, giữ nguyên result contract cũ.
     """
     print(f"\n  {'='*50}")
     print(f"  📍 XSMN | Province: {province or 'ALL'}")
@@ -507,7 +531,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 1 (Frequency/Hot-Cool)...")
     result_1 = xsmn_predict_frequency(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_ENSEMBLE_TOP_N,
     )
     model_results.append(result_1)
     _log_model_result(result_1, "1")
@@ -516,7 +540,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 2 (Gap/Overdue)...")
     result_2 = xsmn_predict_gap(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_ENSEMBLE_TOP_N,
     )
     model_results.append(result_2)
     _log_model_result(result_2, "2")
@@ -525,7 +549,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 3 (Markov)...")
     result_3 = xsmn_predict_markov(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_ENSEMBLE_TOP_N,
     )
     model_results.append(result_3)
     _log_model_result(result_3, "3")
@@ -534,7 +558,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 4 (XGBoost)...")
     result_4 = xsmn_predict_xgboost(
         db, storage, province, target_date, region="XSMN",
-        n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
+        n_draws=XGB_FEATURE_LOOKBACK_DRAWS, top_n=MODEL_ENSEMBLE_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result_4)
     _log_model_result(result_4, "4")
@@ -543,7 +567,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 5 (LSTM/GRU)...")
     result_5 = xsmn_predict_lstm(
         db, storage=storage, province=province, target_date=target_date,
-        region="XSMN", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=30, top_n=MODEL_OUTPUT_TOP_N, tmpdir=tmpdir,
+        region="XSMN", n_draws=LSTM_LOOKBACK_DRAWS, seq_len=30, top_n=MODEL_ENSEMBLE_TOP_N, tmpdir=tmpdir,
     )
     model_results.append(result_5)
     _log_model_result(result_5, "5")
@@ -552,7 +576,7 @@ async def run_xsmn_models_for_target(
     print(f"  🔹 Model 6 (CDM/Dirichlet-Multinomial)...")
     result_6 = xsmn_predict_cdm(
         db, province, target_date, region="XSMN",
-        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_OUTPUT_TOP_N,
+        n_draws=RULE_MODEL_LOOKBACK_DRAWS, top_n=MODEL_ENSEMBLE_TOP_N,
     )
     model_results.append(result_6)
     _log_model_result(result_6, "6")
@@ -582,44 +606,6 @@ def _log_model_result(result: dict, label: str):
         print(f"     ✅ Top {len(result['top_pairs'])}: [{pairs_str}]{version_str} ({n_str}{time_str})")
     else:
         print(f"     ❌ Error: {result['error_message']}")
-
-
-def _format_pair_list(top_pairs: list, limit: int = MODEL_OUTPUT_TOP_N, with_scores: bool = False) -> str:
-    """Format Top-N pairs for compact Telegram display."""
-    pairs = top_pairs[:limit]
-    if with_scores:
-        return ", ".join(f"<code>{p:02d}</code>({s:.2f})" for p, s in pairs)
-    return ", ".join(f"<code>{p:02d}</code>" for p, _ in pairs)
-
-
-def _format_model_top_log(
-    model_results: list[dict],
-    *,
-    title: str,
-    model_short_names: dict[str, str],
-    limit: int = MODEL_OUTPUT_TOP_N,
-) -> str:
-    """Build Telegram log showing each successful model's Top-N selected pairs."""
-    lines = [f"📋 <b>{title}</b>"]
-    has_success = False
-
-    for result in model_results:
-        if result.get("status") != "success":
-            continue
-
-        top_pairs = result.get("top_pairs") or []
-        if not top_pairs:
-            continue
-
-        has_success = True
-        model_name = result.get("model_name", "unknown")
-        model_label = model_short_names.get(model_name, model_name)
-        province = result.get("province")
-        province_label = f" {html.escape(str(province))}" if province else ""
-        pairs = _format_pair_list(top_pairs, limit=limit)
-        lines.append(f"   🔹 {html.escape(model_label)}{province_label}: [{pairs}]")
-
-    return "\n".join(lines) if has_success else ""
 
 
 def get_missing_models(
@@ -688,7 +674,8 @@ async def run_xsmb_ensemble(
     try:
         credibility = compute_credibility_scores(db, "XSMB", target_date)
         auto_weights = credibility["credibility_weights"]
-        model_confidences = credibility["confidence_map"]
+        # confidence_map is diagnostic. Credibility influence is already in
+        # auto_weights and must not be multiplied into the ensemble twice.
         credibility_log = credibility.get("scoring_log", "")
         print(credibility_log)
     except Exception as e:
@@ -745,61 +732,49 @@ async def run_xsmb_ensemble(
 
     # Save prediction
     prediction = xsmb_format_ensemble_result("XSMB", None, ensemble_output, target_date)
-    scoring_log_msg = prediction.pop('scoring_log', '')
-    candidate_log_msg = prediction.pop('candidate_log', '')
+    prediction.pop('scoring_log', None)
+    prediction.pop('candidate_log', None)
     save_prediction(db, prediction)
 
     # Telegram notification
     if prediction:
-        date_str = target_date.strftime("%d/%m/%Y")
-        dow_str = get_dow_label(target_date)
         active = ensemble_output.get('models_active', 0)
-
-        msg = f"🎯 <b>BÁO CÁO PHÂN TÍCH TÍN HIỆU XSMB</b>\n"
-        msg += f"📅 <b>Ngày: {date_str} ({dow_str})</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        # XGBoost standalone
-        xgb_results = [r for r in all_model_results if r.get('model_name') == 'xgboost_core' and r.get('status') == 'success']
-        if xgb_results:
-            xgb = xgb_results[0]
-            xgb_pairs = ", ".join(f"<code>{p:02d}</code>" for p, _ in xgb["top_pairs"][:XSMB_MODEL_OUTPUT_TOP_N])
-            xgb_scores = " | ".join(f"{s:.4f}" for _, s in xgb["top_pairs"][:XSMB_MODEL_OUTPUT_TOP_N])
-            msg += f"🤖 <b>Single Model [XGBoost v4]</b>\n"
-            msg += f"📊 Top {XSMB_MODEL_OUTPUT_TOP_N}: {xgb_pairs} | [{xgb_scores}]\n\n"
-
-        # Ensemble
-        ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Đồng thuận v5.1 — 4 model + Loto</b>\n"
-
-        if candidate_log_msg:
-            msg += f"{candidate_log_msg}\n\n"
-
-        msg += f"🎯 Pick đồng thuận Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
-
-        if scoring_log_msg:
-            msg += f"{scoring_log_msg}\n\n"
-
         active_weights = ensemble_output.get("active_weights", {})
-        if active_weights:
-            weight_parts = []
-            for model_name in XSMB_ACTIVE_MODEL_NAMES:
-                if model_name in active_weights:
-                    label = XSMB_MODEL_SHORT_NAMES.get(model_name, model_name)
-                    weight_parts.append(f"{html.escape(label)} {active_weights[model_name]:.2f}")
-            if weight_parts:
-                msg += f"⚖️ Active weights: {' | '.join(weight_parts)}\n"
-
-        msg += f"📊 Sources Active: {active}/{TOTAL_MODELS_XSMB}\n\n"
-
-        model_top_log = _format_model_top_log(
-            all_model_results,
-            title=f"Top {XSMB_MODEL_OUTPUT_TOP_N} theo từng model",
-            model_short_names=XSMB_MODEL_SHORT_NAMES,
-            limit=XSMB_MODEL_OUTPUT_TOP_N,
+        ordered_weights = {
+            name: active_weights[name]
+            for name in XSMB_ACTIVE_MODEL_NAMES
+            if name in active_weights
+        }
+        successful_models = {
+            result.get("model_name")
+            for result in all_model_results
+            if result.get("status") == "success"
+        }
+        missing_models = [
+            XSMB_MODEL_SHORT_NAMES.get(name, name)
+            for name in XSMB_ACTIVE_MODEL_NAMES
+            if name not in successful_models
+        ]
+        selected_numbers = {number for number, _ in ensemble_output["top_pairs"][:3]}
+        remaining_candidates = [
+            int(candidate["pair"])
+            for candidate in ensemble_output.get("top_candidates", [])
+            if int(candidate["pair"]) not in selected_numbers
+        ]
+        msg = format_compact_ensemble_message(
+            region="XSMB",
+            target_date=target_date,
+            dow_label=get_dow_label(target_date),
+            top_pairs=ensemble_output["top_pairs"],
+            consensus_pairs=ensemble_output.get("consensus_pairs", []),
+            remaining_candidates=remaining_candidates,
+            models_active=active,
+            models_total=TOTAL_MODELS_XSMB,
+            version="Ensemble v5.1",
+            active_weights=ordered_weights,
+            model_labels=XSMB_MODEL_SHORT_NAMES,
+            missing_by_scope={"XSMB": missing_models},
         )
-        if model_top_log:
-            msg += f"{model_top_log}\n"
 
         if not await _send_chunked(notifier, msg, "predict_ensemble_xsmb"):
             raise RuntimeError("Telegram notification failed for XSMB")
@@ -835,10 +810,10 @@ async def run_xsmn_ensemble(
     dry_run: bool = False,
 ):
     """
-    XSMN v3.2 — 5-Model Ensemble (backward compatible, unchanged).
+    XSMN v3.5 — 6-model merged combo ensemble.
     """
     print(f"\n{'='*60}")
-    print(f"🎯 XSMN MULTI-MODEL ENSEMBLE (v3.2 — 5 Models)")
+    print(f"🎯 XSMN MULTI-MODEL ENSEMBLE (v3.5 — 6 Models)")
     print(f"📅 Target date: {target_date} ({get_dow_label(target_date)})")
     print(f"🏢 Target provinces ({len(provinces)}): {provinces}")
     print(f"{'='*60}")
@@ -882,7 +857,7 @@ async def run_xsmn_ensemble(
         db, "XSMN", provinces, target_date, max_days_back=3
     )
     combo_history_tail_sets = get_recent_merged_tail_sets_for_province_pair(
-        db, "XSMN", provinces, target_date, limit=10
+        db, "XSMN", provinces, target_date, limit=52
     )
     print(
         f"  📅 Lấy lịch sử combo merged cùng cặp tỉnh: "
@@ -899,6 +874,12 @@ async def run_xsmn_ensemble(
         recent_province_tails=recent_province_tails,
         combo_history_tail_sets=combo_history_tail_sets,
     )
+    ensemble_output["data_cutoff"] = target_date.isoformat()
+    ensemble_output["model_versions"] = {
+        f"{result.get('model_name')}@{result.get('province')}": result.get("model_version")
+        for result in all_model_results
+        if result.get("status") == "success"
+    }
 
     if not ensemble_output["top_pairs"]:
         raise RuntimeError("XSMN ensemble produced no candidates")
@@ -911,55 +892,81 @@ async def run_xsmn_ensemble(
     if consensus_str:
         print(f"     🤝 Consensus: [{consensus_str}]")
 
+    cmr_result = None
+    try:
+        cmr_result = generate_shadow_prediction(db, provs_to_run, target_date)
+        if cmr_result.get("status") == "success":
+            print(f"     🧪 CMR shadow Top 3: {cmr_result['top_3']}")
+        else:
+            print(f"     🧪 CMR shadow: {cmr_result.get('reason', 'insufficient evidence')}")
+    except Exception as exc:
+        cmr_result = {"status": "error", "reason": str(exc)}
+        print(f"     ⚠️ CMR shadow failed without affecting ensemble: {exc}")
+
     # Save
     prediction = xsmn_format_ensemble_result("XSMN", "all", ensemble_output, target_date)
-    scoring_log_msg = prediction.pop('scoring_log', '')
-    candidate_log_msg = prediction.pop('candidate_log', '')
+    prediction.pop('scoring_log', None)
+    prediction.pop('candidate_log', None)
     
     if not dry_run:
         save_prediction(db, prediction)
 
     # Telegram
     if prediction:
-        date_str = target_date.strftime("%d/%m/%Y")
-        dow_str = get_dow_label(target_date)
         total_expected = len(provs_to_run) * TOTAL_MODELS_PER_PROVINCE
         active_count = len(ensemble_output['contributing_models'])
-
-        msg = f"🎯 <b>BÁO CÁO PHÂN TÍCH TÍN HIỆU XSMN</b>\n"
-        msg += f"📅 <b>Ngày: {date_str} ({dow_str})</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        ep1, ep2, ep3 = prediction["pair_1"], prediction["pair_2"], prediction["pair_3"]
-        msg += f"🤖 <b>Multi-Model Ensemble v3.2</b>\n"
-
-        if candidate_log_msg:
-            msg += f"{candidate_log_msg}\n\n"
-
-        msg += f"🎯 Pick đồng thuận Top 3: <code>{ep1:02d}</code>, <code>{ep2:02d}</code>, <code>{ep3:02d}</code>\n"
-
-        if scoring_log_msg:
-            msg += f"{scoring_log_msg}\n"
-
-        msg += f"   Models Active: {active_count}/{total_expected}\n"
-
+        missing_by_province = {}
         for prov in provs_to_run:
             missing = get_missing_models(db, "XSMN", prov, target_date, TOTAL_MODELS_PER_PROVINCE)
             if missing:
-                msg += f"   ⚠️ Thiếu ({prov}): {', '.join(missing)}\n"
+                missing_by_province[prov] = [
+                    MODEL_SHORT_NAMES.get(name, name) for name in missing
+                ]
 
-        for prov in provs_to_run:
-            prov_results = [r for r in all_model_results
-                           if r.get("province") == prov and r.get("status") == "success"]
-            if prov_results:
-                prov_name = html.escape(str(prov or "ALL"))
-                model_top_log = _format_model_top_log(
-                    prov_results,
-                    title=f"{prov_name} — Top {MODEL_OUTPUT_TOP_N} theo từng model",
-                    model_short_names=MODEL_SHORT_NAMES,
+        active_weights = ensemble_output.get("active_weights", {})
+        ordered_weights = {
+            name: active_weights[name]
+            for name in EXPECTED_MODEL_NAMES["XSMN"]
+            if name in active_weights
+        }
+        selected_numbers = {number for number, _ in ensemble_output["top_pairs"][:3]}
+        remaining_candidates = [
+            int(candidate["pair"])
+            for candidate in ensemble_output.get("top_candidates", [])
+            if int(candidate["pair"]) not in selected_numbers
+        ]
+        cmr_top_pairs = []
+        cmr_status = None
+        if cmr_result and cmr_result.get("status") == "success":
+            cmr_top_pairs = [
+                (
+                    int(item["number"]),
+                    float(item["estimated_hit_likelihood_uncalibrated"]),
                 )
-                if model_top_log:
-                    msg += f"{model_top_log}\n"
+                for item in cmr_result.get("selected_evidence", [])
+            ]
+        elif cmr_result and cmr_result.get("status") == "insufficient_evidence":
+            cmr_status = "Chưa đủ dữ liệu"
+        elif cmr_result:
+            cmr_status = "Tạm không khả dụng"
+        msg = format_compact_ensemble_message(
+            region="XSMN",
+            target_date=target_date,
+            dow_label=get_dow_label(target_date),
+            provinces=provs_to_run,
+            province_labels=XSMNCrawler.PROVINCE_MAP,
+            top_pairs=ensemble_output["top_pairs"],
+            consensus_pairs=ensemble_output.get("consensus_pairs", []),
+            remaining_candidates=remaining_candidates,
+            models_active=active_count,
+            models_total=total_expected,
+            version="Ensemble v3.5",
+            active_weights=ordered_weights,
+            model_labels=MODEL_SHORT_NAMES,
+            missing_by_scope=missing_by_province,
+            shadow_top_pairs=cmr_top_pairs,
+            shadow_status=cmr_status,
+        )
 
         if not dry_run:
             if not await _send_chunked(notifier, msg, "predict_ensemble_xsmn"):
@@ -1026,7 +1033,7 @@ async def main():
         print(f"🎯 BẮT ĐẦU CHẠY XSMB ENSEMBLE v5.1 (4 Models + Loto)")
         await run_xsmb_ensemble(target_date, db, storage, notifier, tmpdir, dry_run=args.dry_run)
 
-        # XSMN — v3.2 (5 models, backward compatible)
+        # XSMN — v3.5 (6 models, backward-compatible storage contract)
         xsmn_provinces = get_target_provinces(target_date)
         if xsmn_provinces:
             await run_xsmn_ensemble(target_date, xsmn_provinces, db, storage, notifier, tmpdir, dry_run=args.dry_run)

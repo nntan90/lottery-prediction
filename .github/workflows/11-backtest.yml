@@ -1,4 +1,4 @@
-name: 11 - Walk-forward Backtest
+name: 11 - Saved Prediction Evaluation
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
 
 jobs:
   backtest:
-    name: Walk-forward Backtest
+    name: Saved Out-of-Time Evaluation
     runs-on: ubuntu-latest
 
     steps:
@@ -42,7 +42,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run backtest
+      - name: Evaluate saved predictions
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

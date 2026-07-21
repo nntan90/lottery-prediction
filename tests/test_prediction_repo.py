@@ -40,7 +40,7 @@ class MockQueryChain:
     def execute(self):
         if self._db.should_raise_schema_cache_error(self._table_name, self._payload):
             raise Exception(
-                "Could not find the 'contributing_models' column of "
+                f"Could not find the '{self._db._missing_metadata_field}' column of "
                 "'prediction_results' in the schema cache PGRST204"
             )
         if self._action == "insert":
@@ -55,10 +55,16 @@ class MockQueryChain:
 
 class MockDB:
     """Mock LotteryDB with per-table data and call tracking."""
-    def __init__(self, table_responses=None, fail_prediction_metadata_once=False):
+    def __init__(
+        self,
+        table_responses=None,
+        fail_prediction_metadata_once=False,
+        missing_metadata_field="contributing_models",
+    ):
         self._responses = table_responses or {}
         self._calls = []
         self._fail_prediction_metadata_once = fail_prediction_metadata_once
+        self._missing_metadata_field = missing_metadata_field
         self._schema_cache_failed = False
         self.inserted = {}
         self.updated = {}
@@ -82,10 +88,7 @@ class MockDB:
             or not payload
         ):
             return False
-        has_metadata = any(
-            field in payload
-            for field in ("ensemble_method", "contributing_models", "final_scores")
-        )
+        has_metadata = self._missing_metadata_field in payload
         if has_metadata:
             self._schema_cache_failed = True
             return True
@@ -110,7 +113,9 @@ class TestSavePrediction(unittest.TestCase):
             "ensemble_method": "expert_borda_history_v2",
             "contributing_models": ["freq_gap", "markov", "xgboost"],
             "final_scores": [5.36, 3.00, 2.75],
+            "run_metadata": {"score_type": "ranking_score_uncalibrated"},
             "scoring_log": "<b>test log</b>",
+            "candidate_log": "runtime-only candidate details",
             "hit": None,
         }
 
@@ -134,7 +139,9 @@ class TestSavePrediction(unittest.TestCase):
         self.assertEqual(inserted["ensemble_method"], "expert_borda_history_v2")
         self.assertEqual(inserted["contributing_models"], ["freq_gap", "markov", "xgboost"])
         self.assertEqual(inserted["final_scores"], [5.36, 3.00, 2.75])
+        self.assertEqual(inserted["run_metadata"]["score_type"], "ranking_score_uncalibrated")
         self.assertNotIn("scoring_log", inserted)
+        self.assertNotIn("candidate_log", inserted)
 
         # Original dict should still have these fields (no mutation).
         self.assertIn("ensemble_method", pred)
@@ -163,8 +170,28 @@ class TestSavePrediction(unittest.TestCase):
         self.assertNotIn("ensemble_method", inserted)
         self.assertNotIn("contributing_models", inserted)
         self.assertNotIn("final_scores", inserted)
+        self.assertNotIn("run_metadata", inserted)
         self.assertNotIn("scoring_log", inserted)
         self.assertTrue(db._schema_cache_failed)
+
+    def test_missing_run_metadata_preserves_existing_audit_fields(self):
+        """Migration 11 can lag deployment without dropping legacy audit fields."""
+        db = MockDB(
+            {"prediction_results": []},
+            fail_prediction_metadata_once=True,
+            missing_metadata_field="run_metadata",
+        )
+        from src.database.prediction_repo import save_prediction
+        save_prediction(db, self._make_prediction())
+
+        inserted = db.inserted["prediction_results"][0]
+        self.assertNotIn("run_metadata", inserted)
+        self.assertEqual(inserted["ensemble_method"], "expert_borda_history_v2")
+        self.assertEqual(
+            inserted["contributing_models"],
+            ["freq_gap", "markov", "xgboost"],
+        )
+        self.assertEqual(inserted["final_scores"], [5.36, 3.00, 2.75])
 
 
 class TestSaveModelPrediction(unittest.TestCase):

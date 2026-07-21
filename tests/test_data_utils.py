@@ -98,6 +98,28 @@ class TestLoadTailsByDraws(unittest.TestCase):
         self.assertEqual(len(history), 65)
         self.assertEqual(len(history.iloc[-1]["tail_set"]), 27)
 
+    def test_xsmn_same_weekday_filter_separates_twice_weekly_station(self):
+        rows = [
+            {"draw_date": "2026-07-18", "tail_2d": 18},  # Saturday
+            {"draw_date": "2026-07-13", "tail_2d": 13},  # Monday
+            {"draw_date": "2026-07-11", "tail_2d": 11},  # Saturday
+            {"draw_date": "2026-07-06", "tail_2d": 6},   # Monday
+        ]
+
+        history = load_xsmn_tails_by_draws(
+            MockDB(rows),
+            region="XSMN",
+            province="tp-hcm",
+            n_draws=2,
+            before_date=date(2026, 7, 20),
+            target_weekday=0,
+        )
+
+        self.assertEqual(
+            [draw.strftime("%Y-%m-%d") for draw in history["draw_date"]],
+            ["2026-07-06", "2026-07-13"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

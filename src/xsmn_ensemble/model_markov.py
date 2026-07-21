@@ -23,6 +23,7 @@ def _load_tails_sequential(
     province: Optional[str] = None,
     n_draws: int = 250,
     before_date: Optional[date] = None,
+    target_weekday: Optional[int] = None,
 ) -> List[frozenset]:
     """
     Lấy N kỳ quay gần nhất, trả về list of frozensets (mỗi set = tails 1 kỳ).
@@ -55,7 +56,12 @@ def _load_tails_sequential(
 
         all_rows.extend(chunk)
 
-        unique_dates = set(r["draw_date"] for r in all_rows)
+        unique_dates = {
+            r["draw_date"]
+            for r in all_rows
+            if target_weekday is None
+            or date.fromisoformat(r["draw_date"]).weekday() == target_weekday
+        }
         if len(unique_dates) >= n_draws:
             break
 
@@ -72,8 +78,17 @@ def _load_tails_sequential(
         date_groups[r["draw_date"]].add(r["tail_2d"])
 
     # Sort by date ASC, take last n_draws
-    sorted_dates = sorted(date_groups.keys())[-n_draws:]
+    sorted_dates = [
+        draw_date for draw_date in sorted(date_groups.keys())
+        if target_weekday is None
+        or date.fromisoformat(draw_date).weekday() == target_weekday
+    ][-n_draws:]
     return [frozenset(date_groups[d]) for d in sorted_dates]
+
+
+def _valid_context(context: frozenset | set) -> List[int]:
+    """Return every valid context pair without value-order truncation bias."""
+    return sorted(pair for pair in context if 0 <= pair <= 99)
 
 
 def predict_markov(
@@ -89,10 +104,13 @@ def predict_markov(
     """
     start_ms = time.time()
     DECAY_LAMBDA = 0.95
-    TOP_K_COMPRESS = 15
 
     try:
-        draws = _load_tails_sequential(db, region, province, n_draws, before_date=target_date)
+        target_weekday = target_date.weekday() if region.upper() == "XSMN" and target_date else None
+        draws = _load_tails_sequential(
+            db, region, province, n_draws, before_date=target_date,
+            target_weekday=target_weekday,
+        )
         n = len(draws)
 
         if n < 15:
@@ -129,8 +147,8 @@ def predict_markov(
 
                 weight = DECAY_LAMBDA ** (n - 3 - t)
 
-                ctx0 = sorted([p for p in set_t0 if 0 <= p <= 99])[:TOP_K_COMPRESS]
-                ctx1 = sorted([p for p in set_t1 if 0 <= p <= 99])[:TOP_K_COMPRESS]
+                ctx0 = _valid_context(set_t0)
+                ctx1 = _valid_context(set_t1)
 
                 for i in ctx0:
                     for k in ctx1:
@@ -151,7 +169,7 @@ def predict_markov(
         context_t2 = draws[-2] if len(draws) >= 2 else set()
 
         pred_1st = np.zeros(100, dtype=float)
-        valid_ctx1 = [i for i in context_t1 if 0 <= i <= 99]
+        valid_ctx1 = _valid_context(context_t1)
         if valid_ctx1:
             for i in valid_ctx1:
                 pred_1st += prob_1st[i]
@@ -160,8 +178,8 @@ def predict_markov(
         pred_2nd = np.zeros(100, dtype=float)
         n_2nd_states = 0
         if transition_2nd and context_t1 and context_t2:
-            ctx0_comp = sorted([p for p in context_t2 if 0 <= p <= 99])[:TOP_K_COMPRESS]
-            ctx1_comp = sorted([p for p in context_t1 if 0 <= p <= 99])[:TOP_K_COMPRESS]
+            ctx0_comp = _valid_context(context_t2)
+            ctx1_comp = _valid_context(context_t1)
 
             for i in ctx0_comp:
                 for k in ctx1_comp:

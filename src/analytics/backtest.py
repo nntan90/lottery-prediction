@@ -69,13 +69,42 @@ def random_hit_probability(tail_count: int, picks: int) -> float:
     return 1.0 - (math.comb(miss_count, picks) / math.comb(100, picks))
 
 
+def random_at_least_hits_probability(tail_count: int, picks: int, min_hits: int) -> float:
+    """Return the hypergeometric probability of at least ``min_hits`` hits."""
+    tail_count = max(0, min(int(tail_count), 100))
+    picks = max(0, min(int(picks), 100))
+    min_hits = max(0, int(min_hits))
+    if min_hits == 0:
+        return 1.0
+    if picks == 0 or tail_count == 0 or min_hits > min(picks, tail_count):
+        return 0.0
+
+    denominator = math.comb(100, picks)
+    probability = 0.0
+    for hits in range(min_hits, min(picks, tail_count) + 1):
+        misses = picks - hits
+        if misses <= 100 - tail_count:
+            probability += (
+                math.comb(tail_count, hits) * math.comb(100 - tail_count, misses)
+            ) / denominator
+    return probability
+
+
 def _empty_prediction_bucket() -> dict[str, float]:
     return {
         "predictions": 0,
         "hit_1": 0,
         "hit_3": 0,
+        "hit_at_least_2": 0,
+        "hit_all_3": 0,
+        "hit_count_0": 0,
+        "hit_count_1": 0,
+        "hit_count_2": 0,
+        "hit_count_3": 0,
         "baseline_hit_1_sum": 0.0,
         "baseline_hit_3_sum": 0.0,
+        "baseline_hit_at_least_2_sum": 0.0,
+        "baseline_hit_all_3_sum": 0.0,
     }
 
 
@@ -86,32 +115,57 @@ def _finalize_prediction_bucket(bucket: dict[str, float]) -> dict[str, float]:
             "predictions": 0,
             "hit_1_rate": 0.0,
             "hit_3_rate": 0.0,
+            "hit_at_least_2_rate": 0.0,
+            "hit_all_3_rate": 0.0,
             "baseline_hit_1_rate": 0.0,
             "baseline_hit_3_rate": 0.0,
+            "baseline_hit_at_least_2_rate": 0.0,
+            "baseline_hit_all_3_rate": 0.0,
             "lift_hit_1": 0.0,
             "lift_hit_3": 0.0,
+            "lift_hit_at_least_2": 0.0,
+            "lift_hit_all_3": 0.0,
+            "hit_count_distribution": {"0": 0, "1": 0, "2": 0, "3": 0},
         }
 
     hit_1_rate = bucket["hit_1"] / total
     hit_3_rate = bucket["hit_3"] / total
     baseline_1 = bucket["baseline_hit_1_sum"] / total
     baseline_3 = bucket["baseline_hit_3_sum"] / total
+    hit_at_least_2_rate = bucket["hit_at_least_2"] / total
+    hit_all_3_rate = bucket["hit_all_3"] / total
+    baseline_at_least_2 = bucket["baseline_hit_at_least_2_sum"] / total
+    baseline_all_3 = bucket["baseline_hit_all_3_sum"] / total
 
     return {
         "predictions": total,
         "hit_1": int(bucket["hit_1"]),
         "hit_3": int(bucket["hit_3"]),
+        "hit_at_least_2": int(bucket["hit_at_least_2"]),
+        "hit_all_3": int(bucket["hit_all_3"]),
         "hit_1_rate": round(hit_1_rate, 4),
         "hit_3_rate": round(hit_3_rate, 4),
+        "hit_at_least_2_rate": round(hit_at_least_2_rate, 4),
+        "hit_all_3_rate": round(hit_all_3_rate, 4),
         "baseline_hit_1_rate": round(baseline_1, 4),
         "baseline_hit_3_rate": round(baseline_3, 4),
+        "baseline_hit_at_least_2_rate": round(baseline_at_least_2, 4),
+        "baseline_hit_all_3_rate": round(baseline_all_3, 4),
         "lift_hit_1": round(hit_1_rate / baseline_1, 4) if baseline_1 else 0.0,
         "lift_hit_3": round(hit_3_rate / baseline_3, 4) if baseline_3 else 0.0,
+        "lift_hit_at_least_2": round(hit_at_least_2_rate / baseline_at_least_2, 4)
+        if baseline_at_least_2 else 0.0,
+        "lift_hit_all_3": round(hit_all_3_rate / baseline_all_3, 4)
+        if baseline_all_3 else 0.0,
+        "hit_count_distribution": {
+            str(hit_count): int(bucket[f"hit_count_{hit_count}"])
+            for hit_count in range(4)
+        },
     }
 
 
 def summarize_predictions(predictions: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Compute Hit@1, Hit@3, random baseline, and lift."""
+    """Compute rank metrics plus the production XSMN >=2/3 combo KPI."""
     overall = _empty_prediction_bucket()
     by_region: dict[str, dict[str, float]] = defaultdict(_empty_prediction_bucket)
     by_station: dict[str, dict[str, float]] = defaultdict(_empty_prediction_bucket)
@@ -122,10 +176,19 @@ def summarize_predictions(predictions: Iterable[dict[str, Any]]) -> dict[str, An
         if not pairs or not tail_set:
             continue
 
+        hit_count = sum(pair in tail_set for pair in pairs)
         hit_1 = int(pairs[0] in tail_set)
-        hit_3 = int(any(pair in tail_set for pair in pairs))
+        hit_3 = int(hit_count >= 1)
+        hit_at_least_2 = int(hit_count >= 2)
+        hit_all_3 = int(hit_count == len(pairs) and len(pairs) == 3)
         baseline_1 = random_hit_probability(len(tail_set), 1)
         baseline_3 = random_hit_probability(len(tail_set), len(pairs))
+        baseline_at_least_2 = random_at_least_hits_probability(
+            len(tail_set), len(pairs), min_hits=2
+        )
+        baseline_all_3 = random_at_least_hits_probability(
+            len(tail_set), len(pairs), min_hits=3
+        )
 
         region, province = _station_key(row)
         keys = [
@@ -137,8 +200,13 @@ def summarize_predictions(predictions: Iterable[dict[str, Any]]) -> dict[str, An
             bucket["predictions"] += 1
             bucket["hit_1"] += hit_1
             bucket["hit_3"] += hit_3
+            bucket["hit_at_least_2"] += hit_at_least_2
+            bucket["hit_all_3"] += hit_all_3
+            bucket[f"hit_count_{min(hit_count, 3)}"] += 1
             bucket["baseline_hit_1_sum"] += baseline_1
             bucket["baseline_hit_3_sum"] += baseline_3
+            bucket["baseline_hit_at_least_2_sum"] += baseline_at_least_2
+            bucket["baseline_hit_all_3_sum"] += baseline_all_3
 
     return {
         "overall": _finalize_prediction_bucket(overall),
@@ -209,14 +277,19 @@ def summarize_rolling(
         for window in windows:
             sample = rows[-window:]
             hits = 0
+            combo_hits = 0
             for row in sample:
                 pairs = prediction_pairs(row)
                 tail_set = set(_parse_int_list(row.get("tail_set")))
-                hits += int(any(pair in tail_set for pair in pairs))
+                hit_count = sum(pair in tail_set for pair in pairs)
+                hits += int(hit_count >= 1)
+                combo_hits += int(hit_count >= 2)
             station_metrics[f"last_{window}"] = {
                 "draws": len(sample),
                 "hit_3": hits,
                 "hit_3_rate": round(hits / len(sample), 4) if sample else 0.0,
+                "hit_at_least_2": combo_hits,
+                "hit_at_least_2_rate": round(combo_hits / len(sample), 4) if sample else 0.0,
             }
         output[station] = station_metrics
     return output
@@ -309,7 +382,7 @@ def format_backtest_report(report: dict[str, Any]) -> str:
     overall = report["prediction_metrics"]["overall"]
     profit = report["profit_metrics"]["overall"]
     lines = [
-        "2D Tail Walk-Forward Backtest",
+        "2D Tail Saved Out-of-Time Evaluation",
         "",
         (
             "Overall: "
@@ -317,7 +390,10 @@ def format_backtest_report(report: dict[str, Any]) -> str:
             f"Hit@1={overall['hit_1_rate']:.1%} "
             f"(random {overall['baseline_hit_1_rate']:.1%}, lift {overall['lift_hit_1']:.2f}x) | "
             f"Hit@3={overall['hit_3_rate']:.1%} "
-            f"(random {overall['baseline_hit_3_rate']:.1%}, lift {overall['lift_hit_3']:.2f}x)"
+            f"(random {overall['baseline_hit_3_rate']:.1%}, lift {overall['lift_hit_3']:.2f}x) | "
+            f">=2/3={overall['hit_at_least_2_rate']:.1%} "
+            f"(random {overall['baseline_hit_at_least_2_rate']:.1%}, "
+            f"lift {overall['lift_hit_at_least_2']:.2f}x)"
         ),
         (
             "ROI: "
@@ -332,8 +408,9 @@ def format_backtest_report(report: dict[str, Any]) -> str:
         lines.append(
             f"- {region}: n={metrics['predictions']} | "
             f"Hit@3={metrics['hit_3_rate']:.1%} | "
-            f"random={metrics['baseline_hit_3_rate']:.1%} | "
-            f"lift={metrics['lift_hit_3']:.2f}x"
+            f">=2/3={metrics['hit_at_least_2_rate']:.1%} | "
+            f"random>=2/3={metrics['baseline_hit_at_least_2_rate']:.1%} | "
+            f"lift>=2/3={metrics['lift_hit_at_least_2']:.2f}x"
         )
 
     if report["model_contribution"]:

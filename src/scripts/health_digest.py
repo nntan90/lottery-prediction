@@ -24,6 +24,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
+from src.xsmn_ensemble.resolve_provinces import get_target_provinces
+
+
+def summarize_xsmn_model_runs(rows: list[dict], target_provinces: list[str]) -> dict:
+    """Summarize the expected two-province by six-model execution matrix."""
+    expected = len(target_provinces) * 6
+    successful = {
+        (row.get("province"), row.get("model_name"))
+        for row in rows
+        if row.get("status") == "success" and row.get("province") in target_provinces
+    }
+    missing_provinces = sorted(
+        province
+        for province in target_provinces
+        if not any(item[0] == province for item in successful)
+    )
+    return {
+        "expected": expected,
+        "successful": len(successful),
+        "missing_provinces": missing_provinces,
+    }
 
 
 def resolve_default_target_date(vn_now: datetime | None = None) -> date:
@@ -117,12 +138,35 @@ async def build_digest(db: LotteryDB, target_date: date) -> str:
         f"🎯 <b>PREDICTIONS</b> ({verify_status})\n{pred_summary}"
     )
 
+    xsmn_model_logs = db.supabase.table("model_predictions") \
+        .select("province,model_name,status") \
+        .eq("prediction_date", target_date.isoformat()) \
+        .eq("region", "XSMN") \
+        .execute().data or []
+    xsmn_runs = summarize_xsmn_model_runs(
+        xsmn_model_logs, get_target_provinces(target_date)
+    )
+    if xsmn_runs["successful"] < xsmn_runs["expected"]:
+        warnings.append(
+            "XSMN model runs incomplete: "
+            f"{xsmn_runs['successful']}/{xsmn_runs['expected']} successful"
+        )
+    if xsmn_runs["missing_provinces"]:
+        warnings.append(
+            "XSMN missing model output for: "
+            + ", ".join(xsmn_runs["missing_provinces"])
+        )
+    sections.append(
+        "🤖 <b>XSMN MODEL RUNS</b>\n"
+        f"   {xsmn_runs['successful']}/{xsmn_runs['expected']} successful"
+    )
+
     # ── 3. Model Registry ─────────────────────────────────────────
     active_models = db.supabase.table("model_registry") \
         .select("region,province,weekday,version,metric_auc,metric_hit_rate,trained_at") \
         .eq("status", "active") \
         .order("trained_at", desc=True) \
-        .limit(10) \
+        .limit(50) \
         .execute().data
 
     model_lines = []

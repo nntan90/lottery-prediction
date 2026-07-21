@@ -44,9 +44,10 @@ class TestFormatEnsembleResult(unittest.TestCase):
         self.assertEqual(result["pair_2"], 17)
         self.assertEqual(result["pair_3"], 88)
         self.assertAlmostEqual(result["prob_1"], 5.36)
-        self.assertEqual(result["model_version"], "ensemble_v3.2")
+        self.assertEqual(result["model_version"], "ensemble_v3.5")
         self.assertIsNone(result["hit"])  # Not verified yet
         self.assertIn("scoring_log", result)
+        self.assertEqual(result["run_metadata"]["score_type"], "ranking_score_uncalibrated")
 
     def test_fewer_than_3_pairs_padded(self):
         """Should pad to 3 with (-1, 0.0) when fewer than 3 pairs."""
@@ -127,6 +128,7 @@ class TestFormatModelPredictionLog(unittest.TestCase):
         self.assertIsNone(log["pair_3"])
         self.assertIsNone(log["pair_4"])
         self.assertIsNone(log["pair_5"])
+        self.assertEqual(len(mr["top_pairs"]), 2)
 
     def test_error_model_result(self):
         """Error model results should preserve error_message."""

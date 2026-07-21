@@ -30,6 +30,7 @@ def _load_tails_for_features(
     province: Optional[str] = None,
     n_draws: int = 250,
     before_date: Optional[date] = None,
+    target_weekday: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Lấy tails_2d cho province/region để build features on-the-fly.
@@ -61,7 +62,12 @@ def _load_tails_for_features(
 
         all_rows.extend(chunk)
 
-        unique_dates = set(r["draw_date"] for r in all_rows)
+        unique_dates = {
+            r["draw_date"]
+            for r in all_rows
+            if target_weekday is None
+            or date.fromisoformat(r["draw_date"]).weekday() == target_weekday
+        }
         if len(unique_dates) >= n_draws:
             break
 
@@ -70,6 +76,11 @@ def _load_tails_for_features(
 
         offset += limit
 
+    if target_weekday is not None:
+        all_rows = [
+            row for row in all_rows
+            if date.fromisoformat(row["draw_date"]).weekday() == target_weekday
+        ]
     return _extract_history(all_rows, max_rows=n_draws) if all_rows else pd.DataFrame()
 
 
@@ -214,7 +225,14 @@ def predict_xgboost(
             feat_df = pd.DataFrame(feat_result.data)
         else:
             # Build on-the-fly
-            history = _load_tails_for_features(db, region, province, n_draws, before_date=target_date)
+            history = _load_tails_for_features(
+                db,
+                region,
+                province,
+                n_draws,
+                before_date=target_date,
+                target_weekday=weekday if region.upper() == "XSMN" else None,
+            )
             if len(history) < 10:
                 return {
                     "model_name": "xgboost_core",

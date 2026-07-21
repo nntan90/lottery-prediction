@@ -59,7 +59,11 @@ def predict_gap(
     start_ms = time.time()
 
     try:
-        history = _load_tails_by_draws(db, region, province, n_draws, before_date=target_date)
+        target_weekday = target_date.weekday() if region.upper() == "XSMN" and target_date else None
+        history = _load_tails_by_draws(
+            db, region, province, n_draws, before_date=target_date,
+            target_weekday=target_weekday,
+        )
         n = len(history)
 
         if n < 10:

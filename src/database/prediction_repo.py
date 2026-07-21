@@ -11,8 +11,10 @@ from typing import Optional
 from src.database.supabase_client import LotteryDB
 
 
-RUNTIME_ONLY_FIELDS = ("scoring_log",)
-ENSEMBLE_AUDIT_FIELDS = ("ensemble_method", "contributing_models", "final_scores")
+RUNTIME_ONLY_FIELDS = ("scoring_log", "candidate_log")
+ENSEMBLE_AUDIT_FIELDS = (
+    "ensemble_method", "contributing_models", "final_scores", "run_metadata",
+)
 
 
 def _strip_fields(record: dict, fields: tuple[str, ...]) -> dict:
@@ -82,10 +84,15 @@ def save_prediction(db: LotteryDB, result: dict) -> None:
         if not _is_missing_ensemble_metadata_column(e):
             raise
 
-        fallback_record = _strip_fields(db_record, ENSEMBLE_AUDIT_FIELDS)
+        missing_fields = (
+            ("run_metadata",)
+            if "run_metadata" in str(e).lower()
+            else ENSEMBLE_AUDIT_FIELDS
+        )
+        fallback_record = _strip_fields(db_record, missing_fields)
         print(
-            "  ⚠️  prediction_results missing ensemble metadata columns "
-            "(run migration 06). Retrying without audit fields."
+            "  ⚠️  prediction_results missing ensemble metadata columns. "
+            "Apply pending migrations; retrying with compatible fields."
         )
         _write_prediction_record(db, fallback_record, existing)
 

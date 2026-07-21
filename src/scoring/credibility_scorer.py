@@ -23,7 +23,7 @@ Usage:
 import math
 import numpy as np
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from collections import defaultdict
 
 from src.scoring.credibility_config import (
@@ -37,7 +37,8 @@ from src.scoring.credibility_config import (
     MAX_WEIGHT,
     CONFIDENCE_FLOOR,
     CONFIDENCE_CEIL,
-    MIN_EVALUATED,
+    MIN_EVALUATED_XSMB,
+    MIN_EVALUATED_XSMN,
     COLD_START_CONFIDENCE,
 )
 
@@ -56,7 +57,7 @@ def compute_credibility_scores(
 
     Chạy TRƯỚC khi ensemble aggregation để cung cấp:
       - credibility_weights: dynamic weights cho Borda (thay auto_weight)
-      - confidence_map: confidence multiplier cho mỗi model
+      - confidence_map: diagnostic confidence for audit/reporting
       - scorecard: chi tiết 6 chiều cho logging/Telegram
 
     Args:
@@ -74,6 +75,9 @@ def compute_credibility_scores(
     from src.scoring.credibility_config import load_credibility_config_from_yaml
     yaml_cfg = load_credibility_config_from_yaml()
 
+    if not yaml_cfg.get("enabled", True):
+        return _empty_result(_get_default_weights(region), reason="disabled")
+
     if lookback_draws is None:
         if is_xsmb:
             lookback_draws = yaml_cfg.get("lookback_xsmb", LOOKBACK_XSMB)
@@ -85,50 +89,77 @@ def compute_credibility_scores(
         config_weights = _get_default_weights(region)
 
     # ── Step 1: Query historical data ──
-    model_history = _query_model_history(db, region, target_date, lookback_draws)
+    target_weekday = None if is_xsmb else target_date.weekday()
+    model_history = _query_model_history(
+        db, region, target_date, lookback_draws, target_weekday=target_weekday
+    )
 
     if not model_history:
         print("     ⚠️  Credibility: no model_predictions history found")
-        return _empty_result(config_weights)
+        return _empty_result(config_weights, reason="no model history")
 
-    actual_tails = _query_actual_tails(db, region, target_date, lookback_draws)
+    actual_tails = _query_actual_tails(
+        db, region, target_date, lookback_draws, target_weekday=target_weekday
+    )
 
     if not actual_tails:
         print("     ⚠️  Credibility: no actual tails found for evaluation")
-        return _empty_result(config_weights)
+        return _empty_result(config_weights, reason="no actual tails")
+
+    ensemble_predictions = _query_ensemble_predictions(
+        db, region, target_date, lookback_draws
+    )
 
     # ── Step 2: Compute 6 dimensions per model ──
-    all_models = set()
-    for records in model_history.values():
-        for r in records:
-            all_models.add(r["model_name"])
+    # The configured weight map is the active-model registry. Historical rows
+    # from retired aliases must not dilute the current ensemble normalization.
+    all_models = set(config_weights)
 
     scorecard: Dict[str, Dict] = {}
 
     for model_name in all_models:
         # Extract this model's predictions aligned with dates
-        model_preds = _extract_model_predictions(model_history, model_name)
-        evaluated = _align_with_actuals(model_preds, actual_tails)
+        model_preds = _extract_model_predictions(
+            model_history, model_name, lookback_draws=lookback_draws
+        )
+        evaluated = _align_with_actuals(
+            model_preds, actual_tails, ensemble_predictions=ensemble_predictions
+        )
 
-        if len(evaluated) < MIN_EVALUATED:
+        min_evaluated = int(yaml_cfg.get(
+            "min_evaluated_xsmb" if is_xsmb else "min_evaluated_xsmn",
+            MIN_EVALUATED_XSMB if is_xsmb else MIN_EVALUATED_XSMN,
+        ))
+        if not _has_minimum_scope_samples(evaluated, min_evaluated, is_xsmb=is_xsmb):
             # Cold-start: not enough history
             scorecard[model_name] = _cold_start_scorecard(model_name)
             continue
 
-        dim1 = _compute_recency_mrr(evaluated)
-        dim2, streak_type = _compute_streak_momentum(evaluated)
-        dim3 = _compute_ndcg(evaluated)
-        dim4 = _compute_consensus_accuracy(evaluated)
-        dim5 = _compute_stability_index(model_preds)
-        dim6 = _compute_recovery_speed(evaluated)
+        evaluated_scopes = _group_by_province(evaluated)
+        prediction_scopes = _group_by_province(model_preds)
+        recency_decay = float(yaml_cfg.get("recency_decay", RECENCY_DECAY))
+        dim1 = _mean_scoped(
+            evaluated_scopes,
+            lambda rows: _compute_recency_mrr(rows, decay=recency_decay),
+        )
+        streak_results = [
+            _compute_streak_momentum(rows) for rows in evaluated_scopes.values()
+        ]
+        dim2 = float(np.mean([score for score, _label in streak_results]))
+        streak_type = streak_results[0][1] if len(streak_results) == 1 else "mixed"
+        dim3 = _mean_scoped(evaluated_scopes, _compute_ndcg)
+        dim4 = _mean_scoped(evaluated_scopes, _compute_consensus_accuracy)
+        dim5 = _mean_scoped(prediction_scopes, _compute_stability_index)
+        dim6 = _mean_scoped(evaluated_scopes, _compute_recovery_speed)
 
+        dim_weights = {**DIM_WEIGHTS, **yaml_cfg.get("dim_weights", {})}
         composite = (
-            DIM_WEIGHTS["recency_mrr"]        * dim1 +
-            DIM_WEIGHTS["streak_momentum"]    * dim2 +
-            DIM_WEIGHTS["ndcg_score"]         * dim3 +
-            DIM_WEIGHTS["consensus_accuracy"] * dim4 +
-            DIM_WEIGHTS["stability_index"]    * dim5 +
-            DIM_WEIGHTS["recovery_speed"]     * dim6
+            dim_weights["recency_mrr"]        * dim1 +
+            dim_weights["streak_momentum"]    * dim2 +
+            dim_weights["ndcg_score"]         * dim3 +
+            dim_weights["consensus_accuracy"] * dim4 +
+            dim_weights["stability_index"]    * dim5 +
+            dim_weights["recovery_speed"]     * dim6
         )
 
         scorecard[model_name] = {
@@ -145,8 +176,19 @@ def compute_credibility_scores(
         }
 
     # ── Step 3: Convert composite → weights + confidence ──
-    credibility_weights = _composite_to_weights(scorecard, config_weights)
-    confidence_map = _composite_to_confidence(scorecard)
+    credibility_weights = _composite_to_weights(
+        scorecard,
+        config_weights,
+        smoothing=float(yaml_cfg.get("smoothing", SMOOTHING)),
+        min_weight=float(yaml_cfg.get("min_weight", MIN_WEIGHT)),
+        max_weight=float(yaml_cfg.get("max_weight", MAX_WEIGHT)),
+        max_weight_delta=float(yaml_cfg.get("max_weight_delta", 1.0)),
+    )
+    confidence_map = _composite_to_confidence(
+        scorecard,
+        floor=float(yaml_cfg.get("confidence_floor", CONFIDENCE_FLOOR)),
+        ceil=float(yaml_cfg.get("confidence_ceil", CONFIDENCE_CEIL)),
+    )
 
     # ── Step 4: Build human-readable log ──
     scoring_log = _build_scoring_log(scorecard, credibility_weights, confidence_map)
@@ -162,12 +204,46 @@ def compute_credibility_scores(
         "confidence_map": confidence_map,
         "scorecard": scorecard,
         "scoring_log": scoring_log,
+        "using_dynamic_weights": any(not card.get("cold_start") for card in scorecard.values()),
     }
+
+
+def _has_minimum_scope_samples(
+    evaluated: List[Dict],
+    minimum: int,
+    *,
+    is_xsmb: bool,
+) -> bool:
+    """Require enough observations for every province in the merged XSMN scope."""
+    if is_xsmb:
+        return len(evaluated) >= minimum
+    counts: Dict[str, int] = defaultdict(int)
+    for row in evaluated:
+        if row.get("province"):
+            counts[str(row["province"])] += 1
+    return len(counts) >= 2 and min(counts.values(), default=0) >= minimum
+
+
+def _group_by_province(rows: List[Dict]) -> Dict[str, List[Dict]]:
+    """Group ordered observations without mixing station timelines."""
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("province") or "all")].append(row)
+    return grouped
+
+
+def _mean_scoped(
+    grouped: Dict[str, List[Dict]],
+    metric: Callable[[List[Dict]], float],
+) -> float:
+    """Compute a metric per station timeline, then average station scores."""
+    values = [metric(rows) for rows in grouped.values() if rows]
+    return float(np.mean(values)) if values else 0.0
 
 
 # ─── Dimension 1: Recency-Weighted MRR ──────────────────────────────────────
 
-def _compute_recency_mrr(evaluated: List[Dict]) -> float:
+def _compute_recency_mrr(evaluated: List[Dict], decay: float = RECENCY_DECAY) -> float:
     """
     MRR với decay exponential theo thời gian.
 
@@ -182,10 +258,10 @@ def _compute_recency_mrr(evaluated: List[Dict]) -> float:
 
     for i, ev in enumerate(evaluated):
         # i=0 → most recent
-        decay = RECENCY_DECAY ** i
+        recency_weight = decay ** i
         mrr = ev.get("mrr", 0.0)
-        weighted_sum += mrr * decay
-        weight_sum += decay
+        weighted_sum += mrr * recency_weight
+        weight_sum += recency_weight
 
     return weighted_sum / weight_sum if weight_sum > 0 else 0.0
 
@@ -319,10 +395,11 @@ def _compute_stability_index(model_preds: List[Dict]) -> float:
     if not overlaps:
         return 0.5
 
+    mean_overlap = float(np.mean(overlaps))
     variance = float(np.var(overlaps))
-    # Map variance [0, 0.25] → stability [1.0, 0.0]
-    # variance=0 → perfect stability, variance=0.25 → maximum instability
-    stability = max(0.0, 1.0 - 4.0 * variance)
+    consistency = max(0.0, 1.0 - 4.0 * variance)
+    # Constant zero-overlap is deterministic but not stable in a useful sense.
+    stability = 0.5 * mean_overlap + 0.5 * consistency
     return stability
 
 
@@ -341,7 +418,8 @@ def _compute_recovery_speed(evaluated: List[Dict]) -> float:
     in_miss_streak = False
     miss_count = 0
 
-    for ev in evaluated:
+    # Evaluation rows arrive newest-first; recovery is a forward-time concept.
+    for ev in reversed(evaluated):
         hit = ev.get("hit", False)
         if not hit:
             if not in_miss_streak:
@@ -370,6 +448,11 @@ def _compute_recovery_speed(evaluated: List[Dict]) -> float:
 def _composite_to_weights(
     scorecard: Dict[str, Dict],
     config_weights: Dict[str, float],
+    *,
+    smoothing: float = SMOOTHING,
+    min_weight: float = MIN_WEIGHT,
+    max_weight: float = MAX_WEIGHT,
+    max_weight_delta: float = 1.0,
 ) -> Dict[str, float]:
     """
     Convert composite scores → final weights.
@@ -399,11 +482,15 @@ def _composite_to_weights(
     for model in set(list(cred_weights.keys()) + list(config_weights.keys())):
         cred_w = cred_weights.get(model, 0.0)
         conf_w = config_weights.get(model, 0.10)
-        final[model] = SMOOTHING * cred_w + (1.0 - SMOOTHING) * conf_w
+        proposed = smoothing * cred_w + (1.0 - smoothing) * conf_w
+        final[model] = max(
+            conf_w - max_weight_delta,
+            min(conf_w + max_weight_delta, proposed),
+        )
 
     # Step 3: Clamp
     for model in final:
-        final[model] = max(MIN_WEIGHT, min(MAX_WEIGHT, final[model]))
+        final[model] = max(min_weight, min(max_weight, final[model]))
 
     # Step 4: Re-normalize
     total = sum(final.values())
@@ -413,13 +500,18 @@ def _composite_to_weights(
     return final
 
 
-def _composite_to_confidence(scorecard: Dict[str, Dict]) -> Dict[str, float]:
+def _composite_to_confidence(
+    scorecard: Dict[str, Dict],
+    *,
+    floor: float = CONFIDENCE_FLOOR,
+    ceil: float = CONFIDENCE_CEIL,
+) -> Dict[str, float]:
     """
     Convert composite scores → confidence multipliers.
 
     Maps composite [0, 1] → confidence [CONFIDENCE_FLOOR, CONFIDENCE_CEIL].
-    Used to scale Borda points in ensemble_engine:
-      weighted_pts = weight × confidence × borda_pts
+    This is diagnostic metadata. Dynamic influence is already represented in
+    ``credibility_weights`` and must not be applied twice in the ensemble.
     """
     confidence_map = {}
     for model, card in scorecard.items():
@@ -428,7 +520,7 @@ def _composite_to_confidence(scorecard: Dict[str, Dict]) -> Dict[str, float]:
         else:
             composite = card["composite"]
             # Linear map: composite 0→FLOOR, 1→CEIL
-            conf = CONFIDENCE_FLOOR + composite * (CONFIDENCE_CEIL - CONFIDENCE_FLOOR)
+            conf = floor + composite * (ceil - floor)
             confidence_map[model] = round(conf, 3)
     return confidence_map
 
@@ -440,6 +532,7 @@ def _query_model_history(
     region: str,
     target_date: date,
     lookback_draws: int,
+    target_weekday: Optional[int] = None,
 ) -> Dict[str, List[Dict]]:
     """
     Query model_predictions grouped by date.
@@ -448,25 +541,26 @@ def _query_model_history(
         Dict[date_str, List[prediction_dicts]]
     """
     # Estimate date range (generous — accounts for weekends/holidays)
-    start_date = target_date - timedelta(days=lookback_draws * 2 + 7)
+    day_multiplier = 2 if region.upper() == "XSMB" else 8
+    start_date = target_date - timedelta(days=lookback_draws * day_multiplier + 14)
 
     try:
         q = db.supabase.table("model_predictions") \
-            .select("prediction_date,model_name,pair_1,pair_2,pair_3,pair_4,pair_5,status,hit,matched_pairs") \
+            .select("prediction_date,province,model_name,pair_1,pair_2,pair_3,pair_4,pair_5,status,hit,matched_pairs") \
             .eq("region", region) \
             .eq("status", "success") \
             .gte("prediction_date", start_date.isoformat()) \
             .lt("prediction_date", target_date.isoformat()) \
-            .order("prediction_date", desc=True) \
-            .limit(lookback_draws * 10)  # 10 models × N draws max
+            .order("prediction_date", desc=True)
 
-        result = q.execute()
-        rows = result.data or []
+        rows = _execute_paged(q)
 
         # Group by date
         by_date: Dict[str, List[Dict]] = {}
         for r in rows:
             d = r["prediction_date"]
+            if target_weekday is not None and date.fromisoformat(d).weekday() != target_weekday:
+                continue
             if d not in by_date:
                 by_date[d] = []
             by_date[d].append(r)
@@ -483,18 +577,20 @@ def _query_actual_tails(
     region: str,
     target_date: date,
     lookback_draws: int,
-) -> Dict[str, set]:
+    target_weekday: Optional[int] = None,
+) -> Dict[Any, set]:
     """
     Query actual tails per date for verification.
 
     Returns:
         Dict[date_str, set of tail ints]
     """
-    start_date = target_date - timedelta(days=lookback_draws * 2 + 7)
+    day_multiplier = 2 if region.upper() == "XSMB" else 8
+    start_date = target_date - timedelta(days=lookback_draws * day_multiplier + 14)
 
     try:
         q = db.supabase.table("tails_2d") \
-            .select("draw_date,tail_2d") \
+            .select("draw_date,province,tail_2d") \
             .eq("region", region) \
             .gte("draw_date", start_date.isoformat()) \
             .lt("draw_date", target_date.isoformat())
@@ -502,21 +598,33 @@ def _query_actual_tails(
         if region.upper() == "XSMB":
             q = q.is_("province", "null")
 
-        result = q.execute()
-        rows = result.data or []
+        rows = _execute_paged(q)
 
-        date_tails: Dict[str, set] = {}
+        date_tails: Dict[Any, set] = {}
         for r in rows:
             d = r["draw_date"]
-            if d not in date_tails:
-                date_tails[d] = set()
-            date_tails[d].add(int(r["tail_2d"]))
+            if target_weekday is not None and date.fromisoformat(d).weekday() != target_weekday:
+                continue
+            key: Any = d if region.upper() == "XSMB" else (d, r.get("province"))
+            date_tails.setdefault(key, set()).add(int(r["tail_2d"]))
 
         return date_tails
 
     except Exception as e:
         print(f"     ⚠️  Credibility actual tails query failed: {e}")
         return {}
+
+
+def _execute_paged(query, page_size: int = 1000) -> List[Dict]:
+    """Execute a Supabase query without silently accepting PostgREST's row cap."""
+    rows: List[Dict] = []
+    offset = 0
+    while True:
+        page = query.range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
 
 
 def _query_ensemble_predictions(
@@ -531,7 +639,8 @@ def _query_ensemble_predictions(
     Returns:
         Dict[date_str, list of top-3 pair ints]
     """
-    start_date = target_date - timedelta(days=lookback_draws * 2 + 7)
+    day_multiplier = 2 if region.upper() == "XSMB" else 8
+    start_date = target_date - timedelta(days=lookback_draws * day_multiplier + 14)
 
     try:
         q = db.supabase.table("prediction_results") \
@@ -567,6 +676,7 @@ def _query_ensemble_predictions(
 def _extract_model_predictions(
     model_history: Dict[str, List[Dict]],
     model_name: str,
+    lookback_draws: Optional[int] = None,
 ) -> List[Dict]:
     """
     Extract and sort a specific model's predictions (most recent first).
@@ -576,41 +686,41 @@ def _extract_model_predictions(
     """
     result = []
     for date_str, records in model_history.items():
-        # Extract records for this specific model
         model_records = [r for r in records if r["model_name"] == model_name]
-        if not model_records:
-            continue
-
-        # Interleave predictions by rank across all provinces for this date
-        combined_pairs = []
-        for rank in range(1, 6):
-            for r in model_records:
-                val = r.get(f"pair_{rank}")
-                if val is not None and int(val) not in combined_pairs:
-                    combined_pairs.append(int(val))
-
-        # Check if ANY province hit
-        hit = any(r.get("hit") for r in model_records)
-        matched = []
         for r in model_records:
-            if r.get("matched_pairs"):
-                matched.extend(r.get("matched_pairs"))
-
-        result.append({
-            "date": date_str,
-            "predicted_pairs": combined_pairs,
-            "hit": hit,
-            "matched_pairs": list(set(matched)),
-        })
+            predicted_pairs = []
+            for rank in range(1, 6):
+                value = r.get(f"pair_{rank}")
+                if value is not None and int(value) not in predicted_pairs:
+                    predicted_pairs.append(int(value))
+            result.append({
+                "date": date_str,
+                "province": r.get("province"),
+                "predicted_pairs": predicted_pairs,
+                "hit": bool(r.get("hit")),
+                "matched_pairs": list(set(r.get("matched_pairs") or [])),
+            })
 
     # Sort by date descending (most recent first)
     result.sort(key=lambda x: x["date"], reverse=True)
-    return result
+    if lookback_draws is None:
+        return result
+
+    limited: List[Dict] = []
+    counts: Dict[str, int] = defaultdict(int)
+    for row in result:
+        province_key = str(row.get("province") or "all")
+        if counts[province_key] >= lookback_draws:
+            continue
+        limited.append(row)
+        counts[province_key] += 1
+    return limited
 
 
 def _align_with_actuals(
     model_preds: List[Dict],
-    actual_tails: Dict[str, set],
+    actual_tails: Dict[Any, set],
+    ensemble_predictions: Optional[Dict[str, List[int]]] = None,
 ) -> List[Dict]:
     """
     Align model predictions with actual tails, computing MRR per draw.
@@ -621,10 +731,12 @@ def _align_with_actuals(
     evaluated = []
     for pred in model_preds:
         d = pred["date"]
-        if d not in actual_tails:
+        province = pred.get("province")
+        actual_key: Any = (d, province) if province is not None else d
+        if actual_key not in actual_tails:
             continue
 
-        actual = actual_tails[d]
+        actual = actual_tails[actual_key]
         predicted = pred["predicted_pairs"]
 
         # Compute MRR@3
@@ -639,11 +751,12 @@ def _align_with_actuals(
 
         evaluated.append({
             "date": d,
+            "province": province,
             "predicted_pairs": predicted,
             "actual_tails": actual,
             "mrr": mrr,
             "hit": hit,
-            "ensemble_top3": [],  # Will be filled if available
+            "ensemble_top3": (ensemble_predictions or {}).get(d, []),
         })
 
     return evaluated
@@ -667,11 +780,18 @@ def _cold_start_scorecard(model_name: str) -> Dict:
 
 def _get_default_weights(region: str) -> Dict[str, float]:
     """Get config weights for region (fallback to hardcoded defaults)."""
-    if region.upper() == "XSMB":
-        try:
-            from src.xsmb_ensemble.ensemble_engine import DEFAULT_WEIGHTS
-            return DEFAULT_WEIGHTS.copy()
-        except ImportError:
+    try:
+        if region.upper() == "XSMB":
+            from src.xsmb_ensemble.ensemble_engine import ACTIVE_MODEL_NAMES, DEFAULT_WEIGHTS
+            active = {name: float(DEFAULT_WEIGHTS[name]) for name in ACTIVE_MODEL_NAMES}
+            total = sum(active.values())
+            return {name: weight / total for name, weight in active.items()}
+        from src.xsmn_ensemble.ensemble_engine import _get_region_config
+        configured = _get_region_config("XSMN")["weights"]
+        active_models = ("frequency", "gap_overdue", "markov", "xgboost_core", "lstm", "cdm")
+        return {name: float(configured[name]) for name in active_models}
+    except (ImportError, KeyError):
+        if region.upper() == "XSMB":
             return {
                 "frequency": 0.10, "gap_overdue": 0.10,
                 "markov": 0.13, "xgboost_core": 0.17,
@@ -679,15 +799,11 @@ def _get_default_weights(region: str) -> Dict[str, float]:
                 "stats_freq_gap": 0.09, "chisquare_gof": 0.08,
                 "chisquare_independence": 0.09,
             }
-    else:
-        try:
-            from src.xsmn_ensemble.ensemble_engine import DEFAULT_WEIGHTS
-            return DEFAULT_WEIGHTS.copy()
-        except ImportError:
-            return {
-                "frequency": 0.15, "gap_overdue": 0.15,
-                "markov": 0.20, "xgboost_core": 0.30, "lstm": 0.20,
-            }
+        return {
+            "frequency": 1.0 / 6.0, "gap_overdue": 1.0 / 6.0,
+            "markov": 1.0 / 6.0, "xgboost_core": 1.0 / 6.0,
+            "lstm": 1.0 / 6.0, "cdm": 1.0 / 6.0,
+        }
 
 
 # ─── DB Cache ────────────────────────────────────────────────────────────────
@@ -776,11 +892,12 @@ def _build_scoring_log(
 
 # ─── Empty Result ────────────────────────────────────────────────────────────
 
-def _empty_result(config_weights: Dict[str, float]) -> Dict:
+def _empty_result(config_weights: Dict[str, float], reason: str = "no history") -> Dict:
     """Return empty result when no history is available."""
     return {
         "credibility_weights": config_weights.copy(),
         "confidence_map": {m: 1.0 for m in config_weights},
         "scorecard": {},
-        "scoring_log": "  ⚠️  Credibility: using default weights (no history)",
+        "scoring_log": f"  ⚠️  Credibility: using fixed weights ({reason})",
+        "using_dynamic_weights": False,
     }

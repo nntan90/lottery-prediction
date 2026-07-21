@@ -253,10 +253,9 @@ def test_repository_uses_read_only_keyset_pagination_and_strict_cutoff() -> None
     assert all(not operation.startswith(("insert", "update", "upsert", "delete")) for operation, _ in db.supabase.calls)
 
 
-def test_production_entrypoints_do_not_import_cmr() -> None:
+def test_ensemble_engines_and_workflows_do_not_embed_cmr_logic() -> None:
     root = Path(__file__).resolve().parents[1]
-    production_files = [root / "src/scripts/predict_ensemble.py"]
-    production_files.extend((root / "src/xsmn_ensemble").glob("*.py"))
+    production_files = list((root / "src/xsmn_ensemble").glob("*.py"))
     production_files.extend((root / ".github/workflows").glob("*.yml"))
 
     assert all("xsmn_coupled" not in path.read_text(encoding="utf-8") for path in production_files)

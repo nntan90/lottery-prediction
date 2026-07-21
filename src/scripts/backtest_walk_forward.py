@@ -1,5 +1,9 @@
 """
-Run a walk-forward backtest from saved prediction_results.
+Evaluate saved out-of-time prediction_results.
+
+This command does not replay models or features. It evaluates immutable
+predictions that were generated before each draw. Use the BMAD deferred-work
+item for the separate full model-replay backtest.
 
 Usage:
   python src/scripts/backtest_walk_forward.py --from-date 2026-01-01 --to-date 2026-05-10
@@ -28,19 +32,28 @@ def _query_range(
     end: date,
     region: str | None = None,
 ) -> list[dict]:
-    q = (
-        db.supabase.table(table)
-        .select("*")
-        .gte(date_col, start.isoformat())
-        .lte(date_col, end.isoformat())
-    )
-    if region:
-        q = q.eq("region", region)
-    return q.execute().data or []
+    """Read the complete date range without accepting PostgREST's row cap."""
+    page_size = 1000
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        q = (
+            db.supabase.table(table)
+            .select("*")
+            .gte(date_col, start.isoformat())
+            .lte(date_col, end.isoformat())
+        )
+        if region:
+            q = q.eq("region", region)
+        page = q.range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Walk-forward backtest for 2D tail predictions")
+    parser = argparse.ArgumentParser(description="Saved out-of-time evaluation for 2D tail predictions")
     parser.add_argument("--from-date", type=str, help="Start date, YYYY-MM-DD")
     parser.add_argument("--to-date", type=str, help="End date, YYYY-MM-DD")
     parser.add_argument("--days", type=int, default=90, help="Lookback days if --from-date is omitted")
@@ -61,6 +74,7 @@ def main() -> None:
     profit_rows = _query_range(db, "profit_tracking", "prediction_date", start, end, profit_region)
 
     report = build_backtest_report(predictions, model_predictions, profit_rows)
+    report["report_type"] = "saved_out_of_time_predictions"
     print(format_backtest_report(report))
 
     if args.output_json:

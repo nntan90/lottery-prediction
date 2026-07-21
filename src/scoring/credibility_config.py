@@ -25,10 +25,10 @@ RECENCY_DECAY: float = 0.85
 
 # ─── Lookback Draws ─────────────────────────────────────────────────────────
 # How many past draws to evaluate for credibility.
-# XSMB: daily → 14 draws ≈ 2 weeks
-# XSMN: weekly per province → 8 draws ≈ 2 months
-LOOKBACK_XSMB: int = 14
-LOOKBACK_XSMN: int = 8
+# XSMB: daily → 30 draws ≈ 1 month
+# XSMN: same-weekday per province → 52 draws ≈ 1 year
+LOOKBACK_XSMB: int = 30
+LOOKBACK_XSMN: int = 52
 
 # ─── Streak Momentum Mapping ────────────────────────────────────────────────
 # Consecutive hit/miss patterns → momentum score.
@@ -60,8 +60,9 @@ CONFIDENCE_FLOOR: float = 0.4   # Worst model still gets 40% of its Borda points
 CONFIDENCE_CEIL: float = 1.2    # Best model gets up to 120% boost
 
 # ─── Cold-Start Default ─────────────────────────────────────────────────────
-# Models with < MIN_EVALUATED draws use config weight directly.
-MIN_EVALUATED: int = 3          # Need at least 3 evaluated draws
+# Models below the region threshold use config weight directly.
+MIN_EVALUATED_XSMB: int = 10
+MIN_EVALUATED_XSMN: int = 30
 COLD_START_CONFIDENCE: float = 0.8  # Conservative confidence for new models
 
 
@@ -82,7 +83,7 @@ def load_credibility_config_from_yaml() -> dict:
         with open(config_path, "r") as f:
             full_cfg = yaml.safe_load(f)
         cred_cfg = full_cfg.get("credibility", {})
-        if not cred_cfg or not cred_cfg.get("enabled", True):
+        if not cred_cfg:
             return {}
         return cred_cfg
     except Exception:

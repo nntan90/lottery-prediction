@@ -13,8 +13,31 @@ import time
 from src.utils.retry import retry_with_backoff
 
 class XSMNCrawler:
-    """Crawler for XSMN (Southern Vietnam Lottery) results from Minh Ngoc"""
-    
+    """Crawler for XSMN results with station-level completeness validation."""
+
+    EXPECTED_PRIZE_COUNTS = {
+        "special_prize": 1,
+        "first_prize": 1,
+        "second_prize": 1,
+        "third_prize": 2,
+        "fourth_prize": 7,
+        "fifth_prize": 1,
+        "sixth_prize": 3,
+        "seventh_prize": 1,
+        "eighth_prize": 1,
+    }
+
+    @classmethod
+    def validate_result(cls, result: dict) -> tuple[bool, list[str]]:
+        """Validate an XSMN station record before it enters model history."""
+        errors: list[str] = []
+        for field, expected_count in cls.EXPECTED_PRIZE_COUNTS.items():
+            value = result.get(field)
+            values = value if isinstance(value, list) else ([] if value in (None, "") else [value])
+            numeric_values = [item for item in values if str(item).isdigit()]
+            if len(numeric_values) != expected_count:
+                errors.append(f"{field}: expected {expected_count}, got {len(numeric_values)}")
+        return not errors, errors
     # Province mapping (Slug -> Minh Ngoc Display Name)
     PROVINCE_MAP = {
         'tp-hcm': 'TP. HCM',  # Note: Minh Ngoc uses space "TP. HCM"

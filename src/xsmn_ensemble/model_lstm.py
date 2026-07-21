@@ -18,6 +18,7 @@ Model được train bởi train_lstm.py và lưu trên Supabase Storage.
 Nếu không có model trained → fallback safe (trả lỗi, ensemble vẫn chạy).
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -28,6 +29,17 @@ from typing import Dict, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.xsmn_ensemble.data_utils import _load_tails_by_draws
+
+
+def _deterministic_training_seed(
+    region: str,
+    province: Optional[str],
+    target_date: Optional[date],
+) -> int:
+    """Build a stable seed so an emergency fallback is reproducible."""
+    seed_material = f"{region}|{province or 'all'}|{target_date or 'latest'}"
+    digest = hashlib.sha256(seed_material.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 10_000
 
 
 # ── Lazy import torch (chỉ import khi cần) ──────────────────────────────────
@@ -147,12 +159,12 @@ class LotteryLSTM:
             seed: random seed for reproducibility
         """
         torch, nn = _ensure_torch()
-        if self.model is None:
-            self._build_model()
-
-        # Reproducibility
+        # Seed before model construction so parameter initialization and
+        # training are both reproducible in the opt-in fallback path.
         torch.manual_seed(seed)
         np.random.seed(seed)
+        if self.model is None:
+            self._build_model()
 
         # Train/Val split (chronological — không shuffle vì time series)
         n_total = len(sequences)
@@ -309,7 +321,8 @@ def predict_lstm(
     Model 5: LSTM/GRU sequence prediction.
 
     Nếu có model đã train → load và predict.
-    Nếu KHÔNG có model → train on-the-fly từ history rồi predict.
+    Nếu không có model → XSMN trả lỗi an toàn; env compatibility flag mới
+    cho phép train on-the-fly với seed ổn định.
 
     Args:
         db: LotteryDB instance
@@ -353,7 +366,11 @@ def predict_lstm(
             }
 
         # Load history
-        history = _load_tails_by_draws(db, region, province, n_draws, before_date=target_date)
+        target_weekday = target_date.weekday() if region.upper() == "XSMN" and target_date else None
+        history = _load_tails_by_draws(
+            db, region, province, n_draws, before_date=target_date,
+            target_weekday=target_weekday,
+        )
         n = len(history)
 
         if n < seq_len + 5:
@@ -405,11 +422,28 @@ def predict_lstm(
 
         # Strategy 2: Nếu không có pre-trained → train on-the-fly
         if not used_pretrained:
+            allow_fallback = os.getenv("XSMN_LSTM_ALLOW_ON_THE_FLY", "false").lower() in {
+                "1", "true", "yes",
+            }
+            if region.upper() == "XSMN" and not allow_fallback:
+                return {
+                    "model_name": "lstm",
+                    "province": province,
+                    "top_pairs": [],
+                    "n_draws_used": n,
+                    "model_version": None,
+                    "status": "error",
+                    "error_message": (
+                        "Không có pre-trained LSTM; on-the-fly fallback bị tắt. "
+                        "Set XSMN_LSTM_ALLOW_ON_THE_FLY=true để bật chế độ tương thích."
+                    ),
+                    "execution_time_ms": int((time.time() - start_ms) * 1000),
+                }
             if training_data is not None:
                 sequences, labels = training_data
                 if len(sequences) >= 10:
                     print(f"     🔄 Training LSTM on-the-fly ({len(sequences)} samples, val_split=20%)...")
-                    dynamic_seed = int(time.time()) % 10000
+                    dynamic_seed = _deterministic_training_seed(region, province, target_date)
                     lstm.train_model(sequences, labels, epochs=80, lr=0.002,
                                      val_split=0.2, patience=10, seed=dynamic_seed, verbose=False)
                     model_version = "on_the_fly"

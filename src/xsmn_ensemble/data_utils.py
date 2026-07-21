@@ -9,6 +9,7 @@ def _load_tails_by_draws(
     province: Optional[str] = None,
     n_draws: int = 250,
     before_date: Optional[date] = None,
+    target_weekday: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Lấy N kỳ quay gần nhất của 1 province từ tails_2d.
@@ -44,7 +45,12 @@ def _load_tails_by_draws(
 
         all_rows.extend(chunk)
 
-        unique_dates = set(r["draw_date"] for r in all_rows)
+        unique_dates = {
+            r["draw_date"]
+            for r in all_rows
+            if target_weekday is None
+            or date.fromisoformat(r["draw_date"]).weekday() == target_weekday
+        }
         if len(unique_dates) >= n_draws:
             break
 
@@ -62,6 +68,8 @@ def _load_tails_by_draws(
 
     # Consumers treat the end of the frame as the newest draw.
     grouped["draw_date"] = pd.to_datetime(grouped["draw_date"])
+    if target_weekday is not None:
+        grouped = grouped[grouped["draw_date"].dt.weekday == target_weekday]
     grouped = grouped.sort_values("draw_date").tail(n_draws)
 
     return grouped.reset_index(drop=True)

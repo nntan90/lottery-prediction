@@ -75,6 +75,30 @@ class TestXSMNCrawlerStructure(unittest.TestCase):
             self.assertIsInstance(name, str)
             self.assertGreater(len(name), 0, f"Empty name for slug '{slug}'")
 
+    def test_complete_result_requires_all_18_prize_numbers(self):
+        result = {
+            "special_prize": "123456",
+            "first_prize": "12345",
+            "second_prize": ["12345"],
+            "third_prize": ["1", "2"],
+            "fourth_prize": [str(i) for i in range(7)],
+            "fifth_prize": ["1"],
+            "sixth_prize": ["1", "2", "3"],
+            "seventh_prize": ["1"],
+            "eighth_prize": "12",
+        }
+
+        valid, errors = self.crawler.validate_result(result)
+
+        self.assertTrue(valid)
+        self.assertEqual(errors, [])
+
+    def test_incomplete_result_is_rejected(self):
+        valid, errors = self.crawler.validate_result({"special_prize": "123456"})
+
+        self.assertFalse(valid)
+        self.assertTrue(any("fourth_prize" in error for error in errors))
+
 
 class TestCrawlerRetryIntegration(unittest.TestCase):
     """Verify retry decorator is applied to crawlers."""

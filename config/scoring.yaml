@@ -1,14 +1,15 @@
 # =============================================================================
-# scoring.yaml — Expert Borda Scoring Configuration (v3.2 — 5 Models)
+# scoring.yaml — Expert Borda Scoring Configuration (XSMN v3.5 — 6 Models)
 # Externalized from ensemble_engine.py for A/B testing without code changes
 # =============================================================================
 #
-# v3.2 Upgrade: 5 models thay vì 3
+# XSMN v3.5 active models
 #   - Model 1 (frequency): Pure frequency/hot-cool
 #   - Model 2 (gap_overdue): Pure gap/overdue
 #   - Model 3 (markov): Markov Chain transition
 #   - Model 4 (xgboost_core): XGBoost ML classifier
 #   - Model 5 (lstm): LSTM/GRU sequence model
+#   - Model 6 (cdm): Dirichlet-Multinomial posterior scorer
 #
 # Trọng số khởi đầu (v3.2.1 — calibrated):
 #   Frequency=0.20, Gap=0.20, Markov=0.20, XGBoost=0.25, LSTM=0.15
@@ -45,7 +46,7 @@ borda_points:
 
 # --- Consensus Rules ---
 # Bonus when multiple models agree on the same pair
-# With 5 models × N provinces, consensus thresholds scale dynamically
+# Consensus counts independent model families, not model@province sources.
 consensus:
   gold_threshold: 3       # Number of models for Gold consensus
   silver_threshold: 2     # Number of models for Silver consensus
@@ -266,19 +267,22 @@ xsmb_v5:
 # XSMN-Specific Overrides (v3.3 — Rebalanced Scoring)
 # =============================================================================
 xsmn_overrides:
+  # Neutral fixed baseline: all six independent model families start equally.
+  # Credibility may move them only after both provinces meet the sample gate.
   weights:
-    frequency: 0.15             # ↑ tăng
-    gap_overdue: 0.15           # ↑ tăng
-    markov: 0.20                # ↑ tăng
-    xgboost_core: 0.20          # ↓ giảm vì model bị cũ
-    lstm: 0.15                  # ↓ giảm
-    cdm: 0.15                   # ↑ tăng
+    frequency: 0.16666666666666666
+    gap_overdue: 0.16666666666666666
+    markov: 0.16666666666666666
+    xgboost_core: 0.16666666666666666
+    lstm: 0.16666666666666666
+    cdm: 0.16666666666666666
 
   consensus:
     gold_threshold: 4
     silver_threshold: 3
     gold_bonus: 1.5             # ↑ tăng (tương đương XSMB)
     silver_bonus: 0.5           # ↑ tăng
+    cap_to_base: true           # Heuristic bonus cannot exceed model evidence
 
   history:
     overdue_penalty: -0.5       # XSMN penalty applies only at 3/3 same-weekday hits
@@ -296,6 +300,10 @@ xsmn_overrides:
     enabled: true            # Phạt nhẹ số vừa ra ở kỳ gần nhất của cùng tỉnh
     penalty: -0.25           # Áp dụng cho đài xổ >1 lần/tuần như TP.HCM
 
+  combo_selector:
+    history_bonus_weight: 0.30
+    history_prior_draws: 30  # Empirical-Bayes shrinkage for sparse pair history
+
 # =============================================================================
 # Model Credibility Scoring System
 # =============================================================================
@@ -306,11 +314,14 @@ xsmn_overrides:
 credibility:
   enabled: true
   lookback_xsmb: 30          # Number of past draws to evaluate (XSMB daily)
-  lookback_xsmn: 8           # Number of past draws to evaluate (XSMN weekly)
+  lookback_xsmn: 52          # Exact same-weekday draws per province (~1 year)
+  min_evaluated_xsmb: 10     # Below this threshold fixed weights are used
+  min_evaluated_xsmn: 30     # Avoid tuning six models from a tiny weekly sample
   recency_decay: 0.85        # Exponential decay per draw (15% loss/draw)
   smoothing: 0.60            # 60% credibility, 40% config weight
   min_weight: 0.05           # Floor per model
   max_weight: 0.35           # Ceiling per model
+  max_weight_delta: 0.10     # Maximum move from the fixed anchor per update
   confidence_floor: 0.4      # Minimum Borda confidence multiplier
   confidence_ceil: 1.2       # Maximum Borda confidence multiplier
   dim_weights:

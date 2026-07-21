@@ -1,13 +1,14 @@
 """
-ensemble_engine.py — Weighted Borda Count + CombSUM Aggregation Engine (v3.3)
-Kết hợp output từ 5 sub-models thành Top 3 cuối cùng.
+ensemble_engine.py — Weighted Borda Count + CombSUM Aggregation Engine (v3.5)
+Kết hợp output từ 6 sub-models thành Top 3 cuối cùng.
 
-Models (v3.2+):
+Models (v3.5):
   1. frequency      — Pure frequency/hot-cool scoring
   2. gap_overdue    — Pure gap/overdue scoring
   3. markov         — Markov Chain transition
   4. xgboost_core   — XGBoost ML classifier
   5. lstm           — LSTM/GRU sequence model
+  6. cdm            — Dirichlet-Multinomial posterior scorer
 
 Scoring config loaded from config/scoring.yaml (falls back to hardcoded defaults).
 XSMB-specific overrides: xsmb_overrides section in scoring.yaml.
@@ -28,7 +29,7 @@ Aggregation Methods:
 
 Guardrails:
   - 1-2 model lỗi → ensemble vẫn chạy với model còn lại
-  - XSMN: giữ nguyên logic v3.2 (backward compatible)
+  - XSMN: six-model merged scope with backward-compatible storage contracts
 """
 
 import os
@@ -93,6 +94,9 @@ COMBSUM_METHOD = _comb_cfg.get("method", "minmax")
 
 # Minimum model agreement
 MIN_MODELS_AGREE = _CFG.get("min_models_agree", 1)
+_XSMN_COMBO_CFG = _CFG.get("xsmn_overrides", {}).get("combo_selector", {})
+COMBO_HISTORY_BONUS_WEIGHT = float(_XSMN_COMBO_CFG.get("history_bonus_weight", 0.30))
+COMBO_HISTORY_PRIOR_DRAWS = int(_XSMN_COMBO_CFG.get("history_prior_draws", 30))
 
 
 # ─── XSMB-Specific Config Resolver (v3.3) ──────────────────────────────────
@@ -354,6 +358,8 @@ def _build_candidate_shortlist(
     sorted_pairs: list[tuple[int, float]],
     pair_model_count: dict[int, int],
     pair_unique_models: dict[int, set],
+    pair_model_families: Optional[dict[int, set]] = None,
+    pair_provinces: Optional[dict[int, set]] = None,
     *,
     limit: int = 10,
 ) -> tuple[list[dict], str]:
@@ -366,12 +372,16 @@ def _build_candidate_shortlist(
         display_models = [_display_source(s) for s in source_keys]
         support_count = pair_model_count.get(pair, 0)
 
+        model_families = (pair_model_families or {}).get(pair, set())
+        provinces = (pair_provinces or {}).get(pair, set())
         candidates.append({
             "rank": rank,
             "pair": pair,
             "score": round(score, 4),
             "support_count": support_count,
             "unique_model_count": len(source_keys),
+            "model_family_count": len(model_families) or len(source_keys),
+            "province_count": len(provinces),
             "models": source_keys,
             "sources": source_keys,
         })
@@ -390,7 +400,9 @@ def _candidate_hit_strength(candidate: dict, max_support: int) -> float:
     """Convert an ensemble candidate into a bounded hit-strength proxy."""
     score_strength = float(candidate.get("score_norm", 0.0))
     support_count = int(candidate.get("support_count", 0))
-    unique_model_count = int(candidate.get("unique_model_count", 0))
+    unique_model_count = int(
+        candidate.get("model_family_count", candidate.get("unique_model_count", 0))
+    )
     support_strength = min(support_count / max(max_support, 1), 1.0)
     model_strength = min(unique_model_count / max(max_support, 1), 1.0)
 
@@ -403,7 +415,7 @@ def _candidate_hit_strength(candidate: dict, max_support: int) -> float:
 
 
 def _combo_history_strength(combo: tuple[int, ...], history_tail_sets: Optional[list[set[int]]] = None) -> float:
-    """Score how often a combo and its internal pairs co-hit in matched history."""
+    """Score co-hits with shrinkage toward zero for sparse matched history."""
     if not history_tail_sets:
         return 0.0
 
@@ -424,7 +436,9 @@ def _combo_history_strength(combo: tuple[int, ...], history_tail_sets: Optional[
 
     combo_rate = combo_hits / len(history_tail_sets)
     pair_rate = pair_hits / max(pair_checks, 1)
-    return 0.70 * combo_rate + 0.30 * pair_rate
+    raw_strength = 0.70 * combo_rate + 0.30 * pair_rate
+    shrinkage = len(history_tail_sets) / (len(history_tail_sets) + COMBO_HISTORY_PRIOR_DRAWS)
+    return raw_strength * shrinkage
 
 
 def _score_two_of_three_combo(
@@ -432,7 +446,7 @@ def _score_two_of_three_combo(
     candidate_by_pair: dict[int, dict],
     history_tail_sets: Optional[list[set[int]]] = None,
 ) -> float:
-    """Estimate the relative chance that at least two numbers in a combo hit."""
+    """Compute a relative ranking score for the >=2/3 objective."""
     probs = [_candidate_hit_strength(candidate_by_pair[p], max_support=6) for p in combo]
     p1, p2, p3 = probs
     p_exact_two = (
@@ -445,7 +459,7 @@ def _score_two_of_three_combo(
     # Same province-pair history is directly aligned with the XSMN/all win
     # rule, so it must be strong enough to break pure individual-score ties.
     history_strength = _combo_history_strength(combo, history_tail_sets)
-    history_bonus = (history_strength ** 2) * 0.90
+    history_bonus = (history_strength ** 2) * COMBO_HISTORY_BONUS_WEIGHT
     return p_exact_two + p_three + support_bonus + history_bonus
 
 
@@ -467,6 +481,7 @@ def _select_best_two_of_three_combo(
             "top_pairs": top_pairs,
             "combo_score": sum(score for _, score in top_pairs),
             "candidate_pool": pool,
+            "score_type": "ranking_score_uncalibrated",
         }
 
     scores = [float(candidate.get("score", 0.0)) for candidate in pool]
@@ -530,6 +545,7 @@ def _select_best_two_of_three_combo(
             for pair in selected_pairs
         ],
         "history_strength": round(_combo_history_strength(tuple(selected_pairs), history_tail_sets), 4),
+        "score_type": "ranking_score_uncalibrated",
     }
 
 
@@ -611,6 +627,7 @@ def compute_global_borda(
             "consensus_pairs": [],
             "candidate_log": "",
             "top_candidates": [],
+            "effective_weights": w,
         }
 
     # ── Scoring Mode Note ──
@@ -621,6 +638,8 @@ def compute_global_borda(
     pair_scores: dict[int, float] = {}
     pair_model_count: dict[int, int] = {}  # đếm tổng model results chọn pair
     pair_unique_models: dict[int, set] = {}  # XSMN counts unique model@province sources per pair
+    pair_model_families: dict[int, set] = {}
+    pair_provinces: dict[int, set] = {}
     pair_model_names: dict[int, list] = {}  # track source names per pair
 
     contributing = []
@@ -651,6 +670,9 @@ def compute_global_borda(
                 if pair not in pair_unique_models:
                     pair_unique_models[pair] = set()
                 pair_unique_models[pair].add(source)
+                pair_model_families.setdefault(pair, set()).add(model_name)
+                if prov and prov != "unknown":
+                    pair_provinces.setdefault(pair, set()).add(prov)
                 if pair not in pair_model_names:
                     pair_model_names[pair] = []
                 pair_model_names[pair].append(source)
@@ -663,11 +685,11 @@ def compute_global_borda(
         }
 
     # ── Consensus bonus ──
-    # XSMN pools all selected pairs from the two daily provinces first, then
-    # scores/ranks once globally. Consensus therefore counts unique model@province
-    # sources, e.g. frequency@tp-hcm and frequency@dong-thap are two sources.
+    # Consensus is based on independent model families. Source and province
+    # counts are still retained for audit, but the same algorithm at two
+    # provinces cannot manufacture an extra model vote.
     for pair in list(pair_scores.keys()):
-        unique_count = len(pair_unique_models.get(pair, set()))
+        unique_count = len(pair_model_families.get(pair, set()))
         base_score = pair_scores[pair]
         bonus = 0.0
         
@@ -750,7 +772,12 @@ def compute_global_borda(
     # ── Sort & pick top N (with optional diversity enforcement) ──
     sorted_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
     top_candidates, candidate_log = _build_candidate_shortlist(
-        sorted_pairs, pair_model_count, pair_unique_models, limit=10
+        sorted_pairs,
+        pair_model_count,
+        pair_unique_models,
+        pair_model_families,
+        pair_provinces,
+        limit=10,
     )
 
     if use_diversity and len(sorted_pairs) > top_n_output:
@@ -790,12 +817,20 @@ def compute_global_borda(
         log_lines.append(f"🔸 <b>[{pair:02d}]</b> = {score:.2f}đ")
         log_lines.append(f"   ├ Cơ sở: {base_points:.2f}đ từ {', '.join(models_hit)}")
 
-        # 2. Consensus Bonus (unique models)
-        c_unique = len(pair_unique_models.get(pair, set()))
+        # 2. Consensus Bonus (independent model families)
+        c_unique = len(pair_model_families.get(pair, set()))
+        displayed_bonus = 0.0
         if c_unique >= cons_gold_threshold:
-            log_lines.append(f"   ├ Đồng thuận: +{bonus_gold}đ ({c_unique} nguồn đồng ý)")
+            displayed_bonus = bonus_gold
         elif c_unique >= cons_silver_threshold:
-            log_lines.append(f"   ├ Đồng thuận: +{bonus_silver}đ ({c_unique} nguồn đồng ý)")
+            displayed_bonus = bonus_silver
+        if displayed_bonus > 0:
+            if cap_to_base:
+                displayed_bonus = min(displayed_bonus, max(abs(base_points), 0.5))
+            log_lines.append(
+                f"   ├ Đồng thuận: +{displayed_bonus:.2f}đ "
+                f"({c_unique} model độc lập đồng ý)"
+            )
 
         # 3. History Bonus
         h_count = recent_counts.get(pair, 0)
@@ -838,7 +873,10 @@ def compute_global_borda(
 
         scoring_log.append('\n'.join(log_lines))
 
-    consensus_pairs_list = [p for p, models in pair_unique_models.items() if len(models) >= cons_silver_threshold]
+    consensus_pairs_list = [
+        pair for pair, families in pair_model_families.items()
+        if len(families) >= cons_silver_threshold
+    ]
 
     # Determine ensemble method label
     if is_xsmb:
@@ -855,6 +893,7 @@ def compute_global_borda(
         'scoring_log': '\n\n'.join(scoring_log),
         'candidate_log': candidate_log,
         'top_candidates': top_candidates,
+        'effective_weights': w,
     }
 
 
@@ -1090,6 +1129,8 @@ def compute_xsmn_province_representative_ensemble(
         "top_candidates": top_candidates,
         "province_outputs": province_outputs,
         "province_representatives": representatives,
+        "target_provinces": list(provinces),
+        "effective_weights": next(iter(province_outputs.values()), {}).get("effective_weights", {}),
     }
 
 
@@ -1303,9 +1344,12 @@ def compute_xsmn_merged_combo_selector_ensemble(
         "top_candidates": merged_top_candidates,
         "selected_province": "all",
         "combo_score": merged_combo_output.get("combo_score", 0.0),
+        "combo_score_type": merged_combo_output.get("score_type", "ranking_score_uncalibrated"),
         "province_outputs": province_outputs,
         "merged_combo_output": merged_combo_output,
         "province_representatives": representatives,
+        "target_provinces": list(provinces),
+        "effective_weights": global_output.get("effective_weights", {}),
     }
 
 
@@ -1321,12 +1365,22 @@ def format_ensemble_result(
     Returns:
         Dict ready for supabase.table('prediction_results').upsert(...)
     """
-    top = ensemble_output["top_pairs"]
+    top = list(ensemble_output["top_pairs"])
 
     if len(top) < 3:
         # Pad with -1 if not enough results
         while len(top) < 3:
             top.append((-1, 0.0))
+
+    run_metadata = {
+        "score_type": ensemble_output.get("combo_score_type", "ranking_score_uncalibrated"),
+        "target_provinces": ensemble_output.get("target_provinces", []),
+        "effective_weights": ensemble_output.get("effective_weights", {}),
+        "combo_score": ensemble_output.get("combo_score"),
+        "data_cutoff": ensemble_output.get("data_cutoff"),
+        "model_versions": ensemble_output.get("model_versions", {}),
+        "top_candidates": ensemble_output.get("top_candidates", [])[:10],
+    }
 
     return {
         "prediction_date": target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date),
@@ -1340,7 +1394,7 @@ def format_ensemble_result(
         "prob_1": top[0][1],
         "prob_2": top[1][1],
         "prob_3": top[2][1],
-        "model_version": "ensemble_v3.2",
+        "model_version": "ensemble_v3.5",
         "ensemble_method": ensemble_output["ensemble_method"],
         "contributing_models": ensemble_output["contributing_models"],
         "final_scores": [s for _, s in top[:3]],
@@ -1349,6 +1403,7 @@ def format_ensemble_result(
         "tail_set": None,
         "scoring_log": ensemble_output.get('scoring_log', ''),
         "candidate_log": ensemble_output.get('candidate_log', ''),
+        "run_metadata": run_metadata,
     }
 
 
@@ -1361,7 +1416,7 @@ def format_model_prediction_log(
     """
     Format sub-model result thành dict cho model_predictions table.
     """
-    top = model_result.get("top_pairs", [])
+    top = list(model_result.get("top_pairs", []))
 
     # Pad to 5
     while len(top) < 5:

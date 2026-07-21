@@ -187,9 +187,10 @@ CREATE TABLE IF NOT EXISTS prediction_results (
   ensemble_method      VARCHAR(50),
   contributing_models  TEXT[],
   final_scores         FLOAT[],
+  run_metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
 
   -- Kết quả verify (điền sau khi có KQXS)
-  hit             BOOLEAN,             -- TRUE nếu ít nhất 1 cặp trúng
+  hit             BOOLEAN,             -- XSMN/all: TRUE nếu >=2/3; legacy scopes may use any-hit
   matched_pairs   SMALLINT[],          -- danh sách cặp thực sự trúng
   tail_set        SMALLINT[],          -- toàn bộ TAIL_SET ngày đó (để debug)
   verified_at     TIMESTAMP,
