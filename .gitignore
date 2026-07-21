@@ -60,6 +60,9 @@ tmp/
 # Weekly report XML files (local + GH artifact, not committed)
 reports/*.xml
 
+# BMAD personal installer answers; team overrides live in _bmad/custom/.
+_bmad/config.user.toml
+
 # Data files (optional - uncomment nếu không muốn commit data)
 # data/*.csv
 # data/*.json

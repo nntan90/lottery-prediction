@@ -6,12 +6,27 @@
 ---
 
 ## ✨ Tính Năng Chính
-- 🧠 **Multi-Model Ensemble v3.2**: Xếp hạng Top 3 tín hiệu thống kê 2 số cuối từ 5 mô hình song song (Frequency, Gap, Markov, XGBoost, LSTM).
+- 🧠 **Multi-Model Ensemble XSMN**: Xếp hạng Top 3 tín hiệu thống kê 2 số cuối từ 6 mô hình (Frequency, Gap, Markov, XGBoost, LSTM, CDM).
 - 🤖 **Master Retrain Agent**: Hệ thống tự đánh giá hiệu năng (Hit Rate, AUC) và quyết định retrain mô hình XGBoost với các chiến lược linh hoạt.
-- 📈 **Walk-forward Backtest**: Đo Hit@1, Hit@3, lift so với random baseline, ROI và đóng góp từng sub-model.
+- 📈 **Out-of-time Evaluation**: Đo Hit@1, any-hit, mục tiêu >=2/3, lift so với random baseline, ROI và đóng góp từng sub-model từ prediction đã lưu.
 - ⚙️ **Automated Workflow**: Tự động chạy hàng ngày hoàn toàn miễn phí trên Serverless GitHub Actions.
 - 📱 **Telegram Notifications**: Gửi báo cáo kết quả và Top 3 tín hiệu qua Telegram Bot.
 - ☁️ **Cloud Database**: Lưu trữ lịch sử tạo số và model registry trên Supabase.
+
+---
+
+## BMAD Development Workflow
+
+Repository cài BMAD Method v6 cho Codex tại `.agents/skills` và `_bmad`.
+Ngữ cảnh bắt buộc cho agent nằm ở `docs/project-context.md`; artifacts nằm
+trong `_bmad-output`.
+
+```bash
+uv run --python 3.11 _bmad/scripts/resolve_config.py --project-root .
+```
+
+Các skill chính: `bmad-help`, `bmad-quick-dev`, `bmad-code-review` và
+`bmad-document-project`.
 
 ---
 
