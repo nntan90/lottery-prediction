@@ -98,7 +98,7 @@ class LotteryXGB:
             try:
                 metrics["auc"] = round(float(roc_auc_score(y_val, probs)), 4)
             except Exception:
-                metrics["auc"] = 0.5
+                metrics["auc"] = None
 
             # Hit-rate@3: mỗi kỳ trong val, top-3 có trúng không?
             metrics["hit_rate_top3"] = self._backtest_hit_rate(X_val, y_val, k=3)

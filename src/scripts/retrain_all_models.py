@@ -71,14 +71,14 @@ def run_train(region: str, province: str, weekday: int, dry_run: bool = False) -
     print(f"\n🚀 Training XGBoost: {label}")
     success_xgb = False
     try:
-        result_xgb = subprocess.run(cmd_xgb, timeout=600)
+        result_xgb = subprocess.run(cmd_xgb, timeout=1800)
         if result_xgb.returncode == 0:
             print(f"  ✅ Done XGBoost: {label}")
             success_xgb = True
         else:
             print(f"  ❌ Failed XGBoost (exit {result_xgb.returncode}): {label}")
     except subprocess.TimeoutExpired:
-        print(f"  ⏰ Timeout XGBoost (600s): {label}")
+        print(f"  ⏰ Timeout XGBoost (1800s): {label}")
     except Exception as e:
         print(f"  ❌ Error XGBoost: {label}: {e}")
 

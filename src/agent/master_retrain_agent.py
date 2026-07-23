@@ -150,7 +150,7 @@ def _trigger_retrain(region: str, province: Optional[str], weekday: Optional[int
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,  # 10 phút timeout
+            timeout=1800,  # 30 phút cho walk-forward validation
         )
         if result.returncode == 0:
             print(f"  ✅ Train thành công: {label}")
@@ -161,7 +161,7 @@ def _trigger_retrain(region: str, province: Optional[str], weekday: Optional[int
             print(result.stderr[-300:] if result.stderr else "")
             return False
     except subprocess.TimeoutExpired:
-        print(f"  ❌ Train timeout (>10 phút): {label}")
+        print(f"  ❌ Train timeout (>30 phút): {label}")
         return False
     except Exception as e:
         print(f"  ❌ Lỗi khi trigger train: {e}")

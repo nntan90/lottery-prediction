@@ -25,7 +25,7 @@ jobs:
   train:
     name: Train XGBoost for ${{ inputs.region }}/${{ inputs.province }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # XGBoost tabular rất nhanh, 30 phút là thừa
+    timeout-minutes: 45  # Dành 30 phút cho train walk-forward và dư thời gian setup/notify
 
     steps:
       - name: Checkout code

@@ -14,18 +14,28 @@ import asyncio
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 from src.database.supabase_client import LotteryDB
 from src.models.xgb_model import LotteryXGB, FEATURE_COLS
 from src.utils.storage import LotteryStorage
 from src.bot.telegram_bot import LotteryNotifier
+
+
+@dataclass(frozen=True)
+class WalkForwardFold:
+    """Date boundaries for one expanding walk-forward validation fold."""
+
+    index: int
+    train_dates: tuple[Any, ...]
+    validation_dates: tuple[Any, ...]
 
 
 def load_training_data(
@@ -87,20 +97,218 @@ def count_training_draws(df: pd.DataFrame) -> int:
     return int(df["feature_date"].nunique())
 
 
-def time_based_split(df: pd.DataFrame, val_ratio: float = 0.2):
-    """Split theo thời gian (không shuffle) để tránh leakage."""
-    dates = sorted(df["feature_date"].unique())
-    split_idx = int(len(dates) * (1 - val_ratio))
-    train_dates = set(dates[:split_idx])
-    val_dates = set(dates[split_idx:])
+def validate_and_sort_training_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Validate draw integrity and return rows sorted by draw occurrence and pair.
 
-    X_train = df[df["feature_date"].isin(train_dates)][FEATURE_COLS]
-    y_train = df[df["feature_date"].isin(train_dates)]["hit"].astype(int)
-    X_val = df[df["feature_date"].isin(val_dates)][FEATURE_COLS]
-    y_val = df[df["feature_date"].isin(val_dates)]["hit"].astype(int)
+    Every draw must contain exactly one row for each pair 00..99. Training stops
+    on incomplete or duplicate draws so Hit@3 cannot silently cross draw
+    boundaries.
+    """
+    required_columns = set(FEATURE_COLS + ["pair", "feature_date", "hit"])
+    missing_columns = sorted(required_columns.difference(df.columns))
+    if missing_columns:
+        raise ValueError(f"Thiếu cột training bắt buộc: {missing_columns}")
+    if df.empty:
+        raise ValueError("Training data rỗng")
+    if df["feature_date"].isna().any():
+        raise ValueError("Training data có feature_date NULL")
 
-    print(f"  Train: {len(train_dates)} kỳ ({len(X_train)} rows) | Val: {len(val_dates)} kỳ ({len(X_val)} rows)")
-    return X_train, y_train, X_val, y_val
+    clean = df.copy()
+    numeric_hits = pd.to_numeric(clean["hit"], errors="coerce")
+    if numeric_hits.isna().any() or not numeric_hits.isin([0, 1]).all():
+        raise ValueError("Cột hit phải là nhãn nhị phân 0/1 và không được NULL")
+    clean["hit"] = numeric_hits.astype(int)
+
+    numeric_pairs = pd.to_numeric(clean["pair"], errors="coerce")
+    if numeric_pairs.isna().any() or not np.equal(numeric_pairs, np.floor(numeric_pairs)).all():
+        raise ValueError("Cột pair phải là số nguyên trong khoảng 00..99")
+    clean["pair"] = numeric_pairs.astype(int)
+
+    expected_pairs = set(range(100))
+    invalid_draws = []
+    for draw_date, draw_rows in clean.groupby("feature_date", sort=True):
+        actual_pairs = set(draw_rows["pair"].tolist())
+        if len(draw_rows) != 100 or len(actual_pairs) != 100 or actual_pairs != expected_pairs:
+            missing_pairs = sorted(expected_pairs.difference(actual_pairs))
+            unexpected_pairs = sorted(actual_pairs.difference(expected_pairs))
+            invalid_draws.append(
+                f"{draw_date}: rows={len(draw_rows)}, unique_pairs={len(actual_pairs)}, "
+                f"missing={missing_pairs}, unexpected={unexpected_pairs}"
+            )
+
+    if invalid_draws:
+        details = "; ".join(invalid_draws[:5])
+        if len(invalid_draws) > 5:
+            details += f"; ... và {len(invalid_draws) - 5} kỳ khác"
+        raise ValueError(f"Dữ liệu kỳ không hợp lệ: {details}")
+
+    return clean.sort_values(["feature_date", "pair"], kind="mergesort").reset_index(drop=True)
+
+
+def _build_walk_forward_folds_from_sorted(
+    df: pd.DataFrame,
+    max_folds: int = 5,
+    min_initial_train_draws: int = 12,
+) -> list[WalkForwardFold]:
+    """Build expanding folds from already validated and chronologically sorted data."""
+    if max_folds < 2:
+        raise ValueError("max_folds phải >= 2")
+    if min_initial_train_draws < 1:
+        raise ValueError("min_initial_train_draws phải >= 1")
+
+    dates = tuple(df["feature_date"].drop_duplicates().tolist())
+    total_draws = len(dates)
+    validation_draws = max(3, min(13, total_draws // 10))
+    fold_count = min(
+        max_folds,
+        (total_draws - min_initial_train_draws) // validation_draws,
+    )
+    if fold_count < 2:
+        raise ValueError(
+            "Không thể tạo ít nhất 2 walk-forward folds: "
+            f"{total_draws} kỳ, initial_train>={min_initial_train_draws}, "
+            f"validation_window={validation_draws}"
+        )
+
+    validation_span = fold_count * validation_draws
+    initial_train_draws = total_draws - validation_span
+    folds = []
+    for fold_offset in range(fold_count):
+        validation_start = initial_train_draws + fold_offset * validation_draws
+        validation_end = validation_start + validation_draws
+        folds.append(
+            WalkForwardFold(
+                index=fold_offset + 1,
+                train_dates=dates[:validation_start],
+                validation_dates=dates[validation_start:validation_end],
+            )
+        )
+    return folds
+
+
+def build_walk_forward_folds(
+    df: pd.DataFrame,
+    max_folds: int = 5,
+    min_initial_train_draws: int = 12,
+) -> list[WalkForwardFold]:
+    """
+    Build expanding validation folds grouped by distinct draw occurrences.
+
+    The validation window is ``max(3, min(13, total_draws // 10))``. Any
+    remainder stays in the initial training window, making the final fold end
+    at the newest available draw.
+    """
+    clean = validate_and_sort_training_data(df)
+    return _build_walk_forward_folds_from_sorted(
+        clean,
+        max_folds=max_folds,
+        min_initial_train_draws=min_initial_train_draws,
+    )
+
+
+def train_with_walk_forward(
+    df: pd.DataFrame,
+    model_params: dict[str, Any],
+    model_class: type | None = None,
+) -> tuple[Any, dict[str, float]]:
+    """
+    Evaluate independent models on expanding folds, then fit production on all data.
+
+    Registry-compatible metrics are the median of valid fold AUC values and
+    Hit@3 weighted by validation draw count. AUC from a single-class validation
+    fold is excluded, and at least two valid AUC folds are required.
+    """
+    clean = validate_and_sort_training_data(df)
+    folds = _build_walk_forward_folds_from_sorted(clean)
+    model_factory = model_class or LotteryXGB
+
+    valid_aucs: list[float] = []
+    weighted_hit_sum = 0.0
+    validation_draw_total = 0
+
+    print(
+        f"\n🔁 Walk-forward validation: {len(folds)} folds | "
+        f"validation={len(folds[0].validation_dates)} kỳ/fold"
+    )
+    for fold in folds:
+        train_mask = clean["feature_date"].isin(fold.train_dates)
+        validation_mask = clean["feature_date"].isin(fold.validation_dates)
+        X_train = clean.loc[train_mask, FEATURE_COLS]
+        y_train = clean.loc[train_mask, "hit"].astype(int)
+        X_validation = clean.loc[validation_mask, FEATURE_COLS]
+        y_validation = clean.loc[validation_mask, "hit"].astype(int)
+
+        fold_model = model_factory(**model_params)
+        fold_metrics = fold_model.train(
+            X_train,
+            y_train,
+            X_validation,
+            y_validation,
+        )
+
+        auc_value = fold_metrics.get("auc")
+        if y_validation.nunique() < 2:
+            auc_label = "N/A (single class)"
+        elif auc_value is None:
+            auc_label = "N/A (missing metric)"
+        else:
+            numeric_auc = float(auc_value)
+            if np.isfinite(numeric_auc) and 0.0 <= numeric_auc <= 1.0:
+                valid_aucs.append(numeric_auc)
+                auc_label = f"{numeric_auc:.4f}"
+            else:
+                auc_label = "N/A (invalid metric)"
+
+        if "hit_rate_top3" not in fold_metrics:
+            raise ValueError(f"Fold {fold.index} không trả metric hit_rate_top3")
+        hit_rate = float(fold_metrics["hit_rate_top3"])
+        if not np.isfinite(hit_rate) or not 0.0 <= hit_rate <= 1.0:
+            raise ValueError(
+                f"Fold {fold.index} trả hit_rate_top3 không hợp lệ: {hit_rate}"
+            )
+        validation_draws = len(fold.validation_dates)
+        weighted_hit_sum += hit_rate * validation_draws
+        validation_draw_total += validation_draws
+
+        print(
+            f"  Fold {fold.index}/{len(folds)} | "
+            f"Train {fold.train_dates[0]} → {fold.train_dates[-1]} "
+            f"({len(fold.train_dates)} kỳ) | "
+            f"Val {fold.validation_dates[0]} → {fold.validation_dates[-1]} "
+            f"({validation_draws} kỳ) | AUC={auc_label} | Hit@3={hit_rate:.4f}"
+        )
+
+    if len(valid_aucs) < 2:
+        raise ValueError(
+            "Walk-forward cần ít nhất 2 folds có AUC hợp lệ; "
+            f"chỉ có {len(valid_aucs)}/{len(folds)}"
+        )
+
+    auc_array = np.asarray(valid_aucs, dtype=float)
+    metrics = {
+        "auc": round(float(np.median(auc_array)), 4),
+        "hit_rate_top3": round(weighted_hit_sum / validation_draw_total, 4),
+        "auc_mean": round(float(np.mean(auc_array)), 4),
+        "auc_min": round(float(np.min(auc_array)), 4),
+        "auc_std": round(float(np.std(auc_array)), 4),
+        "auc_valid_folds": float(len(valid_aucs)),
+        "fold_count": float(len(folds)),
+    }
+    print(
+        "  📊 Walk-forward summary | "
+        f"AUC median={metrics['auc']:.4f}, mean={metrics['auc_mean']:.4f}, "
+        f"min={metrics['auc_min']:.4f}, std={metrics['auc_std']:.4f} | "
+        f"Hit@3 weighted={metrics['hit_rate_top3']:.4f}"
+    )
+
+    print(f"\n🏋️ Final fit trên toàn bộ {count_training_draws(clean)} kỳ hợp lệ...")
+    production_model = model_factory(**model_params)
+    production_model.train(
+        clean[FEATURE_COLS],
+        clean["hit"].astype(int),
+    )
+    return production_model, metrics
 
 
 async def main():
@@ -158,31 +366,37 @@ async def main():
         await notifier.send_error_alert(msg)
         raise SystemExit(1)
 
-    # 2. Split
-    X_train, y_train, X_val, y_val = time_based_split(df)
-
-    # 3. Train
+    # 2. Walk-forward validation + final fit
     print("\n🏋️ Training XGBoost...")
     print(f"   Params: n_estimators={args.n_estimators}, max_depth={args.max_depth}, learning_rate={args.learning_rate}, subsample={args.subsample}, colsample_bytree={args.colsample_bytree}, scale_pos_weight={args.scale_pos_weight}")
-    model = LotteryXGB(
-        n_estimators=args.n_estimators,
-        max_depth=args.max_depth,
-        learning_rate=args.learning_rate,
-        subsample=args.subsample,
-        colsample_bytree=args.colsample_bytree,
-        scale_pos_weight=args.scale_pos_weight,
+    model_params = {
+        "n_estimators": args.n_estimators,
+        "max_depth": args.max_depth,
+        "learning_rate": args.learning_rate,
+        "subsample": args.subsample,
+        "colsample_bytree": args.colsample_bytree,
+        "scale_pos_weight": args.scale_pos_weight,
+    }
+    try:
+        model, metrics = train_with_walk_forward(df, model_params)
+    except ValueError as exc:
+        msg = f"❌ Walk-forward validation thất bại cho {label}: {exc}"
+        print(msg)
+        await notifier.send_error_alert(msg)
+        raise SystemExit(1) from exc
+    print(
+        f"  AUC median: {metrics.get('auc', 'N/A')} | "
+        f"Hit@3 weighted: {metrics.get('hit_rate_top3', 'N/A')}"
     )
-    metrics = model.train(X_train, y_train, X_val, y_val)
-    print(f"  AUC: {metrics.get('auc', 'N/A')} | Hit@3: {metrics.get('hit_rate_top3', 'N/A')}")
     print(f"  Training draws used: {draw_count} kỳ (min={min_draws})")
 
-    # 4. Save model locally
+    # 3. Save model locally
     with tempfile.TemporaryDirectory() as tmpdir:
         model_filename = f"{province or 'all'}_{version}.pkl"
         local_path = os.path.join(tmpdir, model_filename)
         model.save(local_path)
 
-        # 5. Upload to Supabase Storage
+        # 4. Upload to Supabase Storage
         # Convention: storage_path = "models/{region}/{file}" inside bucket "models"
         # Bucket "models" + path "models/XSMN/..." → actual path trong bucket là "models/XSMN/..."
         # (consistent với các model cũ đã lưu theo format này)
@@ -198,7 +412,7 @@ async def main():
             await notifier.send_error_alert(msg)
             raise SystemExit(1)
 
-    # 6. Deprecate model cũ (chỉ deprecate model cùng weekday)
+    # 5. Deprecate model cũ (chỉ deprecate model cùng weekday)
     dep_query = db.supabase.table("model_registry")\
         .update({"status": "deprecated"})\
         .eq("region", args.region)\
@@ -214,7 +428,7 @@ async def main():
         dep_query = dep_query.is_("weekday", "null")
     dep_query.execute()
 
-    # 7. Insert vào model_registry
+    # 6. Insert vào model_registry
     dates_used = sorted(df["feature_date"].unique())
     db.supabase.table("model_registry").insert({
         "region":           args.region,
@@ -231,7 +445,7 @@ async def main():
         "trained_at":       datetime.utcnow().isoformat(),
     }).execute()
 
-    # 8. Update training_queue
+    # 7. Update training_queue
     tq_upd = db.supabase.table("training_queue")\
         .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
         .eq("region", args.region)\
@@ -242,20 +456,20 @@ async def main():
         tq_upd = tq_upd.is_("province", "null")
     tq_upd.execute()
 
-    # 9. Gửi Telegram
+    # 8. Gửi Telegram
     hit_pct = int(metrics.get("hit_rate_top3", 0) * 100)
     auc = metrics.get("auc", 0)
     wd_info = f" | Weekday: {weekday}" if weekday is not None else ""
     msg = (
         f"✅ <b>Training xong: {label}</b>\n\n"
-        f"📊 AUC: <code>{auc}</code>\n"
-        f"🎯 Hit@3: <code>{hit_pct}%</code>\n"
+        f"📊 AUC walk-forward (median): <code>{auc}</code>\n"
+        f"🎯 Hit@3 walk-forward (weighted): <code>{hit_pct}%</code>\n"
         f"📅 Data: {dates_used[0]} → {dates_used[-1]}{wd_info}\n"
         f"🔢 Kỳ train: {draw_count} | Min: {min_draws} | Version: {version}\n\n"
         f"<i>Model đã được set active trong registry.</i>"
     )
     await notifier.send_message(msg)
-    print(f"\n✅ Done: {label} | AUC={auc} | Hit@3={hit_pct}%")
+    print(f"\n✅ Done: {label} | WF AUC median={auc} | WF Hit@3 weighted={hit_pct}%")
 
 
 if __name__ == "__main__":

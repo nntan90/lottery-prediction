@@ -73,7 +73,11 @@ async def train_local(region: str, province: str, weekday: int):
         "--force",  # allow ít data hơn 1000 rows khi train theo weekday
     ]
     print(f"\n🚀 Training: {region}/{province} [{DOW_NAMES[weekday]}]")
-    result = subprocess.run(cmd, timeout=600)
+    try:
+        result = subprocess.run(cmd, timeout=1800)
+    except subprocess.TimeoutExpired:
+        print(f"  ⏰ Training timeout (1800s): {region}/{province} [{DOW_NAMES[weekday]}]")
+        return False
     if result.returncode != 0:
         print(f"  ❌ Training failed (exit code {result.returncode})")
         return False
