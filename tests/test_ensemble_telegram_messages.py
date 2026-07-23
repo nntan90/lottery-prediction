@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from src.bot.ensemble_messages import format_compact_ensemble_message
+from src.bot.ensemble_messages import ShadowRow, format_compact_ensemble_message
 
 
 def test_xsmn_message_is_compact_and_complete() -> None:
@@ -79,3 +79,63 @@ def test_message_shows_cmr_insufficient_evidence_without_changing_top_three() ->
 
     assert "Top 3:</b> <code>01</code> (1.000)" in message
     assert "CMR shadow:</b> Chưa đủ dữ liệu" in message
+
+
+def test_additional_ddt_shadow_coexists_with_unchanged_cmr_and_production_top_three() -> None:
+    kwargs = {
+        "region": "XSMN",
+        "target_date": date(2026, 7, 21),
+        "dow_label": "Thứ Ba",
+        "top_pairs": ((1, 1.0), (2, 0.9), (3, 0.8)),
+        "models_active": 12,
+        "models_total": 12,
+        "version": "Ensemble v3.5",
+        "shadow_top_pairs": ((9, 0.3912), (28, 0.3821), (47, 0.3754)),
+    }
+
+    existing_message = format_compact_ensemble_message(**kwargs)
+    message = format_compact_ensemble_message(
+        **kwargs,
+        additional_shadows=(
+            ShadowRow(
+                label="DDT shadow",
+                top_pairs=((3, 0.3012), (12, 0.1821), (25, 0.1454), (99, 0.1)),
+            ),
+        ),
+    )
+
+    existing_lines = existing_message.splitlines()
+    message_lines_without_ddt = [
+        line for line in message.splitlines() if "DDT shadow" not in line
+    ]
+    assert message_lines_without_ddt == existing_lines
+    assert "<b>Top 3:</b> <code>01</code> (1.000) - <code>02</code> (0.900) - <code>03</code> (0.800)" in message
+    assert "CMR shadow:</b> <code>09</code> (0.391) - <code>28</code> (0.382) - <code>47</code> (0.375)" in message
+    assert "DDT shadow:</b> <code>03</code> (0.301) - <code>12</code> (0.182) - <code>25</code> (0.145)" in message
+    assert "<code>99</code> (0.100)" not in message
+
+
+def test_additional_shadow_escapes_label_and_status() -> None:
+    message = format_compact_ensemble_message(
+        region="XSMN",
+        target_date=date(2026, 7, 21),
+        dow_label="Thứ Ba",
+        top_pairs=((1, 1.0), (2, 0.9), (3, 0.8)),
+        models_active=12,
+        models_total=12,
+        version="Ensemble v3.5",
+        additional_shadows=(
+            ShadowRow(
+                label="DDT <shadow>",
+                top_pairs=((7, 0.3),),
+                status="Ready & <calibrated>",
+            ),
+            ShadowRow(label="PDA & status", status="Waiting <history>"),
+        ),
+    )
+
+    assert "DDT &lt;shadow&gt;:</b> <code>07</code> (0.300) • Ready &amp; &lt;calibrated&gt;" in message
+    assert "PDA &amp; status:</b> Waiting &lt;history&gt;" in message
+    assert "<shadow>" not in message
+    assert "<calibrated>" not in message
+    assert "<history>" not in message

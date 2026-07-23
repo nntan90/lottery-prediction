@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from datetime import date
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
+
+
+@dataclass(frozen=True)
+class ShadowRow:
+    """One optional shadow-predictor row in the compact message."""
+
+    label: str
+    top_pairs: Sequence[tuple[int, float]] = ()
+    status: Optional[str] = None
 
 
 def _format_numbers(numbers: Sequence[int]) -> str:
@@ -30,6 +40,7 @@ def format_compact_ensemble_message(
     shadow_label: str = "CMR shadow",
     shadow_top_pairs: Sequence[tuple[int, float]] = (),
     shadow_status: str | None = None,
+    additional_shadows: Sequence[ShadowRow] = (),
 ) -> str:
     """Build one scan-friendly HTML message without verbose model traces."""
     if len(top_pairs) < 3:
@@ -71,6 +82,21 @@ def format_compact_ensemble_message(
         lines.append(
             f"🧪 <b>{html.escape(shadow_label)}:</b> {html.escape(shadow_status)}"
         )
+
+    for shadow in additional_shadows:
+        safe_shadow_label = html.escape(shadow.label)
+        if shadow.top_pairs:
+            shadow_text = " - ".join(
+                f"<code>{number:02d}</code> ({score:.3f})"
+                for number, score in shadow.top_pairs[:3]
+            )
+            if shadow.status:
+                shadow_text += f" • {html.escape(shadow.status)}"
+            lines.append(f"🧪 <b>{safe_shadow_label}:</b> {shadow_text}")
+        elif shadow.status:
+            lines.append(
+                f"🧪 <b>{safe_shadow_label}:</b> {html.escape(shadow.status)}"
+            )
 
     selected_consensus = [number for number in consensus_pairs if number in selected_numbers]
     if selected_consensus:

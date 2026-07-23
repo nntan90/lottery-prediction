@@ -27,16 +27,19 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import date, datetime, timedelta
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
 from src.utils.storage import LotteryStorage
-from src.bot.ensemble_messages import format_compact_ensemble_message
+from src.bot.ensemble_messages import ShadowRow, format_compact_ensemble_message
 from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 
@@ -133,6 +136,72 @@ EXPECTED_MODEL_NAMES = {
         "cdm",
     ],
 }
+DDT_SHADOW_TIMEOUT_SECONDS = 60
+
+
+def _generate_ddt_shadow_safely(
+    db: LotteryDB,
+    provinces: list[str],
+    target_date: date,
+) -> dict:
+    """Run DDT in an isolated process with a hard execution deadline."""
+    del db  # The child creates its own read-only connection from environment.
+    script = os.path.join(os.path.dirname(__file__), "predict_xsmn_digit_transition.py")
+    command = [
+        sys.executable,
+        script,
+        "--date",
+        target_date.isoformat(),
+        "--provinces",
+        ",".join(provinces),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DDT_SHADOW_TIMEOUT_SECONDS,
+        )
+        result = json.loads(completed.stdout)
+        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
+            raise ValueError("DDT returned an invalid payload")
+        return result
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "reason": f"shadow timeout after {DDT_SHADOW_TIMEOUT_SECONDS}s",
+        }
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+
+def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
+    """Convert the audit result to one compact, backward-compatible row."""
+    if result and result.get("status") in {"success", "uncalibrated"}:
+        try:
+            score_key = (
+                "probability"
+                if result.get("score_semantics")
+                == "merged_pair_hit_probability_calibrated"
+                else "estimated_likelihood_uncalibrated"
+            )
+            top_pairs = tuple(
+                (int(item["pair"]), float(item[score_key]))
+                for item in result.get("selected_evidence", [])
+            )
+            if not top_pairs:
+                raise ValueError("DDT selected_evidence is empty")
+            return ShadowRow(
+                label="DDT shadow",
+                top_pairs=top_pairs,
+                status="calibrated" if score_key == "probability" else "uncalibrated",
+            )
+        except (KeyError, TypeError, ValueError):
+            return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
+    if result and result.get("status") == "insufficient_evidence":
+        return ShadowRow(label="DDT shadow", status="Chưa đủ dữ liệu")
+    return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
 
 
 def _flatten_tail_rows_by_draw(rows: list[dict]) -> list[int]:
@@ -911,6 +980,18 @@ async def run_xsmn_ensemble(
     if not dry_run:
         save_prediction(db, prediction)
 
+    # DDT is deliberately after production persistence and runs out-of-process.
+    # Its import, runtime, timeout, or payload can never block the old result.
+    ddt_result = _generate_ddt_shadow_safely(db, provs_to_run, target_date)
+    ddt_row = _ddt_shadow_row(ddt_result)
+    if ddt_row.top_pairs:
+        print(
+            "     🧪 DDT shadow Top 3: "
+            f"{[f'{pair:02d}' for pair, _ in ddt_row.top_pairs]}"
+        )
+    else:
+        print(f"     🧪 DDT shadow: {ddt_row.status or 'Tạm không khả dụng'}")
+
     # Telegram
     if prediction:
         total_expected = len(provs_to_run) * TOTAL_MODELS_PER_PROVINCE
@@ -966,6 +1047,7 @@ async def run_xsmn_ensemble(
             missing_by_scope=missing_by_province,
             shadow_top_pairs=cmr_top_pairs,
             shadow_status=cmr_status,
+            additional_shadows=(ddt_row,),
         )
 
         if not dry_run:

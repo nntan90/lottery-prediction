@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDA | Provincial Digit Affinity</title>
+  <style>
+    :root { --ink:#151515; --paper:#f4f1e8; --red:#e94b35; --blue:#087e8b; --yellow:#f2c14e; --muted:#66645f; --line:#b7b1a4; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { min-height:74vh; padding:clamp(24px,5vw,72px); border-bottom:3px solid var(--ink); display:grid; align-content:space-between; background:#fffdf7; }
+    nav { display:flex; gap:18px; flex-wrap:wrap; font-size:12px; text-transform:uppercase; }
+    nav a { color:var(--ink); text-decoration:none; border-bottom:1px solid transparent; }
+    nav a:hover { border-color:var(--red); }
+    h1 { margin:8vh 0 18px; max-width:980px; font:800 clamp(42px,8vw,108px)/.92 Arial,sans-serif; letter-spacing:0; }
+    .accent { color:var(--red); }
+    .lead { max-width:820px; font:22px/1.45 Arial,sans-serif; }
+    .stamp { width:max-content; padding:8px 12px; color:white; background:var(--blue); font-weight:700; transform:rotate(-1deg); }
+    main section { padding:clamp(44px,7vw,92px) clamp(20px,5vw,72px); border-bottom:1px solid var(--line); }
+    .eyebrow { color:var(--red); font-size:12px; font-weight:800; text-transform:uppercase; }
+    h2 { margin:8px 0 26px; max-width:900px; font:800 clamp(30px,5vw,58px)/1.05 Arial,sans-serif; letter-spacing:0; }
+    h3 { margin:0 0 10px; font:800 20px/1.2 Arial,sans-serif; }
+    p { max-width:820px; }
+    .grid-2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }
+    .grid-3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+    .panel { border:2px solid var(--ink); border-radius:6px; padding:20px; background:#fffdf7; box-shadow:5px 5px 0 var(--ink); }
+    .panel.red { border-color:var(--red); box-shadow:5px 5px 0 var(--red); }
+    .panel.blue { border-color:var(--blue); box-shadow:5px 5px 0 var(--blue); }
+    .digits { display:grid; grid-template-columns:repeat(10,1fr); gap:6px; margin:14px 0 24px; }
+    .digit { aspect-ratio:1; min-width:0; border:1px solid var(--ink); display:grid; place-items:center; background:white; font-weight:800; font-size:clamp(12px,2vw,24px); position:relative; overflow:hidden; }
+    .digit::after { content:""; position:absolute; inset:auto 0 0; height:var(--p); background:var(--c); opacity:.28; }
+    .formula { padding:18px; overflow:auto; color:white; background:var(--ink); border-left:8px solid var(--yellow); font-size:14px; }
+    .matrix-wrap { overflow:auto; padding:6px; background:#fffdf7; border:2px solid var(--ink); }
+    .matrix { display:grid; grid-template-columns:30px repeat(10,minmax(25px,1fr)); gap:3px; min-width:520px; }
+    .cell,.label { aspect-ratio:1; display:grid; place-items:center; font-size:10px; }
+    .label { font-weight:800; }
+    .cell { color:transparent; border:1px solid rgba(21,21,21,.2); background:color-mix(in srgb,var(--red) var(--v),#fff); }
+    .cell:hover { color:var(--ink); outline:2px solid var(--ink); z-index:2; }
+    .flow { display:grid; grid-template-columns:repeat(5,minmax(130px,1fr)); gap:24px; overflow:auto; padding:8px 4px 16px; }
+    .step { min-height:150px; padding:16px; border-top:7px solid var(--blue); background:#fffdf7; position:relative; }
+    .step:not(:last-child)::after { content:"→"; position:absolute; right:-22px; top:52px; font-size:26px; color:var(--red); }
+    .num { color:var(--red); font-size:12px; font-weight:800; }
+    .techniques { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:2px solid var(--ink); }
+    .technique { padding:20px; min-height:220px; background:#fffdf7; border-right:1px solid var(--ink); }
+    .technique:last-child { border:0; }
+    .technique b { display:block; margin-bottom:24px; color:var(--blue); }
+    .risks { columns:2; column-gap:30px; }
+    .risk { break-inside:avoid; margin:0 0 12px; padding:12px 14px; background:#fffdf7; border-left:5px solid var(--red); }
+    table { width:100%; border-collapse:collapse; background:#fffdf7; }
+    th,td { padding:14px; border:1px solid var(--ink); text-align:left; }
+    th { color:white; background:var(--ink); }
+    .winner td { background:#d7eee7; font-weight:800; }
+    .moscow { display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; gap:4px; }
+    .moscow > div { min-height:260px; padding:18px; background:#fffdf7; border-top:8px solid var(--c); }
+    .moscow ul { padding-left:18px; }
+    .verdict { color:white; background:var(--ink); }
+    .verdict .panel { color:var(--ink); }
+    .verdict h2 { color:var(--yellow); }
+    .choice { padding:28px; border:2px solid var(--yellow); border-radius:6px; }
+    .choice strong { display:block; margin-bottom:12px; color:var(--yellow); font:800 26px Arial,sans-serif; }
+    .phases { counter-reset:phase; display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
+    .phase { padding:22px; background:#fffdf7; color:var(--ink); }
+    .phase::before { counter-increment:phase; content:"0" counter(phase); display:block; color:var(--red); font-weight:800; }
+    footer { padding:30px clamp(20px,5vw,72px); display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap; background:var(--yellow); font-weight:800; }
+    @media (max-width:820px) { .grid-2,.grid-3,.phases { grid-template-columns:1fr; } .techniques { grid-template-columns:1fr 1fr; } .technique:nth-child(2) { border-right:0; } .technique { border-bottom:1px solid var(--ink); } .moscow { grid-template-columns:1fr; } .moscow>div { min-height:auto; } .risks { columns:1; } }
+    @media (max-width:520px) { header { min-height:82vh; } .digits { gap:2px; } .techniques { grid-template-columns:1fr; } .technique { border-right:0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <nav><a href="#signal">Tín hiệu</a><a href="#engine">Động cơ</a><a href="#risks">Phản biện</a><a href="#decision">Quyết định</a></nav>
+    <div>
+      <div class="stamp">BRAINSTORM / 149 GHI CHÚ / 21.07.2026</div>
+      <h1>Provincial<br><span class="accent">Digit Affinity</span></h1>
+      <p class="lead">Một model XSMN mới xem mỗi tỉnh như một “chữ ký chữ số”: xác suất riêng cho hàng chục, hàng đơn vị và độ hợp nhau của từng cặp có thứ tự.</p>
+    </div>
+    <small>Trạng thái: thiết kế đã hội tụ · chưa triển khai production</small>
+  </header>
+
+  <main>
+    <section id="signal">
+      <div class="eyebrow">01 / Định nghĩa lại favourite</div>
+      <h2>Không chọn một số yêu thích. Học hai phân phối có độ tin cậy.</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Hàng chục · P(H)</h3>
+          <div class="digits" id="heads"></div>
+          <p>Mỗi digit 0–9 có posterior riêng theo tỉnh, tính trên đơn vị <b>một kỳ quay hoàn chỉnh</b>, không coi 18 giải là 18 quan sát độc lập.</p>
+        </div>
+        <div>
+          <h3>Hàng đơn vị · P(U)</h3>
+          <div class="digits" id="units"></div>
+          <p>Đồng thời giữ hai channel: có/không xuất hiện trong kỳ và multiplicity đã chuẩn hóa. Khi entropy cao, PDA tự giảm tiếng nói.</p>
+        </div>
+      </div>
+      <div class="formula">AFFINITY(h,u) = log P(H=h) + log P(U=u) + shrink × log[P(HU=h,u) / (P(H=h)P(U=u))] + temporal − uncertainty</div>
+    </section>
+
+    <section>
+      <div class="eyebrow">02 / Tương tác có thứ tự</div>
+      <h2>Đầu nóng × đuôi nóng chưa đủ. Cần biết chúng có thật sự đi cùng nhau.</h2>
+      <div class="grid-2">
+        <div class="matrix-wrap"><div class="matrix" id="matrix"></div></div>
+        <div>
+          <div class="panel red"><h3>Residual interaction</h3><p>Ma trận 10×10 chỉ giữ phần lift vượt khỏi kỳ vọng từ hai marginal. Ô ít dữ liệu bị shrink mạnh về 0; `27` và `72` là hai trạng thái khác nhau.</p></div>
+          <br>
+          <div class="panel blue"><h3>Hierarchical prior</h3><p>Tỉnh → lịch chạy/weekday → toàn XSMN. Dữ liệu tỉnh đủ mạnh thì giữ bản sắc; dữ liệu mỏng thì mượn sức từ prior thay vì tạo cực trị giả.</p></div>
+          <p><small>Heatmap là minh họa cấu trúc, không phải kết quả dự đoán.</small></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="engine">
+      <div class="eyebrow">03 / Luồng PDA V1</div>
+      <h2>Một model độc lập, chấm đủ 100 cặp, có quyền im lặng.</h2>
+      <div class="flow">
+        <div class="step"><span class="num">01</span><h3>History</h3><p>Kỳ quay cùng tỉnh; cutoff tuyệt đối trước target date.</p></div>
+        <div class="step"><span class="num">02</span><h3>Posterior</h3><p>Head, unit, coverage, multiplicity, fast/slow windows.</p></div>
+        <div class="step"><span class="num">03</span><h3>Interaction</h3><p>Ordered-pair residual với prior mạnh hơn marginal.</p></div>
+        <div class="step"><span class="num">04</span><h3>Rank 00–99</h3><p>Affinity + context − uncertainty; lưu đầy đủ decomposition.</p></div>
+        <div class="step"><span class="num">05</span><h3>Top 3</h3><p>Tối ưu tổng chất lượng, chỉ phạt redundancy mềm.</p></div>
+      </div>
+      <p><b>TP.HCM:</b> tách tuyến chuyển tiếp Thứ Hai ↔ Thứ Bảy, nhưng cùng chia sẻ province prior.</p>
+    </section>
+
+    <section>
+      <div class="eyebrow">04 / Bốn lăng kính khám phá</div>
+      <h2>Ý tưởng được mở rộng, nối vòng và cố tình tìm cách làm nó thất bại.</h2>
+      <div class="techniques">
+        <div class="technique"><b>FIRST PRINCIPLES</b><h3>Đơn vị thật</h3><p>Kỳ quay là sample. Nhãn là cặp xuất hiện ít nhất một lần ở kỳ tiếp theo cùng tỉnh.</p></div>
+        <div class="technique"><b>MORPHOLOGICAL</b><h3>Nhiều kiến trúc</h3><p>Standalone, reranker, adapter, stacker, HMM và neural được đặt cạnh nhau.</p></div>
+        <div class="technique"><b>CAUSAL LOOPS</b><h3>Khử bằng chứng lặp</h3><p>Hot digit, pair frequency và model consensus có thể đếm cùng một tín hiệu nhiều lần.</p></div>
+        <div class="technique"><b>FAILURE ANALYSIS</b><h3>Giết ảo tưởng sớm</h3><p>Leakage, PMI một mẫu, G4 dominance, route mixing và forced precision đều bị lộ.</p></div>
+      </div>
+    </section>
+
+    <section id="risks">
+      <div class="eyebrow">05 / Pre-mortem</div>
+      <h2>Nguy cơ lớn nhất không phải thiếu model phức tạp. Là dùng trùng bằng chứng.</h2>
+      <div class="risks">
+        <div class="risk"><b>Cartesian trap</b><br>Top head × top unit bỏ qua pair interaction.</div>
+        <div class="risk"><b>Pseudo-replication</b><br>18 giải trong một kỳ không phải 18 kỳ độc lập.</div>
+        <div class="risk"><b>Sparse PMI</b><br>Một lần xuất hiện có thể tạo lift cực lớn nếu không shrink.</div>
+        <div class="risk"><b>Consensus giả</b><br>PDA rerank sáu model rồi tự nhận nhiều model đồng ý.</div>
+        <div class="risk"><b>Route mixing</b><br>TP.HCM Thứ Hai và Thứ Bảy có tuyến thời gian khác nhau.</div>
+        <div class="risk"><b>False probability</b><br>Score chỉ được gọi là xác suất sau calibration out-of-time.</div>
+        <div class="risk"><b>Hard diversity</b><br>Ba đuôi khác nhau trông đẹp nhưng có thể hạ chất lượng Top 3.</div>
+        <div class="risk"><b>Lucky week</b><br>Không promote từ một chuỗi thắng ngắn hay một tỉnh duy nhất.</div>
+      </div>
+    </section>
+
+    <section>
+      <div class="eyebrow">06 / NUF convergence</div>
+      <h2>Chấm Novelty · Usefulness · Feasibility.</h2>
+      <table>
+        <thead><tr><th>Phương án</th><th>Điểm</th><th>Kết luận</th></tr></thead>
+        <tbody>
+          <tr class="winner"><td>Hierarchical Bayesian PDA standalone</td><td>26/30</td><td>V1</td></tr>
+          <tr><td>Residual PDA reranker</td><td>24/30</td><td>Offline challenger</td></tr>
+          <tr><td>OOF stacking</td><td>20/30</td><td>Chờ shadow history</td></tr>
+          <tr><td>Sáu model-specific adapters</td><td>19/30</td><td>Thí nghiệm riêng</td></tr>
+          <tr><td>HMM / neural regimes</td><td>18/30</td><td>Hoãn vì dữ liệu mỏng</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <div class="eyebrow">07 / MoSCoW</div>
+      <h2>Giữ V1 đo được, giải thích được và không ảnh hưởng code cũ.</h2>
+      <div class="moscow">
+        <div style="--c:var(--red)"><h3>Must</h3><ul><li>Draw grain + cutoff</li><li>Head/unit posterior</li><li>Shrunk residual</li><li>Uncertainty gate</li><li>Top 100 audit + Top 3</li><li>TP.HCM route</li><li>Walk-forward baselines</li></ul></div>
+        <div style="--c:var(--blue)"><h3>Should</h3><ul><li>Fast/slow windows</li><li>Entropy confidence</li><li>Soft redundancy cost</li></ul></div>
+        <div style="--c:var(--yellow)"><h3>Could</h3><ul><li>Bounded rerank</li><li>OOF stacking</li></ul></div>
+        <div style="--c:var(--ink)"><h3>Won't V1</h3><ul><li>Neural/HMM</li><li>Hard diversity</li><li>Auto promote</li><li>Đổi sáu model</li></ul></div>
+      </div>
+    </section>
+
+    <section id="decision" class="verdict">
+      <div class="eyebrow">08 / Quyết định</div>
+      <h2>PDA là model thứ bảy chạy shadow, không phải lớp sơn phủ lên consensus cũ.</h2>
+      <div class="choice"><strong>WHY THIS WINS</strong>Tách riêng giúp đo được lift thật, giữ nguyên output của Frequency / Gap / Markov / XGBoost / LSTM / CDM, và vẫn mở đường cho reranking hoặc stacking sau khi có đủ prediction out-of-fold.</div>
+      <br>
+      <div class="phases">
+        <div class="phase"><h3>Offline</h3><p>Expanding walk-forward theo tỉnh; so marginal-only, exact frequency, strongest model và ensemble.</p></div>
+        <div class="phase"><h3>Shadow</h3><p>Ghi Top 100, Top 3, confidence, abstention và decomposition; không có ensemble weight.</p></div>
+        <div class="phase"><h3>Promotion gate</h3><p>Hit@3, mean hits, phân phối 0/1/2/3, calibration và permutation controls đều đạt.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <footer><span>PROVINCIAL DIGIT AFFINITY</span><span>IDEA → EVIDENCE → SHADOW → DECISION</span></footer>
+  <script>
+    const head=[64,42,78,55,35,71,48,59,83,46], unit=[51,74,39,68,44,81,57,36,63,49];
+    function rail(id,values,color){document.getElementById(id).innerHTML=values.map((v,i)=>`<div class="digit" style="--p:${v}%;--c:${color}" title="Digit ${i}: affinity minh họa ${v}">${i}</div>`).join('')}
+    rail('heads',head,'var(--red)'); rail('units',unit,'var(--blue)');
+    const m=document.getElementById('matrix');
+    m.innerHTML='<div></div>'+[0,1,2,3,4,5,6,7,8,9].map(x=>`<div class="label">U${x}</div>`).join('');
+    for(let h=0;h<10;h++){m.insertAdjacentHTML('beforeend',`<div class="label">H${h}</div>`);for(let u=0;u<10;u++){const v=12+((h*29+u*17+h*u*7)%78);m.insertAdjacentHTML('beforeend',`<div class="cell" style="--v:${v}%" title="${h}${u}: interaction minh họa ${v}">${h}${u}</div>`)}}
+  </script>
+</body>
+</html>
