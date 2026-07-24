@@ -144,7 +144,7 @@ class LotteryLSTM:
 
     def train_model(self, sequences: np.ndarray, labels: np.ndarray,
                     epochs: int = 80, lr: float = 0.001, verbose: bool = True,
-                    val_split: float = 0.2, patience: int = 10, seed: int = 42):
+                    val_split: float = 0.2, patience: int = 10, seed: int = 42) -> int:
         """
         Train LSTM on historical data with train/val split and early stopping.
 
@@ -168,7 +168,7 @@ class LotteryLSTM:
 
         # Train/Val split (chronological — không shuffle vì time series)
         n_total = len(sequences)
-        n_val = max(int(n_total * val_split), 1) if n_total >= 5 else 0
+        n_val = max(int(n_total * val_split), 1) if val_split > 0 and n_total >= 5 else 0
         n_train = n_total - n_val
 
         X_all = torch.FloatTensor(sequences)
@@ -183,10 +183,13 @@ class LotteryLSTM:
         # Early stopping state
         best_val_loss = float('inf')
         best_state_dict = None
+        best_epoch = 0
         epochs_no_improve = 0
+        epochs_run = 0
 
         self.model.train()
         for epoch in range(epochs):
+            epochs_run = epoch + 1
             # Training step
             optimizer.zero_grad()
             output = self.model(X_train)
@@ -205,6 +208,7 @@ class LotteryLSTM:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_state_dict = {k: v.clone() for k, v in self.model.state_dict().items()}
+                    best_epoch = epoch + 1
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
@@ -226,6 +230,7 @@ class LotteryLSTM:
             self.model.load_state_dict(best_state_dict)
 
         self.model.eval()
+        return best_epoch or epochs_run
 
 
 # ── Data Encoding ────────────────────────────────────────────────────────────
@@ -272,36 +277,38 @@ def _encode_draws_to_binary(history_df, seq_len: int = 30) -> tuple:
 
 # ── Model Registry Integration ──────────────────────────────────────────────
 
-def _get_lstm_model(db, region: str, province: Optional[str] = None) -> Optional[dict]:
-    """Tìm LSTM model active trong model_registry."""
-    q = db.supabase.table("model_registry") \
-        .select("*") \
-        .eq("region", region) \
-        .eq("status", "active") \
-        .like("model_name", "%lstm%") \
-        .order("trained_at", desc=True) \
-        .limit(1)
+def _get_lstm_model(
+    db,
+    region: str,
+    province: Optional[str] = None,
+    weekday: Optional[int] = None,
+) -> Optional[dict]:
+    """Find an active LSTM, preferring exact province-weekday then legacy NULL weekday."""
 
-    if province:
-        q = q.eq("province", province)
-    else:
-        q = q.is_("province", "null")
+    def _query(prov: Optional[str], wd: Optional[int]) -> list[dict]:
+        q = db.supabase.table("model_registry") \
+            .select("*") \
+            .eq("region", region) \
+            .eq("status", "active") \
+            .eq("model_name", "lstm") \
+            .order("trained_at", desc=True) \
+            .limit(1)
+        q = q.eq("province", prov) if prov else q.is_("province", "null")
+        q = q.eq("weekday", wd) if wd is not None else q.is_("weekday", "null")
+        return q.execute().data
 
-    result = q.execute().data
-    if result:
-        return result[0]
-
-    # Fallback: model chung (province=NULL)
-    q2 = db.supabase.table("model_registry") \
-        .select("*") \
-        .eq("region", region) \
-        .eq("status", "active") \
-        .like("model_name", "%lstm%") \
-        .is_("province", "null") \
-        .order("trained_at", desc=True) \
-        .limit(1)
-    result2 = q2.execute().data
-    return result2[0] if result2 else None
+    locations = []
+    if weekday is not None:
+        locations.append((province, weekday))
+    locations.append((province, None))
+    if weekday is not None:
+        locations.append((None, weekday))
+    locations.append((None, None))
+    for prov, wd in locations:
+        result = _query(prov, wd)
+        if result:
+            return result[0]
+    return None
 
 
 # ── Main Prediction Function ────────────────────────────────────────────────
@@ -405,7 +412,7 @@ def predict_lstm(
 
         # Strategy 1: Thử load model đã train từ registry
         if storage and tmpdir:
-            registry = _get_lstm_model(db, region, province)
+            registry = _get_lstm_model(db, region, province, target_weekday)
             if registry and registry.get("file_path"):
                 try:
                     file_path = registry["file_path"]

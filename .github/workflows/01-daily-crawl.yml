@@ -297,3 +297,47 @@ jobs:
             -d "text=${MSG}" \
             -d "parse_mode=HTML" \
             -d "disable_web_page_preview=true"
+
+  # ─────────────────────────────────────────────
+  # Job 5: Update all six XSMN provincial families
+  # Main path; the 23:00 workflow remains an idempotent recovery.
+  # ─────────────────────────────────────────────
+  refresh-xsmn-models:
+    name: Refresh XSMN Provincial Models (6 Families)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    concurrency:
+      group: xsmn-provincial-model-refresh
+      cancel-in-progress: false
+    needs: [preflight, verify-predictions]
+    if: ${{ needs.preflight.outputs.should_run == 'true' && needs.verify-predictions.result == 'success' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Retrain ML and refresh rule families
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: .
+          TARGET_DATE: ${{ needs.preflight.outputs.target_date }}
+        run: |
+          DATE_ARG=()
+          if [ -n "${TARGET_DATE}" ]; then
+            DATE_ARG=(--date "${TARGET_DATE}")
+          fi
+          python src/agent/master_retrain_agent.py "${DATE_ARG[@]}"

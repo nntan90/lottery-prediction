@@ -128,6 +128,7 @@ class DecisionEngine:
             .select("metric_auc,metric_hit_rate,trained_at,version")
             .eq("region", region)
             .eq("status", "active")
+            .eq("model_name", "xgboost_core")
             .order("trained_at", desc=True)
             .limit(1)
         )
@@ -224,8 +225,9 @@ class DecisionEngine:
         if not rows:
             return 1  # chính ngày hôm nay
 
-        # Nếu XSMB weekday: lọc chỉ lấy ngày cùng weekday
-        if region.upper() == "XSMB" and weekday is not None:
+        # Weekday-specific artifacts (XSMB legacy and XSMN province models)
+        # must not borrow miss streaks from another weekday.
+        if weekday is not None:
             rows = [
                 r for r in rows
                 if date.fromisoformat(r["prediction_date"]).weekday() == weekday

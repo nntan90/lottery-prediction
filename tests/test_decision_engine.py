@@ -79,13 +79,13 @@ class TestDecisionEngine(unittest.TestCase):
                 "version": "v3",
             }],
             "prediction_results": [
-                {"prediction_date": "2026-05-10", "hit": False},
                 {"prediction_date": "2026-05-09", "hit": False},
-                {"prediction_date": "2026-05-08", "hit": False},
+                {"prediction_date": "2026-05-02", "hit": False},
+                {"prediction_date": "2026-04-25", "hit": False},
             ],
             "agent_actions": [],
         })
-        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 10))
+        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 9))
 
         self.assertTrue(result.should_retrain)
         self.assertEqual(result.action_type, "retrain_triggered")
@@ -103,13 +103,13 @@ class TestDecisionEngine(unittest.TestCase):
                 "version": "v3",
             }],
             "prediction_results": [
-                {"prediction_date": "2026-05-10", "hit": False},
                 {"prediction_date": "2026-05-09", "hit": False},
-                {"prediction_date": "2026-05-08", "hit": False},
+                {"prediction_date": "2026-05-02", "hit": False},
+                {"prediction_date": "2026-04-25", "hit": False},
             ],
             "agent_actions": [{"action_date": "2026-05-09", "old_metric_auc": 0.66}],
         })
-        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 10))
+        result = engine.analyze("XSMN", "tp-hcm", 5, False, db, date(2026, 5, 9))
 
         self.assertTrue(result.should_retrain)
         self.assertIn("3_miss_streak", result.reason)
@@ -125,6 +125,25 @@ class TestDecisionEngine(unittest.TestCase):
         result = engine.analyze("XSMB", None, 0, False, db, date(2026, 5, 10))
         self.assertTrue(result.should_retrain)
         self.assertEqual(result.action_type, "retrain_triggered")
+
+    def test_twice_weekly_station_miss_streak_isolated_by_weekday(self):
+        """TP.HCM Monday streak must not stop at a Saturday hit."""
+        engine = DecisionEngine()
+        db = MockDB({
+            "prediction_results": [
+                {"prediction_date": "2026-07-20", "hit": False},  # Monday
+                {"prediction_date": "2026-07-18", "hit": True},   # Saturday
+                {"prediction_date": "2026-07-13", "hit": False},  # Monday
+                {"prediction_date": "2026-07-11", "hit": True},   # Saturday
+                {"prediction_date": "2026-07-06", "hit": True},   # Monday
+            ],
+        })
+
+        fails = engine._count_consecutive_fails(
+            db, "XSMN", "tp-hcm", date(2026, 7, 20), weekday=0
+        )
+
+        self.assertEqual(fails, 2)
 
 
 class TestPickStrategy(unittest.TestCase):

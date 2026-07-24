@@ -26,6 +26,9 @@ jobs:
     name: Train XGBoost for ${{ inputs.region }}/${{ inputs.province }}
     runs-on: ubuntu-latest
     timeout-minutes: 45  # Dành 30 phút cho train walk-forward và dư thời gian setup/notify
+    concurrency:
+      group: xsmn-provincial-model-refresh
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code

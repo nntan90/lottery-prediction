@@ -39,7 +39,11 @@ class WalkForwardFold:
 
 
 def load_training_data(
-    db: LotteryDB, region: str, province: str | None, weekday: int | None = None
+    db: LotteryDB,
+    region: str,
+    province: str | None,
+    weekday: int | None = None,
+    target_date: date | None = None,
 ) -> pd.DataFrame:
     """
     Load pair_features từ Supabase cho 1 station (có pagination).
@@ -70,6 +74,8 @@ def load_training_data(
         # Filter theo weekday nếu được chỉ định
         if weekday is not None:
             query = query.eq("day_of_week", weekday)
+        if target_date is not None:
+            query = query.lte("feature_date", target_date.isoformat())
 
         batch = query.execute().data
         if not batch:
@@ -321,6 +327,10 @@ async def main():
                         help="Số kỳ quay tối thiểu để train. Mặc định: 60, hoặc 24 nếu --force")
     parser.add_argument("--weekday", type=int, default=None, choices=list(range(7)),
                         help="Ngày trong tuần để train riêng (0=T2..6=CN). Mặc định: train tất cả")
+    parser.add_argument("--target-date", type=date.fromisoformat, default=None,
+                        help="Cutoff train inclusive (YYYY-MM-DD), dùng cho recovery/backfill")
+    parser.add_argument("--defer-queue-completion", action="store_true",
+                        help="Coordinator sẽ hoàn tất training_queue sau khi đủ mọi family")
     # Hyperparameter overrides — dùng bởi Master Retrain Agent
     parser.add_argument("--n_estimators", type=int, default=300, help="XGBoost n_estimators (default: 300)")
     parser.add_argument("--max_depth", type=int, default=4, help="XGBoost max_depth (default: 4)")
@@ -353,7 +363,18 @@ async def main():
     print("=" * 60)
 
     # 1. Load data
-    df = load_training_data(db, args.region, province, weekday)
+    df = load_training_data(db, args.region, province, weekday, args.target_date)
+    if args.target_date and (
+        df.empty or str(df["feature_date"].max())[:10] != args.target_date.isoformat()
+    ):
+        latest = None if df.empty else str(df["feature_date"].max())[:10]
+        msg = (
+            f"❌ XGBoost history cutoff mismatch cho {label}: "
+            f"latest={latest or 'none'}, expected={args.target_date.isoformat()}"
+        )
+        print(msg)
+        await notifier.send_error_alert(msg)
+        raise SystemExit(1)
 
     min_draws = args.min_draws if args.min_draws is not None else (24 if args.force else 60)
     draw_count = count_training_draws(df)
@@ -412,28 +433,14 @@ async def main():
             await notifier.send_error_alert(msg)
             raise SystemExit(1)
 
-    # 5. Deprecate model cũ (chỉ deprecate model cùng weekday)
-    dep_query = db.supabase.table("model_registry")\
-        .update({"status": "deprecated"})\
-        .eq("region", args.region)\
-        .eq("status", "active")
-    if province is not None:
-        dep_query = dep_query.eq("province", province)
-    else:
-        dep_query = dep_query.is_("province", "null")
-    # Chỉ deprecate model cùng weekday (None deprecates NULL weekday models)
-    if weekday is not None:
-        dep_query = dep_query.eq("weekday", weekday)
-    else:
-        dep_query = dep_query.is_("weekday", "null")
-    dep_query.execute()
-
-    # 6. Insert vào model_registry
+    # 5. Insert replacement before deprecating old rows. If insert fails, the
+    # currently active production artifact remains available.
     dates_used = sorted(df["feature_date"].unique())
-    db.supabase.table("model_registry").insert({
+    insert_result = db.supabase.table("model_registry").insert({
         "region":           args.region,
         "province":         province,
         "weekday":          weekday,       # None = không phân biệt
+        "model_name":       "xgboost_core",
         "version":          version,
         "status":           "active",
         "file_path":        storage_path,
@@ -444,17 +451,40 @@ async def main():
         "metric_hit_rate":  metrics.get("hit_rate_top3"),
         "trained_at":       datetime.utcnow().isoformat(),
     }).execute()
+    new_rows = insert_result.data or []
+    new_model_id = new_rows[0].get("id") if new_rows else None
 
-    # 7. Update training_queue
-    tq_upd = db.supabase.table("training_queue")\
-        .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
-        .eq("region", args.region)\
-        .eq("status", "triggered")
-    if province is not None:
-        tq_upd = tq_upd.eq("province", province)
+    # 6. Deprecate prior active rows only after the replacement is registered.
+    if new_model_id is not None:
+        dep_query = db.supabase.table("model_registry")\
+            .update({"status": "deprecated"})\
+            .eq("region", args.region)\
+            .eq("status", "active")\
+            .eq("model_name", "xgboost_core")\
+            .neq("id", new_model_id)
+        if province is not None:
+            dep_query = dep_query.eq("province", province)
+        else:
+            dep_query = dep_query.is_("province", "null")
+        if weekday is not None:
+            dep_query = dep_query.eq("weekday", weekday)
+        else:
+            dep_query = dep_query.is_("weekday", "null")
+        dep_query.execute()
     else:
-        tq_upd = tq_upd.is_("province", "null")
-    tq_upd.execute()
+        print("  ⚠️ Registry insert không trả id; giữ các active rows cũ để rollback an toàn")
+
+    # 7. Update training_queue unless a multi-family coordinator owns completion.
+    if not args.defer_queue_completion:
+        tq_upd = db.supabase.table("training_queue")\
+            .update({"status": "done", "completed_at": datetime.utcnow().isoformat()})\
+            .eq("region", args.region)\
+            .eq("status", "triggered")
+        if province is not None:
+            tq_upd = tq_upd.eq("province", province)
+        else:
+            tq_upd = tq_upd.is_("province", "null")
+        tq_upd.execute()
 
     # 8. Gửi Telegram
     hit_pct = int(metrics.get("hit_rate_top3", 0) * 100)

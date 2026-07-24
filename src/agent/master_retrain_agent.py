@@ -1,18 +1,4 @@
-"""
-master_retrain_agent.py
-Bộ não chính (Master Retrain Agent) — chạy sau khi đã có verify report.
-
-Flow:
-  1. Đọc prediction_results đã verify mới nhất hoặc ngày truyền vào.
-  2. Phân loại single vs multi/ensemble prediction.
-  3. Với mỗi đài bị MISS: decision_engine.analyze() → quyết định
-  4. Nếu should_retrain và prediction trainable: trigger train_xgb.py qua subprocess
-  4. Log tất cả quyết định vào agent_actions table
-  5. Gửi Telegram summary về hành động đã thực hiện
-
-Usage độc lập (dry-run):
-  python src/agent/master_retrain_agent.py --date 2026-02-28 --dry-run
-"""
+"""Coordinate XSMN provincial ML retraining and rule-family refresh after verify."""
 
 import argparse
 import asyncio
@@ -20,26 +6,32 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from src.database.supabase_client import LotteryDB
-from src.bot.telegram_bot import LotteryNotifier
 from src.agent.decision_engine import DecisionEngine
-from src.agent.hyperparameter_strategy import recommend_params, build_train_args, describe_strategy
+from src.agent.hyperparameter_strategy import (
+    build_lstm_train_args,
+    build_train_args,
+    recommend_params,
+)
+from src.agent.provincial_model_refresh import RULE_FAMILIES, refresh_rule_families
+from src.bot.telegram_bot import LotteryNotifier
+from src.database.supabase_client import LotteryDB
 
 
-# ─── Config ──────────────────────────────────────────────────────────────────
-
-SCRIPT_DIR = os.path.dirname(os.path.dirname(__file__))  # src/
-TRAIN_SCRIPT = os.path.join(os.path.dirname(SCRIPT_DIR), "src", "scripts", "train_xgb.py")
-PYTHON_EXEC = sys.executable  # dùng cùng Python environment
-
-# Mapping province → weekday (từ verify_v3.py)
-# Dùng để biết weekday model nào cần retrain
-# Slug format: hyphen (khớp với DB)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+TRAIN_SCRIPTS = {
+    "xgboost": os.path.join(PROJECT_ROOT, "src", "scripts", "train_xgb.py"),
+    "lstm": os.path.join(PROJECT_ROOT, "src", "scripts", "train_lstm.py"),
+}
+TRAIN_TIMEOUTS = {"xgboost": 1800, "lstm": 1800}
+PYTHON_EXEC = sys.executable
+ML_FAMILIES = {"xgboost": "xgboost_core", "lstm": "lstm"}
+SUCCESS_STATUSES = {"trained", "refreshed", "fresh", "newer"}
 XSMN_WEEKDAY_MAP = {
     0: ["tp-hcm", "dong-thap", "ca-mau"],
     1: ["ben-tre", "vung-tau", "bac-lieu"],
@@ -51,45 +43,41 @@ XSMN_WEEKDAY_MAP = {
 }
 
 
+@dataclass(frozen=True)
+class ProvincialTarget:
+    """One complete province-weekday feature target."""
+
+    province: str
+    weekday: int
+    pair_count: int
+    complete: bool
+    error: Optional[str] = None
+
+
 def _get_weekday_for_province(province: str, target_weekday: int) -> Optional[int]:
-    """Trả về weekday model cần check/retrain cho tỉnh XSMN."""
-    # Chuẩn hóa về hyphen-slug (khớp với DB)
+    """Return the matching XSMN weekday for a province slug."""
     normalized = province.replace("_", "-")
-    stations = XSMN_WEEKDAY_MAP.get(target_weekday, [])
-    if normalized in stations:
-        return target_weekday
-    return None
+    return target_weekday if normalized in XSMN_WEEKDAY_MAP.get(target_weekday, []) else None
 
 
 def _prediction_scope(prediction: dict) -> str:
-    """Return 'multi' for ensemble rows, otherwise 'single'."""
-    model_version = str(prediction.get("model_version") or "")
-    if model_version.startswith("ensemble"):
-        return "multi"
-    return "single"
+    """Return ``multi`` for ensemble rows, otherwise ``single``."""
+    return "multi" if str(prediction.get("model_version") or "").startswith("ensemble") else "single"
 
 
-def _is_directly_trainable_prediction(region: str, province: Optional[str], model_scope: str) -> bool:
-    """
-    Whether this verified prediction maps to one train_xgb.py target.
-
-    XSMN global ensemble rows use province='all' and combine many provinces plus
-    rule-based sub-models. They are evaluated here, but there is no direct
-    XSMN/all XGBoost training target in pair_features; per-province XSMN single
-    rows and XSMB rows remain trainable.
-    """
-    if region.upper() == "XSMN" and model_scope == "multi" and province in (None, "all"):
-        return False
-        
-    # User disabled XGBoost/LSTM training for XSMB (only rule-based models active)
+def _is_directly_trainable_prediction(
+    region: str,
+    province: Optional[str],
+    model_scope: str,
+) -> bool:
+    """Retain the legacy helper while provincial targets replace prediction-driven routing."""
     if region.upper() == "XSMB":
         return False
-        
-    return True
+    return not (region.upper() == "XSMN" and model_scope == "multi" and province in (None, "all"))
 
 
 def _latest_verified_date(db: LotteryDB) -> Optional[date]:
-    """Return the most recent prediction_date that has verified results."""
+    """Return the most recent verified prediction date."""
     rows = (
         db.supabase.table("prediction_results")
         .select("prediction_date")
@@ -99,20 +87,158 @@ def _latest_verified_date(db: LotteryDB) -> Optional[date]:
         .execute()
         .data
     )
-    if not rows:
+    return date.fromisoformat(rows[0]["prediction_date"]) if rows else None
+
+
+def _resolve_targets(db: LotteryDB, target_date: date) -> list[ProvincialTarget]:
+    """Resolve scheduled provinces and require exactly 100 labeled unique pairs."""
+    targets = []
+    for province in XSMN_WEEKDAY_MAP.get(target_date.weekday(), []):
+        try:
+            rows = (
+                db.supabase.table("pair_features")
+                .select("pair,hit")
+                .eq("region", "XSMN")
+                .eq("province", province)
+                .eq("feature_date", target_date.isoformat())
+                .not_.is_("hit", "null")
+                .execute()
+                .data
+            )
+            pairs = {int(row["pair"]) for row in rows if row.get("pair") is not None}
+            complete = len(rows) == 100 and pairs == set(range(100))
+            error = None if complete else (
+                f"Expected 100 labeled unique pairs, got rows={len(rows)}, unique={len(pairs)}"
+            )
+            targets.append(ProvincialTarget(province, target_date.weekday(), len(pairs), complete, error))
+        except Exception as exc:
+            targets.append(ProvincialTarget(province, target_date.weekday(), 0, False, str(exc)))
+    return targets
+
+
+def _is_ml_fresh(
+    db: LotteryDB,
+    province: str,
+    weekday: int,
+    family: str,
+    target_date: date,
+) -> bool:
+    """Check artifact freshness at the full family/province/weekday grain."""
+    try:
+        rows = (
+            db.supabase.table("model_registry")
+            .select("version,train_end_date")
+            .eq("region", "XSMN")
+            .eq("province", province)
+            .eq("weekday", weekday)
+            .eq("model_name", ML_FAMILIES[family])
+            .eq("status", "active")
+            .eq("train_end_date", target_date.isoformat())
+            .limit(1)
+            .execute()
+            .data
+        )
+        return bool(rows)
+    except Exception as exc:
+        print(f"     ⚠️ {family} freshness query failed: {exc}")
+        return False
+
+
+def _newer_ml_train_end(
+    db: LotteryDB,
+    province: str,
+    weekday: int,
+    family: str,
+    target_date: date,
+) -> Optional[str]:
+    """Return a newer active cutoff so historical recovery cannot roll production back."""
+    try:
+        rows = (
+            db.supabase.table("model_registry")
+            .select("train_end_date")
+            .eq("region", "XSMN")
+            .eq("province", province)
+            .eq("weekday", weekday)
+            .eq("model_name", ML_FAMILIES[family])
+            .eq("status", "active")
+            .gt("train_end_date", target_date.isoformat())
+            .order("train_end_date", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0]["train_end_date"] if rows else None
+    except Exception as exc:
+        print(f"     ⚠️ {family} newer-artifact query failed: {exc}")
         return None
-    return date.fromisoformat(rows[0]["prediction_date"])
 
 
-def _log_action(db: LotteryDB, action_date: date, region: str, province: Optional[str],
-                 weekday: Optional[int], action_type: str, reason: str,
-                 strategy: Optional[str], old_auc: Optional[float],
-                 old_hit_rate: Optional[float], old_params: dict, new_params: dict):
-    """Ghi hành động agent vào agent_actions table."""
+def _previous_rule_updates(
+    db: LotteryDB,
+    province: str,
+    weekday: int,
+    target_date: date,
+) -> dict[str, dict[str, Any]]:
+    """Read successful rule freshness from prior idempotent coordinator attempts."""
+    try:
+        rows = (
+            db.supabase.table("agent_actions")
+            .select("new_params")
+            .eq("action_date", target_date.isoformat())
+            .eq("region", "XSMN")
+            .eq("province", province)
+            .eq("weekday", weekday)
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+            .data
+        )
+    except Exception:
+        return {}
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = row.get("new_params") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                continue
+        if not isinstance(payload, dict):
+            continue
+        model_updates = payload.get("model_updates") or {}
+        if not isinstance(model_updates, dict):
+            continue
+        for family, update in model_updates.items():
+            if not isinstance(update, dict):
+                continue
+            if family in RULE_FAMILIES and family not in merged:
+                if (
+                    update.get("status") in SUCCESS_STATUSES
+                    and update.get("latest_history_date") == target_date.isoformat()
+                    and int(update.get("n_draws_used") or 0) > 0
+                ):
+                    merged[family] = update
+    return merged
+
+
+def _log_action(
+    db: LotteryDB,
+    action_date: date,
+    province: str,
+    weekday: int,
+    action_type: str,
+    reason: str,
+    strategy: Optional[str],
+    old_auc: Optional[float],
+    old_hit_rate: Optional[float],
+    old_params: dict,
+    new_params: dict,
+) -> bool:
+    """Write one six-family provincial audit to the existing JSON fields."""
     try:
         db.supabase.table("agent_actions").insert({
             "action_date": action_date.isoformat(),
-            "region": region,
+            "region": "XSMN",
             "province": province,
             "weekday": weekday,
             "action_type": action_type,
@@ -121,51 +247,67 @@ def _log_action(db: LotteryDB, action_date: date, region: str, province: Optiona
             "old_metric_auc": old_auc,
             "old_hit_rate": old_hit_rate,
             "old_params": json.dumps(old_params) if old_params else None,
-            "new_params": json.dumps(new_params) if new_params else None,
+            "new_params": json.dumps(new_params),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
-    except Exception as e:
-        print(f"  ⚠️  Không ghi được agent_actions: {e}")
-
-
-def _trigger_retrain(region: str, province: Optional[str], weekday: Optional[int],
-                     new_params: dict, dry_run: bool) -> bool:
-    """
-    Trigger train_xgb.py qua subprocess.
-    Returns True nếu thành công (hoặc dry_run).
-    """
-    args = build_train_args(region, province, weekday, new_params)
-    cmd = [PYTHON_EXEC, TRAIN_SCRIPT] + args
-
-    label = f"{region}/{province or 'all'}"
-    print(f"\n  🚀 Trigger retrain: {label}")
-    print(f"     CMD: {' '.join(cmd)}")
-
-    if dry_run:
-        print(f"  🔵 [DRY-RUN] Không thực sự chạy train")
         return True
+    except Exception as exc:
+        print(f"  ⚠️ Không ghi được agent_actions: {exc}")
+        return False
 
+
+def _run_train_process(family: str, args: list[str], dry_run: bool) -> bool:
+    """Run one ML family independently so a failure cannot stop sibling families."""
+    cmd = [PYTHON_EXEC, TRAIN_SCRIPTS[family], *args]
+    print(f"     🚀 {family}: {' '.join(cmd)}")
+    if dry_run:
+        return True
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 phút cho walk-forward validation
+            timeout=TRAIN_TIMEOUTS[family],
         )
-        if result.returncode == 0:
-            print(f"  ✅ Train thành công: {label}")
-            print(result.stdout[-500:] if result.stdout else "")
-            return True
-        else:
-            print(f"  ❌ Train thất bại (code={result.returncode}): {label}")
-            print(result.stderr[-300:] if result.stderr else "")
-            return False
     except subprocess.TimeoutExpired:
-        print(f"  ❌ Train timeout (>30 phút): {label}")
+        print(f"     ❌ {family} timeout >{TRAIN_TIMEOUTS[family] // 60} phút")
         return False
-    except Exception as e:
-        print(f"  ❌ Lỗi khi trigger train: {e}")
+    except Exception as exc:
+        print(f"     ❌ {family}: {exc}")
         return False
+    if result.returncode != 0:
+        print(f"     ❌ {family} exit={result.returncode}: {(result.stderr or result.stdout)[-500:]}")
+        return False
+    print(f"     ✅ {family}: {(result.stdout or '')[-300:]}")
+    return True
+
+
+def _complete_training_queue(db: LotteryDB, province: str) -> bool:
+    """Mark a provincial queue item done only after all six families and audit succeed."""
+    try:
+        (
+            db.supabase.table("training_queue")
+            .update({"status": "done", "completed_at": datetime.now(timezone.utc).isoformat()})
+            .eq("region", "XSMN")
+            .eq("province", province)
+            .eq("status", "triggered")
+            .execute()
+        )
+        return True
+    except Exception as exc:
+        print(f"     ⚠️ training_queue completion failed: {exc}")
+        return False
+
+
+def _verified_single_by_province(verify_results: list[dict]) -> dict[str, dict]:
+    """Index verified single rows without making them target authority."""
+    return {
+        row["province"]: row
+        for row in verify_results
+        if row.get("region", "").upper() == "XSMN"
+        and row.get("province") not in (None, "all")
+        and (row.get("model_scope") or _prediction_scope(row)) == "single"
+    }
 
 
 async def run_agent(
@@ -174,222 +316,248 @@ async def run_agent(
     verify_results: list[dict],
     target_date: date,
     dry_run: bool = False,
-):
-    """
-    Entrypoint chính — gọi bởi workflow 04 sau khi verify report đã có.
-
-    Args:
-        verify_results: list của dict {"label", "hit", "pairs", "matched", "region", "province"}
-        target_date: ngày đã verify
-        dry_run: nếu True, chỉ in quyết định, không thực sự trigger train
-    """
-    if not verify_results:
-        return
-
+) -> list[dict[str, Any]]:
+    """Update all six model families for every complete scheduled XSMN target."""
+    print(f"\n{'=' * 64}\n🤖 Provincial Model Coordinator — {target_date}\n{'=' * 64}")
+    targets = _resolve_targets(db, target_date)
+    verified = _verified_single_by_province(verify_results)
     engine = DecisionEngine()
-    weekday = target_date.weekday()
+    summaries: list[dict[str, Any]] = []
 
-    print(f"\n{'='*50}")
-    print(f"🤖 Master Retrain Agent — {target_date} {'[DRY-RUN]' if dry_run else ''}")
-    print(f"{'='*50}")
+    for target in targets:
+        print(f"\n  📍 XSMN/{target.province} [weekday={target.weekday}]")
+        if not target.complete:
+            updates = {
+                family: {
+                    "status": "failed",
+                    "latest_history_date": None,
+                    "n_draws_used": target.pair_count,
+                    "error": target.error,
+                }
+                for family in (*ML_FAMILIES, *RULE_FAMILIES)
+            }
+            summary = {
+                "province": target.province,
+                "success": False,
+                "action_type": "skipped",
+                "model_updates": updates,
+                "audit_ok": True,
+                "queue_ok": True,
+            }
+            if not dry_run:
+                summary["audit_ok"] = _log_action(
+                    db, target_date, target.province, target.weekday,
+                    "skipped", target.error or "Incomplete labels",
+                    None, None, None, {}, {"target_date": target_date.isoformat(), "model_updates": updates},
+                )
+            summaries.append(summary)
+            continue
 
-    actions_summary = []
-
-    for r in verify_results:
-        region = r.get("region", "")
-        province = r.get("province")
-        hit = r.get("hit", False)
-        model_scope = r.get("model_scope") or _prediction_scope(r)
-        scope_label = "MULTI" if model_scope == "multi" else "SINGLE"
-        label = r.get("label", f"{region}/{province or 'all'}")
-        display_label = f"{scope_label} {label}"
-
-        # Xác định weekday model cần check
-        if region.upper() == "XSMB":
-            # XSMB v5.0 Unified Model: Không dùng weekday-specific model nữa
-            station_weekday = None
+        prediction = verified.get(target.province)
+        if prediction:
+            try:
+                decision = engine.analyze(
+                    "XSMN", target.province, target.weekday,
+                    bool(prediction.get("hit")), db, target_date,
+                )
+                strategy = decision.strategy or "maintain"
+                old_auc = decision.old_metric_auc
+                old_hit_rate = decision.old_hit_rate
+                consecutive_fails = decision.consecutive_fails
+                reason = decision.reason
+            except Exception as exc:
+                strategy = "maintain"
+                old_auc = old_hit_rate = None
+                consecutive_fails = 0
+                reason = f"Decision metrics unavailable; maintain strategy: {exc}"
         else:
-            station_weekday = _get_weekday_for_province(province or "", weekday)
+            strategy = "maintain"
+            old_auc = old_hit_rate = None
+            consecutive_fails = 0
+            reason = "Missing single prediction; default deterministic maintain strategy"
 
-        # Phân tích quyết định
-        decision = engine.analyze(
-            region=region,
-            province=province,
-            weekday=station_weekday,
-            hit_today=hit,
-            db=db,
-            target_date=target_date,
+        old_params, xgb_params = recommend_params(
+            strategy,
+            region="XSMN",
+            consecutive_fails=consecutive_fails,
+            old_auc=old_auc,
+            old_hit_rate=old_hit_rate,
         )
+        xgb_params["_target_date"] = target_date.isoformat()
+        updates: dict[str, dict[str, Any]] = {}
 
-        action_icon = {
-            "no_action": "✅",
-            "skipped": "⏭️",
-            "retrain_triggered": "🔁",
-        }.get(decision.action_type, "❓")
+        for family in ML_FAMILIES:
+            newer_train_end = _newer_ml_train_end(
+                db, target.province, target.weekday, family, target_date
+            )
+            if newer_train_end:
+                updates[family] = {
+                    "status": "newer",
+                    "train_end_date": newer_train_end,
+                    "error": "Historical target skipped to preserve newer active artifact",
+                }
+                continue
+            if _is_ml_fresh(db, target.province, target.weekday, family, target_date):
+                updates[family] = {
+                    "status": "fresh",
+                    "train_end_date": target_date.isoformat(),
+                    "error": None,
+                }
+                continue
+            args = (
+                build_train_args("XSMN", target.province, target.weekday, xgb_params)
+                if family == "xgboost"
+                else build_lstm_train_args("XSMN", target.province, target.weekday, target_date)
+            )
+            process_ok = _run_train_process(family, args, dry_run)
+            registry_ok = dry_run or _is_ml_fresh(
+                db, target.province, target.weekday, family, target_date
+            )
+            updates[family] = {
+                "status": "trained" if registry_ok else "failed",
+                "train_end_date": target_date.isoformat() if registry_ok else None,
+                "error": (
+                    "Subprocess exited nonzero after publishing a fresh artifact"
+                    if registry_ok and not process_ok
+                    else None
+                ) if registry_ok else (
+                    "Training subprocess failed" if not process_ok
+                    else "Registry freshness check failed"
+                ),
+            }
 
-        print(f"\n  {action_icon} {display_label}: {decision.reason}")
-
-        old_params = {}
-        new_params = {}
-        train_success = None
-        action_type = decision.action_type
-        reason = f"[{model_scope}] {decision.reason}"
-        strategy = decision.strategy
-
-        if decision.should_retrain:
-            if not _is_directly_trainable_prediction(region, province, model_scope):
-                action_type = "skipped"
-                reason += " | Global XSMN multi ensemble is evaluated but not directly trainable; province-level XGB rows handle retrain."
-                strategy = None
-                print("     ⏭️  Global XSMN ensemble row is monitor-only for direct retrain.")
-            else:
-                old_params, new_params = recommend_params(
-                    decision.strategy,
-                    region=region,
-                    consecutive_fails=decision.consecutive_fails,
-                    old_auc=decision.old_metric_auc,
-                    old_hit_rate=decision.old_hit_rate,
+        prior_rules = _previous_rule_updates(db, target.province, target.weekday, target_date)
+        pending_rules = {
+            family: predictor
+            for family, predictor in RULE_FAMILIES.items()
+            if family not in prior_rules
+        }
+        for family, previous in prior_rules.items():
+            updates[family] = {**previous, "status": "fresh"}
+        if pending_rules:
+            updates.update(
+                refresh_rule_families(
+                    db, target.province, target.weekday, target_date,
+                    families=pending_rules,
                 )
-                strategy_desc = describe_strategy(decision.strategy, old_params, new_params)
-                print(f"     📊 Strategy: {strategy_desc}")
-
-                train_success = _trigger_retrain(
-                    region=region,
-                    province=province,
-                    weekday=station_weekday,
-                    new_params=new_params,
-                    dry_run=dry_run,
-                )
-
-        # Ghi log vào DB. Dry-run là chế độ kiểm tra thủ công, không tạo audit action.
-        if dry_run:
-            print("     🔵 [DRY-RUN] Skip writing agent_actions")
-        else:
-            _log_action(
-                db=db,
-                action_date=target_date,
-                region=region,
-                province=province,
-                weekday=station_weekday,
-                action_type=action_type,
-                reason=reason,
-                strategy=strategy,
-                old_auc=decision.old_metric_auc,
-                old_hit_rate=decision.old_hit_rate,
-                old_params=old_params,
-                new_params=new_params,
             )
 
-        actions_summary.append({
-            "label": display_label,
-            "model_scope": model_scope,
+        success = all(
+            updates.get(family, {}).get("status") in SUCCESS_STATUSES
+            for family in (*ML_FAMILIES, *RULE_FAMILIES)
+        )
+        trained_ml = any(
+            updates.get(family, {}).get("status") == "trained" for family in ML_FAMILIES
+        )
+        refreshed_rules = any(
+            updates.get(family, {}).get("status") == "refreshed" for family in RULE_FAMILIES
+        )
+        action_type = (
+            "retrain_triggered" if trained_ml
+            else "refresh_triggered" if refreshed_rules
+            else "no_action" if success
+            else "retrain_failed"
+        )
+        print(f"     {'✅' if success else '❌'} updates={updates}")
+        audit_payload = {
+            "target_date": target_date.isoformat(),
+            "model_updates": updates,
+            "xgboost_params": xgb_params,
+        }
+        audit_ok = True
+        queue_ok = True
+        if not dry_run:
+            audit_ok = _log_action(
+                db, target_date, target.province, target.weekday, action_type,
+                reason, strategy, old_auc, old_hit_rate, old_params, audit_payload,
+            )
+            if not audit_ok:
+                success = False
+            elif success and not _complete_training_queue(db, target.province):
+                queue_ok = False
+                success = False
+        summaries.append({
+            "province": target.province,
+            "success": success,
             "action_type": action_type,
-            "reason": reason,
             "strategy": strategy,
-            "train_success": train_success,
-            "consecutive_fails": decision.consecutive_fails,
+            "model_updates": updates,
+            "audit_ok": audit_ok,
+            "queue_ok": queue_ok,
         })
 
-    # Gửi Telegram summary
-    await _send_agent_report(notifier, actions_summary, target_date, dry_run)
+    await _send_agent_report(notifier, summaries, target_date, dry_run)
+    return summaries
 
 
 async def _send_agent_report(
     notifier: LotteryNotifier,
-    actions: list[dict],
+    actions: list[dict[str, Any]],
     target_date: date,
     dry_run: bool,
-):
-    """Gửi Telegram report tổng hợp về hành động của agent."""
-    retrain_list = [a for a in actions if a["action_type"] == "retrain_triggered"]
-    skip_list    = [a for a in actions if a["action_type"] == "skipped"]
-    single_count = sum(1 for a in actions if a.get("model_scope") == "single")
-    multi_count = sum(1 for a in actions if a.get("model_scope") == "multi")
-
-    # Chỉ gửi nếu có hành động đáng chú ý (có retrain hoặc có skip với lý do)
-    if not retrain_list and not skip_list:
-        print("\n🤖 Agent: Tất cả đài đều trúng — không cần hành động.")
+) -> None:
+    """Send a compact six-family freshness report."""
+    if (
+        not dry_run
+        and actions
+        and all(action.get("success") and action.get("action_type") == "no_action"
+                for action in actions)
+    ):
+        print("ℹ️ Tất cả model đã fresh; bỏ qua Telegram recovery no-op")
         return
 
-    date_str = target_date.strftime("%d/%m/%Y")
     dry_tag = " [DRY-RUN]" if dry_run else ""
-    msg = f"🤖 <b>AGENT RETRAIN REPORT{dry_tag} — {date_str}</b>\n\n"
-    msg += f"Scope: <code>{single_count}</code> single | <code>{multi_count}</code> multi\n\n"
-
-    if retrain_list:
-        msg += "🔁 <b>Đã trigger retrain:</b>\n"
-        for a in retrain_list:
-            status_icon = "✅" if a["train_success"] else "❌"
-            msg += (
-                f"  {status_icon} {a['label']}\n"
-                f"     Strategy: <code>{a['strategy']}</code> | "
-                f"Fail streak: {a['consecutive_fails']} kỳ\n"
-            )
-        msg += "\n"
-
-    if skip_list:
-        msg += "⏭️ <b>Đã bỏ qua (cooldown/metric OK):</b>\n"
-        for a in skip_list:
-            msg += f"  • {a['label']}: <i>{a['reason']}</i>\n"
-
-    await notifier.send_message(msg, config_key="master_retrain_agent")
+    message = (
+        f"🤖 <b>XSMN MODEL REFRESH{dry_tag} — {target_date.strftime('%d/%m/%Y')}</b>\n\n"
+    )
+    for action in actions:
+        icon = "✅" if action["success"] else "❌"
+        failed = [
+            family for family, update in action["model_updates"].items()
+            if update.get("status") not in SUCCESS_STATUSES
+        ]
+        suffix = (
+            "audit failed" if action.get("audit_ok") is False
+            else "queue completion failed" if action.get("queue_ok") is False
+            else "đủ 6/6" if not failed
+            else f"failed: {', '.join(failed)}"
+        )
+        message += f"{icon} <code>{action['province']}</code>: {suffix}\n"
+    await notifier.send_message(message, config_key="master_retrain_agent")
 
 
-# ─── Standalone entrypoint ───────────────────────────────────────────────────
-
-async def main():
-    """
-    Chạy agent độc lập (không cần verify_v3.py).
-    Đọc kết quả verify từ DB cho ngày chỉ định.
-    """
-    parser = argparse.ArgumentParser(description="Master Retrain Agent")
-    parser.add_argument("--date", type=str, help="Ngày target (YYYY-MM-DD). Mặc định = latest verified")
-    parser.add_argument("--dry-run", action="store_true", help="Chỉ in quyết định, không thực sự retrain")
+async def main() -> None:
+    """Run post-verify or scheduled idempotent recovery."""
+    parser = argparse.ArgumentParser(description="XSMN Provincial Model Coordinator")
+    parser.add_argument("--date", type=str, help="Target date YYYY-MM-DD")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
     db = LotteryDB()
     notifier = LotteryNotifier(db, default_config_key="master_retrain_agent")
+    target_date = date.fromisoformat(args.date) if args.date else _latest_verified_date(db)
+    if target_date is None:
+        print("⚠️ Không có ngày verify để refresh")
+        raise SystemExit(1)
 
-    if args.date:
-        target_date = date.fromisoformat(args.date)
-    else:
-        latest_date = _latest_verified_date(db)
-        if latest_date is None:
-            print("⚠️  Không có prediction đã verify để đánh giá retrain")
-            return
-        target_date = latest_date
-
-    # Lấy kết quả verify từ DB
     preds = (
         db.supabase.table("prediction_results")
-        .select("region,province,hit,pair_1,pair_2,pair_3,matched_pairs,model_version")
+        .select("region,province,hit,model_version")
         .eq("prediction_date", target_date.isoformat())
-        .not_.is_("hit", "null")  # chỉ lấy row đã verify xong
+        .not_.is_("hit", "null")
         .execute()
         .data
     )
-
-    if not preds:
-        print(f"⚠️  Không có kết quả verify cho {target_date}")
-        return
-
-    # Chuẩn hóa format giống verify_results trong verify_v3.py
     verify_results = [
         {
-            "label": f"{p['region']}/{p['province'] or 'all'}",
-            "region": p["region"],
-            "province": p["province"],
-            "hit": p["hit"],
-            "pairs": [p["pair_1"], p["pair_2"], p["pair_3"]],
-            "matched": p.get("matched_pairs") or [],
-            "model_version": p.get("model_version"),
-            "model_scope": _prediction_scope(p),
+            **row,
+            "model_scope": _prediction_scope(row),
+            "label": f"{row['region']}/{row.get('province') or 'all'}",
         }
-        for p in preds
+        for row in preds
     ]
-
-    print(f"📋 Loaded {len(verify_results)} prediction results cho {target_date}")
-    await run_agent(db, notifier, verify_results, target_date, dry_run=args.dry_run)
+    summaries = await run_agent(db, notifier, verify_results, target_date, args.dry_run)
+    if not summaries or any(not item["success"] for item in summaries):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

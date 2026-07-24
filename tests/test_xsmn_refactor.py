@@ -11,8 +11,54 @@ from src.scoring.credibility_scorer import (
     _has_minimum_scope_samples,
 )
 from src.scripts.predict_ensemble import _execute_paged_rows, _flatten_tail_rows_by_draw
-from src.xsmn_ensemble.model_lstm import LotteryLSTM, _deterministic_training_seed
+from src.xsmn_ensemble.model_lstm import (
+    LotteryLSTM,
+    _deterministic_training_seed,
+    _get_lstm_model,
+)
 from src.xsmn_ensemble.model_markov import _valid_context
+from src.xsmn_ensemble.model_xgboost import _get_active_model
+
+
+class _RegistryQuery:
+    def __init__(self, rows_by_key):
+        self.rows_by_key = rows_by_key
+        self.filters = {}
+
+    def select(self, *_args):
+        return self
+
+    def eq(self, column, value):
+        self.filters[column] = value
+        return self
+
+    def is_(self, column, _null):
+        self.filters[column] = None
+        return self
+
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args):
+        return self
+
+    def execute(self):
+        key = (
+            self.filters.get("province"),
+            self.filters.get("weekday"),
+            self.filters.get("model_name"),
+        )
+        return type("Result", (), {"data": self.rows_by_key.get(key, [])})()
+
+
+class _RegistryDB:
+    def __init__(self, rows_by_key):
+        self.rows_by_key = rows_by_key
+        self.supabase = self
+
+    def table(self, name):
+        assert name == "model_registry"
+        return _RegistryQuery(self.rows_by_key)
 
 
 def test_history_rows_preserve_one_occurrence_per_draw() -> None:
@@ -237,6 +283,26 @@ def test_lstm_seed_is_applied_before_parameter_initialization(monkeypatch) -> No
         assert "initialization order" in str(error)
 
     assert events == [("seed", 1234), ("build", None)]
+
+
+def test_lstm_registry_prefers_exact_province_weekday_artifact() -> None:
+    db = _RegistryDB({
+        ("tp-hcm", 5, "lstm"): [{"version": "sat"}],
+        ("tp-hcm", None, "lstm"): [{"version": "legacy"}],
+    })
+
+    assert _get_lstm_model(db, "XSMN", "tp-hcm", 5)["version"] == "sat"
+
+
+def test_xgb_registry_preserves_province_priority_during_legacy_fallback() -> None:
+    db = _RegistryDB({
+        ("tp-hcm", None, None): [{"version": "province-legacy"}],
+        (None, 5, "xgboost_core"): [{"version": "global-new"}],
+    })
+
+    result = _get_active_model(db, "XSMN", "tp-hcm", 5)
+
+    assert result["version"] == "province-legacy"
 
 
 def test_markov_context_does_not_drop_high_numbered_pairs() -> None:

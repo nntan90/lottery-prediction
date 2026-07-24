@@ -10,6 +10,7 @@ Quyết định hyperparameters mới cho XGBoost dựa vào số lần fail li�
   full_reset       : Quay về defaults + --force → reset hoàn toàn
 """
 
+from datetime import date
 from typing import Tuple
 
 # ─── Hyperparameter presets ──────────────────────────────────────────────────
@@ -149,9 +150,10 @@ def build_train_args(region: str, province: str | None, weekday: int | None, new
     Returns:
         List[str] — args để truyền vào subprocess
     """
-    from datetime import date
+    target_date = new_params.get("_target_date")
+    version_date = str(target_date).replace("-", "") if target_date else date.today().strftime("%Y%m%d")
     wd_suffix = f"_wd{weekday}" if weekday is not None else ""
-    version = f"v3_agent_{date.today().strftime('%Y%m%d')}{wd_suffix}"
+    version = f"v3_agent_{version_date}{wd_suffix}"
 
     args = [
         "--region", region,
@@ -174,6 +176,34 @@ def build_train_args(region: str, province: str | None, weekday: int | None, new
     if new_params.get("_min_draws"):
         args += ["--min_draws", str(new_params["_min_draws"])]
 
+    if target_date:
+        args += ["--target-date", str(target_date)]
+
+    args.append("--defer-queue-completion")
+    return args
+
+
+def build_lstm_train_args(
+    region: str,
+    province: str | None,
+    weekday: int | None,
+    target_date: date,
+    *,
+    epochs: int = 40,
+) -> list[str]:
+    """Build deterministic train_lstm.py arguments for one provincial artifact."""
+    wd_suffix = f"_wd{weekday}" if weekday is not None else ""
+    version = f"lstm_v4_{target_date.strftime('%Y%m%d')}{wd_suffix}"
+    args = [
+        "--region", region,
+        "--province", province or "all",
+        "--version", version,
+        "--target-date", target_date.isoformat(),
+        "--epochs", str(epochs),
+        "--defer-queue-completion",
+    ]
+    if weekday is not None:
+        args += ["--weekday", str(weekday)]
     return args
 
 

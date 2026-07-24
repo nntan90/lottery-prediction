@@ -1,10 +1,13 @@
 name: 04 - Evaluate Retrain Models
 
-# Chạy mỗi ngày lúc 23:00 VN (16:00 UTC), sau khi verify prediction đã xong.
+# Chạy 23:00 và các mốc recovery qua đêm, sau khi verify prediction đã xong.
 # Agent đọc prediction_results đã verify mới nhất và đánh giá cả single + multi model.
 on:
   schedule:
     - cron: '0 16 * * *'  # 23:00 GMT+7 (16:00 UTC)
+    - cron: '0 18 * * *'  # 01:00 GMT+7 recovery
+    - cron: '0 20 * * *'  # 03:00 GMT+7 recovery
+    - cron: '0 22 * * *'  # 05:00 GMT+7 recovery
   workflow_dispatch:  # Cho phép trigger thủ công
     inputs:
       target_date:
@@ -20,6 +23,10 @@ jobs:
   evaluate-retrain:
     name: Evaluate Retrain Decisions (Single + Multi)
     runs-on: ubuntu-latest
+    timeout-minutes: 300
+    concurrency:
+      group: xsmn-provincial-model-refresh
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code

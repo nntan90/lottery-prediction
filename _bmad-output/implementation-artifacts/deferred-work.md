@@ -19,3 +19,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-walk-forward-training-validation.md`
   summary: Bound or monitor XGBoost training-history growth before walk-forward runtime reaches operational limits.
   evidence: Auto-training loads all station history and now performs up to five validation fits plus one final fit, so runtime and memory grow with every draw.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-retrain-all-xsmn-provincial-models.md`
+  summary: Verify active ML artifact bytes in Storage before treating a registry row as fresh.
+  evidence: Current idempotency proves exact province-weekday-family metadata and cutoff, but a missing or corrupt object would only be discovered when prediction loads it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-retrain-all-xsmn-provincial-models.md`
+  summary: Resolve historical prediction artifacts with a target-date cutoff for backtests and backfills.
+  evidence: Production rollback is now prevented, but a backfilled prediction can still load the latest active artifact trained after its historical target date.

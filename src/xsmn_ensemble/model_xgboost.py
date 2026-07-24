@@ -89,13 +89,18 @@ def _get_active_model(db, region: str, province: Optional[str] = None, weekday: 
     Lấy model active cho region/province.
     Ưu tiên: model có province == province, sau đó fallback province IS NULL (model chung).
     """
-    def _query(prov_value, wd):
+    def _query(prov_value, wd, family: Optional[str]):
         q = db.supabase.table("model_registry") \
             .select("*") \
             .eq("region", region) \
             .eq("status", "active") \
             .order("trained_at", desc=True) \
             .limit(1)
+
+        if family is None:
+            q = q.is_("model_name", "null")
+        else:
+            q = q.eq("model_name", family)
 
         if prov_value:
             q = q.eq("province", prov_value)
@@ -109,26 +114,21 @@ def _get_active_model(db, region: str, province: Optional[str] = None, weekday: 
 
         return q.execute().data
 
-    # 1. Model province-specific + weekday
+    locations = []
     if weekday is not None:
-        result = _query(province, weekday)
-        if result:
-            return result[0]
-
-    # 2. Model province-specific (no weekday)
-    result = _query(province, None)
-    if result:
-        return result[0]
-
-    # 3. Model chung (province=NULL) + weekday
+        locations.append((province, weekday))
+    locations.append((province, None))
     if weekday is not None:
-        result = _query(None, weekday)
-        if result:
-            return result[0]
+        locations.append((None, weekday))
+    locations.append((None, None))
 
-    # 4. Model chung (province=NULL, weekday=NULL)
-    result = _query(None, None)
-    return result[0] if result else None
+    # Preserve province/weekday specificity; within each location prefer exact family.
+    for prov_value, wd in locations:
+        for family in ("xgboost_core", "xgboost", None):
+            result = _query(prov_value, wd, family)
+            if result:
+                return result[0]
+    return None
 
 
 def predict_xgboost(
