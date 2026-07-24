@@ -27,3 +27,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-retrain-all-xsmn-provincial-models.md`
   summary: Resolve historical prediction artifacts with a target-date cutoff for backtests and backfills.
   evidence: Production rollback is now prevented, but a backfilled prediction can still load the latest active artifact trained after its historical target date.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-improve-xsmn-telegram-message.md`
+  summary: Validate lottery pair range and finite scores at the shared Telegram formatter boundary.
+  evidence: Existing upstream contracts supply valid values, but the formatter itself still accepts malformed pair identifiers and NaN/Infinity scores.
