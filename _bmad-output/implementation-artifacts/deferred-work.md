@@ -31,3 +31,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-improve-xsmn-telegram-message.md`
   summary: Validate lottery pair range and finite scores at the shared Telegram formatter boundary.
   evidence: Existing upstream contracts supply valid values, but the formatter itself still accepts malformed pair identifiers and NaN/Infinity scores.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-refactor-verification-and-result-message.md`
+  summary: Report partially skipped prediction rows when some stations have no `tails_2d`.
+  evidence: `verify_v3.py` records missing-result labels but only reports them when every prediction is skipped, so a partial verification can appear complete.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-refactor-verification-and-result-message.md`
+  summary: Add Telegram-safe HTML chunking for long verification reports.
+  evidence: The notifier sends one message and production target-province overrides or stale model rows can grow the report beyond Telegram's message limit.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-refactor-verification-and-result-message.md`
+  summary: Make verification notification delivery failure observable to the workflow.
+  evidence: `verify_v3.py` currently ignores a false return from `send_message()`, so a rejected or failed Telegram delivery still logs successful verification.

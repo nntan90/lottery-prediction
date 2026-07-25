@@ -22,6 +22,7 @@ from src.scripts.verify_v3 import (
     COST_DA_VONG,
     REVENUE_PER_VONG,
 )
+from src.xsmb_combo.metrics import evaluate_combo
 
 
 class TestProfitConstants(unittest.TestCase):
@@ -98,15 +99,16 @@ class TestCalculateStationProfit(unittest.TestCase):
         self.assertEqual(results[0]["cost"], COST_DA_VONG)
 
     def test_none_pair_skipped(self):
-        """Pairs with None value should be skipped in matched count."""
+        """An incomplete Top 3 cannot create a winning payout."""
         pairs = [10, None, 30]
         tail_rows = [{"tail_2d": 10}, {"tail_2d": 30}]
         
         results = calculate_station_profit("XSMB", pairs, tail_rows)
         
-        # Only 2 valid pairs (10, 30), both matched
+        # Matches remain auditable, but an invalid combo is forced to miss.
         self.assertEqual(results[0]["hit_count"], 2)
-        self.assertEqual(results[0]["revenue"], 1 * REVENUE_PER_VONG)
+        self.assertEqual(results[0]["revenue"], 0)
+        self.assertEqual(results[0]["profit"], -COST_DA_VONG)
 
     def test_duplicate_pairs_treated_as_set(self):
         """Duplicate pairs should be treated as a set (deduplicated)."""
@@ -118,6 +120,18 @@ class TestCalculateStationProfit(unittest.TestCase):
         # set(10, 10, 10) = {10}, only 1 unique pair matched
         self.assertEqual(results[0]["hit_count"], 1)
         self.assertEqual(results[0]["revenue"], 0)  # Need 2+ matched
+
+    def test_duplicate_combo_with_two_matches_cannot_win(self):
+        """Two unique matches in an invalid duplicate Top 3 force zero payout."""
+        results = calculate_station_profit(
+            "XSMB",
+            [10, 10, 20],
+            [{"tail_2d": 10}, {"tail_2d": 20}],
+        )
+
+        self.assertEqual(results[0]["hit_count"], 2)
+        self.assertEqual(results[0]["revenue"], 0)
+        self.assertEqual(results[0]["profit"], -COST_DA_VONG)
 
     def test_multiple_occurrences_same_pair(self):
         """If same pair appears multiple times in tails, count as 1 match."""
@@ -156,6 +170,23 @@ class TestCalculateStationProfit(unittest.TestCase):
         
         # profit = revenue - cost
         self.assertEqual(result["profit"], result["revenue"] - result["cost"])
+
+    def test_valid_combo_matches_canonical_evaluator(self):
+        """The compatibility wrapper delegates valid triples to evaluate_combo."""
+        pairs = [10, 20, 30]
+        tail_rows = [{"tail_2d": 10}, {"tail_2d": 20}, {"tail_2d": 88}]
+
+        result = calculate_station_profit("XSMB", pairs, tail_rows)[0]
+        canonical = evaluate_combo(
+            pairs,
+            {10, 20, 88},
+            cost=COST_DA_VONG,
+            revenue_per_circle=REVENUE_PER_VONG,
+        )
+
+        self.assertEqual(result["hit_count"], canonical.hit_count)
+        self.assertEqual(result["revenue"], canonical.revenue)
+        self.assertEqual(result["profit"], canonical.profit)
 
 
 if __name__ == "__main__":
