@@ -83,6 +83,7 @@ from src.xsmb_ensemble.ensemble_engine import (
 )
 from src.xsmb_ensemble.auto_weight import compute_optimal_weights  # legacy fallback
 from src.scoring.credibility_scorer import compute_credibility_scores
+from src.xsmb_combo.shadow import maybe_run_xsmb_combo_shadow
 
 from src.database.prediction_repo import save_prediction, save_model_prediction
 
@@ -798,6 +799,14 @@ async def run_xsmb_ensemble(
     print(f"     📊 Sources Active: {ensemble_output.get('models_active', 0)}/{TOTAL_MODELS_XSMB}")
     if consensus_str:
         print(f"     🤝 Consensus: [{consensus_str}]")
+
+    # Additive combo-objective selector. Default mode is "off"; "shadow"
+    # computes and logs an alternative without changing the saved legacy Top 3.
+    maybe_run_xsmb_combo_shadow(
+        db,
+        all_model_results,
+        target_date,
+    )
 
     # Save prediction
     prediction = xsmb_format_ensemble_result("XSMB", None, ensemble_output, target_date)
