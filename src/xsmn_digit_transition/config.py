@@ -19,6 +19,8 @@ class DigitTransitionConfig:
     calibration_bins: int = 10
     coupling_prior_strength: float = 24.0
     regional_prior_transitions_per_province: int = 52
+    oof_recent_anchors_per_province: int = 64
+    oof_recent_common_anchors: int = 64
     top_unit_digits: int = 3
     candidates_per_unit: int = 10
 
@@ -31,8 +33,12 @@ class DigitTransitionConfig:
             "top_unit_digits": self.top_unit_digits,
             "candidates_per_unit": self.candidates_per_unit,
             "regional_prior_transitions_per_province": self.regional_prior_transitions_per_province,
+            "oof_recent_anchors_per_province": self.oof_recent_anchors_per_province,
+            "oof_recent_common_anchors": self.oof_recent_common_anchors,
         }
         for name, value in integer_fields.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
             if value < 1:
                 raise ValueError(f"{name} must be positive")
         if not 2 <= self.top_unit_digits <= 10:

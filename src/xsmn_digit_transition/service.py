@@ -21,7 +21,7 @@ from .merge import (
     MergedProvinceForecast,
     merge_province_forecasts,
 )
-from .repository import load_regional_tail_history, load_tail_history
+from .repository import load_regional_tail_history
 from .selector import select_from_merged_forecast
 from .state import DrawDigitState, build_state_sequences
 
@@ -59,21 +59,49 @@ def _oof_forecasts(
     states: tuple[DrawDigitState, ...],
     hierarchical_states: tuple[DrawDigitState, ...],
     config: DigitTransitionConfig,
+    anchor_dates: Optional[frozenset[date]] = None,
 ) -> dict[date, ProvinceTransitionForecast]:
-    """Create production-equivalent forecasts using only prior draw states."""
+    """Create bounded OOF forecasts while retaining the full prior history."""
     forecasts: dict[date, ProvinceTransitionForecast] = {}
     estimator_config = _estimator_config(config)
     start = max(config.min_transitions + 1, 3)
     for target_index in range(start, len(states)):
         training = states[:target_index]
         actual = states[target_index]
+        if anchor_dates is not None and actual.draw_date not in anchor_dates:
+            continue
+        hierarchical_training = tuple(
+            state
+            for state in hierarchical_states
+            if state.draw_date < actual.draw_date
+        )
         forecast = estimate_transition(
             training,
-            hierarchical_states,
+            hierarchical_training,
             estimator_config,
         )
         forecasts[actual.draw_date] = forecast
     return forecasts
+
+
+def _bounded_oof_anchor_dates(
+    states_by_province: Mapping[str, tuple[DrawDigitState, ...]],
+    config: DigitTransitionConfig,
+) -> Mapping[str, frozenset[date]]:
+    """Select a deterministic union of recent local and shared OOF anchors."""
+    eligible: dict[str, tuple[date, ...]] = {}
+    start = max(config.min_transitions + 1, 3)
+    for province, states in states_by_province.items():
+        eligible[province] = tuple(state.draw_date for state in states[start:])
+
+    common = set.intersection(*(set(values) for values in eligible.values()))
+    common_recent = frozenset(sorted(common)[-config.oof_recent_common_anchors :])
+    return {
+        province: frozenset(
+            set(values[-config.oof_recent_anchors_per_province :]) | common_recent
+        )
+        for province, values in eligible.items()
+    }
 
 
 def _oof_observations(
@@ -396,11 +424,13 @@ def predict_digit_transition(
     calibrations: dict[str, ReliabilityModel] = {}
     oof_forecasts: dict[str, dict[date, ProvinceTransitionForecast]] = {}
     estimator_config = _estimator_config(config)
+    oof_anchor_dates = _bounded_oof_anchor_dates(states_by_province, config)
     for province in province_pair:
         province_oof = _oof_forecasts(
             states_by_province[province],
             hierarchical_states,
             config,
+            oof_anchor_dates[province],
         )
         forecast = estimate_transition(
             states_by_province[province],
@@ -543,8 +573,11 @@ def generate_shadow_prediction(
     province_scope = validate_provinces(list(provinces))
     if len(province_scope) != 2:
         raise ValueError("PDA/DDT requires exactly two distinct XSMN provinces")
-    rows = load_tail_history(db, list(province_scope), target_date)
     regional_rows = load_regional_tail_history(db, target_date)
+    province_set = set(province_scope)
+    rows = tuple(
+        row for row in regional_rows if str(row.get("province")) in province_set
+    )
     return predict_digit_transition(
         rows,
         province_scope,

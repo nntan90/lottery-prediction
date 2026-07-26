@@ -27,11 +27,11 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import os
-import subprocess
 import sys
 import tempfile
+import time
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -44,7 +44,7 @@ from src.bot.telegram_bot import LotteryNotifier
 from src.crawler.xsmn_crawler import XSMNCrawler
 
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces, get_dow_label
-from src.xsmn_coupled import generate_shadow_prediction
+from src.xsmn_coupled import CMRConfig, generate_shadow_prediction
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -85,7 +85,13 @@ from src.xsmb_ensemble.auto_weight import compute_optimal_weights  # legacy fall
 from src.scoring.credibility_scorer import compute_credibility_scores
 from src.xsmb_combo.shadow import maybe_run_xsmb_combo_shadow
 
-from src.database.prediction_repo import save_prediction, save_model_prediction
+from src.database.prediction_repo import (
+    get_shadow_prediction,
+    normalize_shadow_prediction,
+    save_model_prediction,
+    save_prediction,
+    save_shadow_prediction,
+)
 
 
 XSMB_ACTIVE_MODEL_NAMES = [
@@ -137,50 +143,56 @@ EXPECTED_MODEL_NAMES = {
         "cdm",
     ],
 }
-DDT_SHADOW_TIMEOUT_SECONDS = 60
-
-
 def _generate_ddt_shadow_safely(
     db: LotteryDB,
     provinces: list[str],
     target_date: date,
 ) -> dict:
-    """Run DDT in an isolated process with a hard execution deadline."""
-    del db  # The child creates its own read-only connection from environment.
-    script = os.path.join(os.path.dirname(__file__), "predict_xsmn_digit_transition.py")
-    command = [
-        sys.executable,
-        script,
-        "--date",
-        target_date.isoformat(),
-        "--provinces",
-        ",".join(provinces),
-    ]
+    """Backward-compatible read-only adapter; production never executes DDT."""
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=DDT_SHADOW_TIMEOUT_SECONDS,
-        )
-        result = json.loads(completed.stdout)
-        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
-            raise ValueError("DDT returned an invalid payload")
-        return result
-    except subprocess.TimeoutExpired:
+        result = get_shadow_prediction(db, "ddt_shadow", target_date)
+        if result:
+            metadata = result.get("run_metadata")
+            stored_scope = (
+                metadata.get("provinces")
+                if isinstance(metadata, dict)
+                else None
+            )
+            if stored_scope and list(stored_scope) != list(provinces):
+                return {
+                    "status": "error",
+                    "reason": "persisted_ddt_scope_mismatch",
+                }
+            return result
         return {
-            "status": "error",
-            "reason": f"shadow timeout after {DDT_SHADOW_TIMEOUT_SECONDS}s",
+            "status": "pending_local",
+            "reason": "waiting_for_local_run",
         }
     except Exception as exc:
-        return {"status": "error", "reason": str(exc)}
+        reason = (" ".join(str(exc).split()) or "persisted_ddt_read_failed")[:160]
+        print(f"     ⚠️ DDT persisted row unavailable; production preserved: {reason}")
+        return {"status": "error", "reason": reason}
 
 
 def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
     """Convert the audit result to one compact, backward-compatible row."""
     if result and result.get("status") in {"success", "uncalibrated"}:
         try:
+            if result.get("pair_1") is not None:
+                top_pairs = tuple(
+                    (int(result[f"pair_{index}"]), float(result[f"score_{index}"]))
+                    for index in range(1, 4)
+                )
+                return ShadowRow(
+                    label="DDT shadow",
+                    top_pairs=top_pairs,
+                    status=(
+                        "calibrated"
+                        if result.get("score_semantics")
+                        == "merged_pair_hit_probability_calibrated"
+                        else "uncalibrated"
+                    ),
+                )
             score_key = (
                 "probability"
                 if result.get("score_semantics")
@@ -201,7 +213,19 @@ def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
         except (KeyError, TypeError, ValueError):
             return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
     if result and result.get("status") == "insufficient_evidence":
-        return ShadowRow(label="DDT shadow", status="Chưa đủ dữ liệu")
+        reason = str(result.get("error_message") or result.get("reason") or "").strip()
+        status = "Chưa đủ dữ liệu"
+        if reason:
+            status += f": {reason[:120]}"
+        return ShadowRow(label="DDT shadow", status=status)
+    if result and result.get("status") == "pending_local":
+        return ShadowRow(label="DDT shadow", status="Chờ chạy local")
+    if result and result.get("status") == "error":
+        reason = str(result.get("error_message") or result.get("reason") or "").strip()
+        status = "Lỗi local"
+        if reason:
+            status += f": {reason[:120]}"
+        return ShadowRow(label="DDT shadow", status=status)
     return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
 
 
@@ -970,27 +994,56 @@ async def run_xsmn_ensemble(
     if consensus_str:
         print(f"     🤝 Consensus: [{consensus_str}]")
 
-    cmr_result = None
-    try:
-        cmr_result = generate_shadow_prediction(db, provs_to_run, target_date)
-        if cmr_result.get("status") == "success":
-            print(f"     🧪 CMR shadow Top 3: {cmr_result['top_3']}")
-        else:
-            print(f"     🧪 CMR shadow: {cmr_result.get('reason', 'insufficient evidence')}")
-    except Exception as exc:
-        cmr_result = {"status": "error", "reason": str(exc)}
-        print(f"     ⚠️ CMR shadow failed without affecting ensemble: {exc}")
-
     # Save
     prediction = xsmn_format_ensemble_result("XSMN", "all", ensemble_output, target_date)
     prediction.pop('scoring_log', None)
     prediction.pop('candidate_log', None)
-    
+
     if not dry_run:
         save_prediction(db, prediction)
 
-    # DDT is deliberately after production persistence and runs out-of-process.
-    # Its import, runtime, timeout, or payload can never block the old result.
+    cmr_started_at = time.perf_counter()
+    cmr_config = CMRConfig()
+    try:
+        cmr_result = generate_shadow_prediction(
+            db,
+            provs_to_run,
+            target_date,
+            cmr_config,
+        )
+        if cmr_result.get("status") == "success":
+            print(f"     🧪 CMR shadow Top 3: {cmr_result['top_3']}")
+        else:
+            print(
+                "     🧪 CMR shadow: "
+                f"{cmr_result.get('reason', 'insufficient evidence')}"
+            )
+    except Exception as exc:
+        reason = (" ".join(str(exc).split()) or "cmr_execution_failed")[:240]
+        cmr_result = {"status": "error", "reason": reason}
+        print(f"     ⚠️ CMR shadow failed without affecting ensemble: {reason}")
+
+    cmr_runtime_ms = int((time.perf_counter() - cmr_started_at) * 1000)
+    if not dry_run:
+        try:
+            cmr_record = normalize_shadow_prediction(
+                cmr_result,
+                model_name="cmr_shadow",
+                target_date=target_date,
+                provinces=provs_to_run,
+                execution_source="production_post_save",
+                runtime_ms=cmr_runtime_ms,
+                config_metadata=asdict(cmr_config),
+            )
+            save_shadow_prediction(db, cmr_record)
+        except Exception as exc:
+            reason = (" ".join(str(exc).split()) or "cmr_persistence_failed")[:160]
+            print(
+                "     ⚠️ CMR shadow persistence failed; "
+                f"production preserved: {reason}"
+            )
+
+    # DDT is owned by the local Telegram worker. Production only reads its row.
     ddt_result = _generate_ddt_shadow_safely(db, provs_to_run, target_date)
     ddt_row = _ddt_shadow_row(ddt_result)
     if ddt_row.top_pairs:

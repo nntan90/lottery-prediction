@@ -23,6 +23,10 @@ MODEL_SHORT_NAMES = {
     "cdm": "CDM",
     "loto_statistical": "LotoStat",
 }
+SHADOW_LABELS = {
+    "cmr_shadow": "CMR",
+    "ddt_shadow": "DDT",
+}
 
 REGION_ORDER = {"XSMB": 0, "XSMN": 1}
 MODEL_ORDER = {
@@ -263,12 +267,68 @@ def _diagnostic_lines(
     ]
 
 
+def _shadow_lines(
+    shadow_results: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Render shadow verification separately from production diagnostics."""
+    if not shadow_results:
+        return []
+    lines = ["🧪 <b>SHADOW — ĐỐI CHIẾU</b>"]
+    ordered = sorted(
+        shadow_results,
+        key=lambda row: (
+            0 if row.get("model_name") == "cmr_shadow" else 1,
+            str(row.get("model_name") or ""),
+        ),
+    )
+    for result in ordered:
+        model_name = str(result.get("model_name") or "shadow")
+        label = escape(SHADOW_LABELS.get(model_name, model_name))
+        verification_status = result.get("verification_status")
+        if verification_status == "pending_results":
+            lines.append(f"└ ⏳ {label}: chờ kết quả xổ số")
+            continue
+        if verification_status == "no_prediction":
+            status = str(result.get("status") or "error")
+            reason = escape(" ".join(str(result.get("reason") or "").split())[:120])
+            if status == "insufficient_evidence":
+                text = "chưa đủ dữ liệu"
+                icon = "⏳"
+            else:
+                text = "không có Top 3 hợp lệ"
+                icon = "⚠️"
+            suffix = f" · {reason}" if reason else ""
+            lines.append(f"└ {icon} {label}: {text}{suffix}")
+            continue
+
+        pairs = list(result.get("pairs") or [])
+        validation_error = result.get("validation_error")
+        pair_text = (
+            _format_pair_slots(pairs)
+            if validation_error
+            else _format_pairs(_unique_pairs(pairs)[:3])
+        )
+        matched = _unique_pairs(list(result.get("matched") or []))
+        hit_count = int(result.get("hit_count") or 0)
+        combo_hit = bool(result.get("combo_hit"))
+        icon = "🟢" if combo_hit else "🔴"
+        verdict = "đạt shadow" if combo_hit else "chưa đạt shadow"
+        if validation_error:
+            verdict = "dữ liệu không hợp lệ"
+        lines.append(
+            f"└ {icon} {label}: {pair_text or 'không có dữ liệu'} → "
+            f"{_format_matches(matched)} ({hit_count}/3 · {verdict})"
+        )
+    return lines
+
+
 def format_verification_message(
     date_str: str,
     results_summary: Sequence[Mapping[str, Any]],
     sub_model_stats: Mapping[str, Sequence[Mapping[str, Any]]],
     province_map: Mapping[str, str] | None = None,
     province_order: Sequence[str] | None = None,
+    shadow_results: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Build a deterministic HTML report from already verified data."""
     province_map = province_map or {}
@@ -304,6 +364,10 @@ def format_verification_message(
         lines.extend(["", f"📍 <b>{escape(region)}</b>"])
         for section in region_sections:
             lines.extend(section)
+
+    shadow = _shadow_lines(shadow_results)
+    if shadow:
+        lines.extend(["", *shadow])
 
     hits, total, rate = summarize_multi_results(results_summary)
     footer = (

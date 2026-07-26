@@ -20,11 +20,12 @@ import argparse
 import asyncio
 import sys
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
+from src.database.prediction_repo import SHADOW_MODEL_NAMES
 from src.bot.telegram_bot import LotteryNotifier
 from src.bot.verification_messages import (
     format_verification_message,
@@ -132,6 +133,44 @@ def calculate_station_profit(region, pairs, tail_rows):
     }]
 
 
+def _shadow_provinces(prediction: dict, target_date: date) -> list[str]:
+    """Resolve the exact merged province scope stored by a shadow run."""
+    metadata = prediction.get("run_metadata")
+    if isinstance(metadata, dict):
+        provinces = metadata.get("provinces")
+        if isinstance(provinces, list):
+            normalized = [str(value) for value in provinces if value]
+            if len(normalized) == 2 and len(set(normalized)) == 2:
+                return normalized
+    return get_target_provinces(target_date)
+
+
+def _update_shadow_verification(
+    db: LotteryDB,
+    prediction_id: int,
+    payload: dict,
+) -> None:
+    """Persist shadow verification with a legacy-schema safe fallback."""
+    try:
+        db.supabase.table("model_predictions").update(payload) \
+            .eq("id", prediction_id).execute()
+    except Exception as exc:
+        error = str(exc).lower()
+        new_fields = ("hit_count", "combo_hit", "verified_at")
+        if not any(field in error for field in new_fields):
+            raise
+        print(
+            "  ⚠️  Shadow verification migration pending; "
+            "saving legacy hit/matched fields only"
+        )
+        legacy = {
+            "hit": payload["hit"],
+            "matched_pairs": payload["matched_pairs"],
+        }
+        db.supabase.table("model_predictions").update(legacy) \
+            .eq("id", prediction_id).execute()
+
+
 
 
 
@@ -145,15 +184,9 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         .eq("prediction_date", target_date.isoformat())\
         .execute().data
 
-    if not preds:
-        msg = (
-            f"⚠️ <b>VERIFY PREDICTION SKIPPED</b>\n"
-            f"📅 {date_str}\n"
-            f"Không có prediction nào cần verify."
-        )
+    no_main_predictions = not preds
+    if no_main_predictions:
         print(f"  ⚠️  Không có prediction nào cần verify cho {target_date}")
-        await notifier.send_message(msg, config_key="verify_summary")
-        return
 
     results_summary = []
     skipped_no_result = []
@@ -186,7 +219,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             continue
 
         tail_set = {int(r["tail_2d"]) for r in tail_rows}
-        tail_set_cache[(region, province)] = tail_set
+        tail_set_cache[(region, province, ())] = tail_set
         pairs = [pred["pair_1"], pred["pair_2"], pred["pair_3"]]
         model_scope = _prediction_scope(pred)
         evaluation = _evaluate_prediction_pairs(
@@ -284,6 +317,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
 
     # === VERIFY SUB-MODELS in model_predictions ===
     sub_model_stats = {}
+    shadow_results = []
     sub_preds = None
     try:
         sub_preds = db.supabase.table("model_predictions")\
@@ -292,7 +326,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             .execute().data
     except Exception as e:
         error_str = str(e)
-        if "PGRST205" in error_str or "model_predictions" in error_str:
+        if "PGRST205" in error_str.upper() or "42P01" in error_str.upper():
             print(f"  ⚠️  Skipping sub-model verification: model_predictions table missing (run migration 06 & 08). Error: {e}")
         else:
             raise
@@ -303,27 +337,113 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             province = pred["province"]
             label = f"{region}/{province or 'all'}"
             model_name = pred["model_name"]
+            is_shadow = (
+                pred.get("prediction_mode") == "shadow"
+                or model_name in SHADOW_MODEL_NAMES
+            )
+            province_scope = tuple(
+                _shadow_provinces(pred, target_date)
+                if is_shadow
+                else ()
+            )
+            cache_key = (region, province, province_scope)
             
             # Lấy tail_set từ cache (nếu đã lấy cho prediction_results)
             # Hoặc query bổ sung nếu chưa có (ví dụ prediction_results thiếu đài nhưng model_predictions có)
-            if (region, province) not in tail_set_cache:
-                t_query = db.supabase.table("tails_2d").select("tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
+            if cache_key not in tail_set_cache:
+                t_query = db.supabase.table("tails_2d").select("province,tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
                 if province and province != "all":
                     t_query = t_query.eq("province", province)
                 elif region.upper() == "XSMN":
-                    target_provs = get_target_provinces(target_date)
+                    target_provs = (
+                        _shadow_provinces(pred, target_date)
+                        if is_shadow
+                        else get_target_provinces(target_date)
+                    )
                     if target_provs:
                         t_query = t_query.in_("province", target_provs)
                 t_rows = t_query.execute().data
-                if t_rows:
-                    tail_set_cache[(region, province)] = {
+                complete_scope = True
+                if is_shadow and province_scope:
+                    returned_provinces = {
+                        str(row.get("province"))
+                        for row in t_rows
+                        if row.get("province")
+                    }
+                    complete_scope = set(province_scope).issubset(returned_provinces)
+                if t_rows and complete_scope:
+                    tail_set_cache[cache_key] = {
                         int(r["tail_2d"]) for r in t_rows
                     }
                 else:
-                    tail_set_cache[(region, province)] = set()
+                    tail_set_cache[cache_key] = set()
             
-            tail_set = tail_set_cache.get((region, province), set())
+            tail_set = tail_set_cache.get(cache_key, set())
             if not tail_set:
+                if is_shadow:
+                    shadow_results.append({
+                        "model_name": model_name,
+                        "status": pred.get("status"),
+                        "reason": pred.get("error_message"),
+                        "pairs": [
+                            pred.get("pair_1"),
+                            pred.get("pair_2"),
+                            pred.get("pair_3"),
+                        ],
+                        "matched": [],
+                        "hit_count": None,
+                        "combo_hit": None,
+                        "verification_status": "pending_results",
+                    })
+                continue
+
+            if is_shadow:
+                pairs = [
+                    pred.get("pair_1"),
+                    pred.get("pair_2"),
+                    pred.get("pair_3"),
+                ]
+                status = str(pred.get("status") or "error")
+                if status not in {"success", "uncalibrated"}:
+                    shadow_results.append({
+                        "model_name": model_name,
+                        "status": status,
+                        "reason": pred.get("error_message"),
+                        "pairs": pairs,
+                        "matched": [],
+                        "hit_count": None,
+                        "combo_hit": None,
+                        "verification_status": "no_prediction",
+                    })
+                    continue
+                evaluation = _evaluate_prediction_pairs(
+                    pairs,
+                    tail_set,
+                    model_scope="ensemble",
+                )
+                shadow_hit = evaluation["hit_count"] > 0
+                _update_shadow_verification(
+                    db,
+                    pred["id"],
+                    {
+                        "hit": shadow_hit,
+                        "matched_pairs": evaluation["matched"],
+                        "hit_count": evaluation["hit_count"],
+                        "combo_hit": evaluation["combo_hit"],
+                        "verified_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                shadow_results.append({
+                    "model_name": model_name,
+                    "status": status,
+                    "reason": pred.get("error_message"),
+                    "pairs": pairs,
+                    "matched": evaluation["matched"],
+                    "hit_count": evaluation["hit_count"],
+                    "combo_hit": evaluation["combo_hit"],
+                    "validation_error": evaluation["validation_error"],
+                    "verification_status": "verified",
+                })
                 continue
                 
             # Lấy top 5 pairs của sub-model
@@ -356,8 +476,35 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 "pairs": pairs
             })
 
+    if sub_preds is not None:
+        present_shadows = {
+            str(result.get("model_name"))
+            for result in shadow_results
+        }
+        for model_name in sorted(SHADOW_MODEL_NAMES):
+            if model_name in present_shadows:
+                continue
+            shadow_results.append({
+                "model_name": model_name,
+                "status": "missing",
+                "reason": "không có prediction đã lưu",
+                "pairs": [],
+                "matched": [],
+                "hit_count": None,
+                "combo_hit": None,
+                "verification_status": "no_prediction",
+            })
+
     # Gửi Telegram report tổng hợp
-    if not results_summary:
+    if not results_summary and not shadow_results:
+        if no_main_predictions:
+            msg = (
+                f"⚠️ <b>VERIFY PREDICTION SKIPPED</b>\n"
+                f"📅 {date_str}\n"
+                f"Không có prediction hoặc shadow nào cần verify."
+            )
+            await notifier.send_message(msg, config_key="verify_summary")
+            return
         skipped = "\n".join(f"• {label}" for label in skipped_no_result) or "• Không rõ đài"
         msg = (
             f"⚠️ <b>VERIFY PREDICTION SKIPPED</b>\n"
@@ -375,6 +522,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
         sub_model_stats,
         province_map,
         get_target_provinces(target_date),
+        shadow_results,
     )
 
     await notifier.send_message(msg)

@@ -77,6 +77,11 @@ def compute_optimal_weights(
 
     # 3. Tính hit_rate cho mỗi model
     model_performance = _compute_model_performance(model_preds, actual_tails)
+    model_performance = {
+        model_name: performance
+        for model_name, performance in model_performance.items()
+        if model_name in current_weights
+    }
 
     if not model_performance:
         return current_weights

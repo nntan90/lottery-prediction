@@ -14,8 +14,14 @@ from src.xsmn_digit_transition.backtest import (
     walk_forward_backtest,
 )
 from src.xsmn_digit_transition.config import DigitTransitionConfig
-from src.xsmn_digit_transition.domain import EXPECTED_PRIZE_COUNTS
-from src.xsmn_digit_transition.service import predict_digit_transition
+from src.xsmn_digit_transition.domain import EXPECTED_PRIZE_COUNTS, normalize_tail_rows
+from src.xsmn_digit_transition import service
+from src.xsmn_digit_transition.service import (
+    _bounded_oof_anchor_dates,
+    _oof_forecasts,
+    predict_digit_transition,
+)
+from src.xsmn_digit_transition.state import build_state_sequences
 
 
 def _draw_rows(
@@ -124,6 +130,63 @@ def test_service_is_deterministic_and_ignores_target_or_future_rows() -> None:
     )
 
     assert actual == expected
+
+
+def test_oof_budget_is_recent_deterministic_union() -> None:
+    rows, provinces, target = _history(count=12)
+    draws = normalize_tail_rows(rows, list(provinces), before_date=target)
+    states = build_state_sequences(draws, target)
+    config = DigitTransitionConfig(
+        min_transitions=2,
+        oof_recent_anchors_per_province=3,
+        oof_recent_common_anchors=2,
+    )
+
+    anchors = _bounded_oof_anchor_dates(states, config)
+
+    assert anchors == _bounded_oof_anchor_dates(states, config)
+    assert all(len(values) <= 5 for values in anchors.values())
+    for province in provinces:
+        eligible = [state.draw_date for state in states[province]][3:]
+        assert set(eligible[-3:]).issubset(anchors[province])
+
+
+@pytest.mark.parametrize("invalid", [True, 2.5])
+def test_oof_anchor_budget_requires_integer(invalid) -> None:
+    with pytest.raises(TypeError, match="must be an integer"):
+        DigitTransitionConfig(oof_recent_anchors_per_province=invalid)
+
+
+def test_each_selected_oof_fold_excludes_future_hierarchical_states(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history(count=10)
+    draws = normalize_tail_rows(rows, list(provinces), before_date=target)
+    states = build_state_sequences(draws, target)
+    hierarchical = tuple(
+        state
+        for province in provinces
+        for state in states[province]
+    )
+    config = DigitTransitionConfig(min_transitions=2)
+    original = service.estimate_transition
+    observed = []
+
+    def leakage_guard(training, hierarchical_training, estimator_config):
+        cutoff = training[-1].draw_date
+        assert all(state.draw_date <= cutoff for state in hierarchical_training)
+        observed.append(cutoff)
+        return original(training, hierarchical_training, estimator_config)
+
+    monkeypatch.setattr(service, "estimate_transition", leakage_guard)
+    _oof_forecasts(
+        states[provinces[0]],
+        hierarchical,
+        config,
+        frozenset(state.draw_date for state in states[provinces[0]][-2:]),
+    )
+
+    assert len(observed) == 2
 
 
 def test_service_returns_insufficient_without_padding() -> None:

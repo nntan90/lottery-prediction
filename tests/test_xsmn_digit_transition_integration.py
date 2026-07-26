@@ -3,44 +3,79 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date
 import asyncio
+import json
 from pathlib import Path
-import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from src.scripts import predict_ensemble
+from src.scripts import predict_xsmn_digit_transition as ddt_cli
 from src.scripts.predict_xsmn_digit_transition import _resolve_provinces
 
 
-def test_ddt_fault_boundary_cannot_mutate_or_replace_production_output(monkeypatch) -> None:
+def test_ddt_persisted_read_cannot_mutate_or_replace_production_output(monkeypatch) -> None:
     production = {
         "top_pairs": [(12, 0.4), (34, 0.3), (56, 0.2)],
         "contributing_models": ["frequency@a"],
     }
     expected = deepcopy(production)
 
-    def fail(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired("ddt", 60)
-
-    monkeypatch.setattr(predict_ensemble.subprocess, "run", fail)
+    monkeypatch.setattr(
+        predict_ensemble,
+        "get_shadow_prediction",
+        lambda *_args: {
+            "status": "success",
+            "pair_1": 3,
+            "pair_2": 12,
+            "pair_3": 25,
+            "score_1": 0.3,
+            "score_2": 0.2,
+            "score_3": 0.1,
+        },
+    )
     result = predict_ensemble._generate_ddt_shadow_safely(
         object(), ["vung-tau", "ben-tre"], date(2026, 7, 21)
     )
 
-    assert result == {"status": "error", "reason": "shadow timeout after 60s"}
+    assert result["pair_1"] == 3
     assert production == expected
 
 
-def test_ddt_subprocess_rejects_malformed_payload(monkeypatch) -> None:
-    completed = subprocess.CompletedProcess(["python"], 0, stdout="[]", stderr="")
-    monkeypatch.setattr(predict_ensemble.subprocess, "run", lambda *_a, **_k: completed)
+def test_ddt_persisted_read_failure_is_nonblocking(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(predict_ensemble, "get_shadow_prediction", fail)
 
     result = predict_ensemble._generate_ddt_shadow_safely(
         object(), ["vung-tau", "ben-tre"], date(2026, 7, 21)
     )
 
     assert result["status"] == "error"
-    assert "invalid payload" in result["reason"]
+    assert "database unavailable" in result["reason"]
+
+
+def test_ddt_persisted_scope_mismatch_is_not_rendered(monkeypatch) -> None:
+    monkeypatch.setattr(
+        predict_ensemble,
+        "get_shadow_prediction",
+        lambda *_args: {
+            "status": "success",
+            "run_metadata": {"provinces": ["tp-hcm", "long-an"]},
+        },
+    )
+
+    result = predict_ensemble._generate_ddt_shadow_safely(
+        object(),
+        ["tien-giang", "kien-giang"],
+        date(2026, 7, 26),
+    )
+
+    assert result == {
+        "status": "error",
+        "reason": "persisted_ddt_scope_mismatch",
+    }
 
 
 def test_ddt_shadow_row_preserves_probability_semantics() -> None:
@@ -77,8 +112,79 @@ def test_cli_override_must_match_existing_xsmn_schedule() -> None:
         "dong-nai",
         "can-tho",
     )
-    with pytest.raises(SystemExit, match="must match the schedule"):
+    with pytest.raises(ValueError, match="must match the schedule"):
         _resolve_provinces(target, "tp-hcm,dong-thap")
+
+
+def test_cli_schedule_ignores_environment_override(monkeypatch) -> None:
+    monkeypatch.setenv("TARGET_PROVINCES", "tp-hcm,dong-thap")
+
+    assert _resolve_provinces(
+        date(2026, 7, 26),
+        "tien-giang,kien-giang",
+    ) == ("tien-giang", "kien-giang")
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_rc"),
+    [
+        ("success", 0),
+        ("uncalibrated", 0),
+        ("insufficient_evidence", 2),
+    ],
+)
+def test_cli_stdout_is_one_json_contract(
+    monkeypatch,
+    capsys,
+    status: str,
+    expected_rc: int,
+) -> None:
+    monkeypatch.setattr(
+        ddt_cli,
+        "_parse_args",
+        lambda: SimpleNamespace(
+            target_date="2026-07-22",
+            provinces="dong-nai,can-tho",
+            output=None,
+            min_transitions=12,
+            top_k_states=32,
+        ),
+    )
+    monkeypatch.setattr(ddt_cli, "LotteryDB", lambda: object())
+    monkeypatch.setattr(
+        ddt_cli,
+        "generate_shadow_prediction",
+        lambda *_a, **_k: {"status": status, "reason": "short"},
+    )
+
+    assert ddt_cli.main() == expected_rc
+    output = capsys.readouterr().out
+    assert output.count("\n") == 1
+    assert json.loads(output)["status"] == status
+
+
+def test_cli_exception_is_sanitized_json_error(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        ddt_cli,
+        "_parse_args",
+        lambda: SimpleNamespace(
+            target_date="2026-07-22",
+            provinces="dong-nai,can-tho",
+            output=None,
+            min_transitions=12,
+            top_k_states=32,
+        ),
+    )
+    monkeypatch.setattr(ddt_cli, "LotteryDB", lambda: object())
+    monkeypatch.setattr(
+        ddt_cli,
+        "generate_shadow_prediction",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("line one\nline two")),
+    )
+
+    assert ddt_cli.main() == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"status": "error", "reason": "line one line two"}
 
 
 def test_ddt_runs_in_existing_prediction_workflow_without_new_cron() -> None:
@@ -93,9 +199,8 @@ def test_ddt_runs_in_existing_prediction_workflow_without_new_cron() -> None:
     assert "cron: '14 0 * * *'" in workflow
     assert workflow.count("python src/scripts/predict_ensemble.py") == 1
     assert "predict_xsmn_digit_transition.py" not in workflow
-    assert orchestrator.index("compute_xsmn_merged_combo_selector_ensemble(") < orchestrator.index(
-        "_generate_ddt_shadow_safely(db, provs_to_run, target_date)"
-    )
+    assert "subprocess.run(" not in orchestrator
+    assert "get_shadow_prediction(db, \"ddt_shadow\"" in orchestrator
 
 
 def test_production_models_and_engines_do_not_depend_on_ddt() -> None:
@@ -159,9 +264,19 @@ def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> N
         "save_prediction",
         lambda *_a, **_k: events.append("production_saved"),
     )
+    monkeypatch.setattr(
+        predict_ensemble,
+        "save_shadow_prediction",
+        lambda *_a, **_k: events.append("cmr_saved") or True,
+    )
+    monkeypatch.setattr(
+        predict_ensemble,
+        "get_shadow_prediction",
+        lambda *_a, **_k: None,
+    )
 
     def malformed_ddt(*_args, **_kwargs):
-        assert events == ["production_saved"]
+        assert events == ["production_saved", "cmr_saved"]
         events.append("ddt")
         return {"status": "success", "selected_evidence": [{"bad": "payload"}]}
 
@@ -185,4 +300,4 @@ def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> N
         )
     )
 
-    assert events == ["production_saved", "ddt", "telegram"]
+    assert events == ["production_saved", "cmr_saved", "ddt", "telegram"]

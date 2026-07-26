@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -177,6 +177,40 @@ def test_formatter_marks_single_as_diagnostic_and_escapes_labels() -> None:
 
     assert "└ 🔎 A &amp; B: 10 | 20 | 30 → 10 (1/3 khớp)" in message
     assert "&lt;custom&gt;" in message
+
+
+def test_formatter_keeps_unverified_shadow_out_of_multi_denominator() -> None:
+    message = format_verification_message(
+        "26/07/2026",
+        [
+            {
+                "region": "XSMN",
+                "model_scope": "ensemble",
+                "pairs": [10, 20, 30],
+                "matched": [10, 20],
+                "hit_count": 2,
+                "combo_hit": True,
+            }
+        ],
+        {},
+        shadow_results=[
+            {
+                "model_name": "cmr_shadow",
+                "status": "success",
+                "verification_status": "pending_results",
+            },
+            {
+                "model_name": "ddt_shadow",
+                "status": "insufficient_evidence",
+                "reason": "not enough folds",
+                "verification_status": "no_prediction",
+            },
+        ],
+    )
+
+    assert "CMR: chờ kết quả xổ số" in message
+    assert "DDT: chưa đủ dữ liệu · not enough folds" in message
+    assert "Multi-Model đạt ≥2/3: 1/1 (100%)" in message
 
 
 def test_formatter_filters_matches_to_displayed_top_n() -> None:
@@ -389,3 +423,124 @@ def test_verify_date_persists_one_of_three_as_multi_miss() -> None:
     assert "1/3 · chưa đạt" in message
     assert "không phải verdict Multi-Model" in message
     assert "Multi-Model đạt ≥2/3: 0/1 (0%)" in message
+
+
+def test_verify_date_tracks_shadow_combo_without_changing_multi_headline() -> None:
+    store = {
+        "prediction_results": [
+            {
+                "id": 1,
+                "prediction_date": "2026-07-25",
+                "region": "XSMN",
+                "province": "all",
+                "pair_1": 50,
+                "pair_2": 83,
+                "pair_3": 89,
+                "model_version": "ensemble_v3.5",
+            }
+        ],
+        "tails_2d": [
+            {
+                "region": "XSMN",
+                "draw_date": "2026-07-25",
+                "province": province,
+                "tail_2d": pair,
+            }
+            for province, pair in (
+                ("tp-hcm", 7),
+                ("tp-hcm", 60),
+                ("long-an", 1),
+            )
+        ],
+        "model_predictions": [
+            {
+                "id": 2,
+                "prediction_date": "2026-07-25",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "cmr_shadow",
+                "prediction_mode": "shadow",
+                "status": "success",
+                "pair_1": 7,
+                "pair_2": 60,
+                "pair_3": 61,
+                "pair_4": None,
+                "pair_5": None,
+                "run_metadata": {"provinces": ["tp-hcm", "long-an"]},
+            },
+            {
+                "id": 3,
+                "prediction_date": "2026-07-25",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "prediction_mode": "shadow",
+                "status": "uncalibrated",
+                "pair_1": 1,
+                "pair_2": 2,
+                "pair_3": 3,
+                "pair_4": None,
+                "pair_5": None,
+                "run_metadata": {"provinces": ["tp-hcm", "long-an"]},
+            },
+        ],
+        "profit_tracking": [],
+    }
+    db = SimpleNamespace(supabase=_FakeSupabase(store))
+    notifier = SimpleNamespace(send_message=AsyncMock(return_value=True))
+
+    asyncio.run(verify_date(db, notifier, date(2026, 7, 25)))
+
+    cmr, ddt = store["model_predictions"]
+    assert cmr["hit"] is True
+    assert cmr["hit_count"] == 2
+    assert cmr["combo_hit"] is True
+    assert cmr["matched_pairs"] == [7, 60]
+    assert cmr["verified_at"] != "now()"
+    assert datetime.fromisoformat(cmr["verified_at"]).tzinfo is not None
+    assert ddt["hit"] is True
+    assert ddt["hit_count"] == 1
+    assert ddt["combo_hit"] is False
+    message = notifier.send_message.await_args.args[0]
+    assert "SHADOW — ĐỐI CHIẾU" in message
+    assert "CMR: 07 | 60 | 61 → 07, 60 (2/3 · đạt shadow)" in message
+    assert "DDT: 01 | 02 | 03 → 01 (1/3 · chưa đạt shadow)" in message
+    assert "Multi-Model đạt ≥2/3: 0/1 (0%)" in message
+
+
+def test_shadow_waits_until_both_target_provinces_have_results() -> None:
+    shadow = {
+        "id": 3,
+        "prediction_date": "2026-07-26",
+        "region": "XSMN",
+        "province": "all",
+        "model_name": "ddt_shadow",
+        "prediction_mode": "shadow",
+        "status": "success",
+        "pair_1": 7,
+        "pair_2": 60,
+        "pair_3": 61,
+        "run_metadata": {"provinces": ["tien-giang", "kien-giang"]},
+    }
+    store = {
+        "prediction_results": [],
+        "tails_2d": [
+            {
+                "region": "XSMN",
+                "draw_date": "2026-07-26",
+                "province": "tien-giang",
+                "tail_2d": 7,
+            }
+        ],
+        "model_predictions": [shadow],
+    }
+    db = SimpleNamespace(supabase=_FakeSupabase(store))
+    notifier = SimpleNamespace(send_message=AsyncMock(return_value=True))
+
+    asyncio.run(verify_date(db, notifier, date(2026, 7, 26)))
+
+    assert "verified_at" not in shadow
+    assert "combo_hit" not in shadow
+    message = notifier.send_message.await_args.args[0]
+    assert "DDT: chờ kết quả xổ số" in message
+    assert "CMR: không có Top 3 hợp lệ" in message

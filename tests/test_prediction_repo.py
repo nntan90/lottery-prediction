@@ -13,6 +13,7 @@ Verifies:
 import os
 import sys
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch, call
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +29,7 @@ class MockQueryChain:
         self._payload = None
     def select(self, *a, **kw): return self
     def eq(self, *a, **kw): return self
+    def neq(self, *a, **kw): return self
     def is_(self, *a, **kw): return self
     def insert(self, payload, *a, **kw):
         self._action = "insert"
@@ -237,6 +239,165 @@ class TestSaveModelPrediction(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             save_model_prediction(db, log)
         self.assertIn("Connection refused", str(ctx.exception))
+
+
+class TestShadowPredictionLifecycle(unittest.TestCase):
+    def test_normalize_ddt_keeps_top_three_and_audit_metadata(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "uncalibrated",
+                "model_name": "provincial_digit_transition_v1",
+                "score_semantics": "merged_pair_hit_likelihood_uncalibrated",
+                "data_cutoff": "2026-07-26",
+                "selected_evidence": [
+                    {"pair": 3, "estimated_likelihood_uncalibrated": 0.3},
+                    {"pair": 12, "estimated_likelihood_uncalibrated": 0.2},
+                    {"pair": 25, "estimated_likelihood_uncalibrated": 0.1},
+                ],
+            },
+            model_name="ddt_shadow",
+            target_date=date(2026, 7, 26),
+            provinces=["tien-giang", "kien-giang"],
+            execution_source="local_telegram",
+            runtime_ms=1234,
+            config_metadata={"oof_recent_anchors_per_province": 64},
+        )
+
+        self.assertEqual(
+            [record["pair_1"], record["pair_2"], record["pair_3"]],
+            [3, 12, 25],
+        )
+        self.assertEqual(record["prediction_mode"], "shadow")
+        self.assertEqual(record["province"], "all")
+        self.assertEqual(
+            record["run_metadata"]["provinces"],
+            ["tien-giang", "kien-giang"],
+        )
+        self.assertEqual(record["run_metadata"]["runtime_ms"], 1234)
+
+    def test_invalid_success_is_normalized_to_error_without_false_top_three(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {"status": "success", "selected_evidence": [{"pair": 3}]},
+            model_name="ddt_shadow",
+            target_date="2026-07-26",
+            provinces=("tien-giang", "kien-giang"),
+            execution_source="local_telegram",
+        )
+
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["error_message"], "invalid_shadow_top_3")
+        self.assertIsNone(record["pair_1"])
+
+    def test_later_failure_does_not_downgrade_existing_success(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        db = MockDB(
+            {
+                "model_predictions": [
+                    {"id": 9, "status": "success", "model_name": "ddt_shadow"}
+                ]
+            }
+        )
+        saved = save_shadow_prediction(
+            db,
+            {
+                "prediction_date": "2026-07-26",
+                "model_name": "ddt_shadow",
+                "status": "error",
+            },
+        )
+
+        self.assertFalse(saved)
+        self.assertNotIn("model_predictions", db.updated)
+
+    def test_shadow_save_falls_back_to_legacy_columns(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        class LegacyQuery(MockQueryChain):
+            def execute(self):
+                if self._payload and "prediction_mode" in self._payload:
+                    raise Exception(
+                        "Could not find the 'prediction_mode' column of "
+                        "'model_predictions' in the schema cache PGRST204"
+                    )
+                return super().execute()
+
+        class LegacyDB(MockDB):
+            def _mock_table(self, name):
+                self._calls.append(name)
+                return LegacyQuery(self, name, self._responses.get(name, []))
+
+        db = LegacyDB({"model_predictions": []})
+        record = {
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "model_name": "ddt_shadow",
+            "model_type": "shadow",
+            "pair_1": 3,
+            "status": "success",
+            "prediction_mode": "shadow",
+            "run_metadata": {"provinces": ["a", "b"]},
+            "hit_count": None,
+            "combo_hit": None,
+            "verified_at": None,
+        }
+
+        self.assertTrue(save_shadow_prediction(db, record))
+        inserted = db.inserted["model_predictions"][0]
+        self.assertEqual(inserted["pair_1"], 3)
+        self.assertNotIn("prediction_mode", inserted)
+        self.assertNotIn("run_metadata", inserted)
+
+    def test_same_success_retry_preserves_existing_verification(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "ddt_shadow",
+            "pair_1": 3,
+            "pair_2": 12,
+            "pair_3": 25,
+            "run_metadata": {"provinces": ["a", "b"]},
+            "hit": True,
+            "matched_pairs": [3, 12],
+            "hit_count": 2,
+            "combo_hit": True,
+            "verified_at": "2026-07-26T14:00:00+00:00",
+        }
+        db = MockDB({"model_predictions": [existing]})
+        incoming = {
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "model_name": "ddt_shadow",
+            "status": "success",
+            "pair_1": 3,
+            "pair_2": 12,
+            "pair_3": 25,
+            "run_metadata": {"provinces": ["a", "b"]},
+            "hit": None,
+            "matched_pairs": None,
+            "hit_count": None,
+            "combo_hit": None,
+            "verified_at": None,
+        }
+
+        self.assertTrue(save_shadow_prediction(db, incoming))
+        updated = db.updated["model_predictions"][0]
+        self.assertTrue(updated["hit"])
+        self.assertEqual(updated["matched_pairs"], [3, 12])
+        self.assertEqual(updated["hit_count"], 2)
+        self.assertTrue(updated["combo_hit"])
+        self.assertEqual(
+            updated["verified_at"],
+            "2026-07-26T14:00:00+00:00",
+        )
 
 
 if __name__ == "__main__":

@@ -70,6 +70,48 @@ Hệ thống hoạt động đơn giản như một chuỗi cron-job:
 3. Đợi vài phút để hệ thống khởi tạo dữ liệu ban đầu.
 4. Xong! Hệ thống sẽ tự động chạy hàng ngày.
 
+### 5. Chạy DDT shadow trên máy local qua Telegram
+
+DDT không còn chạy subprocess trong GitHub Actions. Production chỉ đọc row
+`ddt_shadow` đã được worker local lưu; vì vậy lỗi hoặc việc máy local tắt không
+ảnh hưởng Top 3 XSMN production.
+
+1. Chạy migration `database/migrations/12_add_shadow_prediction_tracking.sql`.
+2. Tạo `.env` tại project root (không commit) với:
+
+   ```dotenv
+   SUPABASE_URL=...
+   SUPABASE_SERVICE_KEY=...
+   TELEGRAM_BOT_TOKEN=...
+   DDT_ALLOWED_CHAT_IDS=123456789
+   DDT_ALLOWED_USER_IDS=123456789
+   # Tùy chọn, mặc định 06:30 giờ Việt Nam
+   DDT_LOCAL_PROMPT_TIME=06:30
+   ```
+
+3. Cài và kiểm tra LaunchAgent macOS:
+
+   ```bash
+   scripts/manage_ddt_local_bot.sh install
+   scripts/manage_ddt_local_bot.sh status
+   ```
+
+4. Bot sẽ gửi prompt hằng ngày. Có thể yêu cầu thủ công bằng `/ddt` hoặc
+   `/ddt YYYY-MM-DD`, sau đó bấm **Đồng ý chạy**. Callback có TTL, chỉ dùng một
+   lần và chỉ chat/user trong allowlist mới được chạy.
+
+Các lệnh vận hành:
+
+```bash
+scripts/manage_ddt_local_bot.sh start
+scripts/manage_ddt_local_bot.sh stop
+scripts/manage_ddt_local_bot.sh restart
+scripts/manage_ddt_local_bot.sh status
+```
+
+Log local nằm tại `.local/ddt-bot/` và đã được ignore. File launchd chỉ chứa
+đường dẫn thực thi; token/key vẫn được process nạp từ `.env`.
+
 ---
 
 ## 🛠️ Công Cụ Hỗ Trợ

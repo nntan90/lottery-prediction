@@ -268,10 +268,17 @@ CREATE TABLE IF NOT EXISTS model_predictions (
   execution_time_ms INT,
   error_message   TEXT,
   status          VARCHAR(20) DEFAULT 'success',
+  prediction_mode VARCHAR(20) NOT NULL DEFAULT 'production',
+  model_version   VARCHAR(100),
+  score_semantics VARCHAR(100),
+  run_metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
 
   -- Tracking history (Migration 08)
   hit             BOOLEAN,
   matched_pairs   SMALLINT[],
+  hit_count       INTEGER,
+  combo_hit       BOOLEAN,
+  verified_at     TIMESTAMPTZ,
 
   created_at      TIMESTAMP DEFAULT NOW(),
 
@@ -279,9 +286,17 @@ CREATE TABLE IF NOT EXISTS model_predictions (
 );
 
 COMMENT ON TABLE model_predictions IS 'Log Top-5 output từ mỗi sub-model trong XSMN ensemble pipeline';
+COMMENT ON COLUMN model_predictions.prediction_mode IS 'production | shadow; shadow rows never contribute to ensemble verdicts';
+COMMENT ON COLUMN model_predictions.model_version IS 'Stable producer/model version for production or shadow audit';
+COMMENT ON COLUMN model_predictions.score_semantics IS 'Probability only when calibrated; otherwise explicitly uncalibrated likelihood';
+COMMENT ON COLUMN model_predictions.run_metadata IS 'Province scope, cutoff, execution source, runtime and deterministic config';
+COMMENT ON COLUMN model_predictions.hit_count IS 'Count of unique canonical Top-3 pairs matched against the exact result scope';
+COMMENT ON COLUMN model_predictions.combo_hit IS 'True when at least 2 of the canonical Top 3 pairs matched';
+COMMENT ON COLUMN model_predictions.verified_at IS 'Timestamp when post-draw verification completed';
 CREATE INDEX IF NOT EXISTS idx_mp_date    ON model_predictions(prediction_date DESC);
 CREATE INDEX IF NOT EXISTS idx_mp_region  ON model_predictions(region, province);
 CREATE INDEX IF NOT EXISTS idx_mp_model   ON model_predictions(model_name);
+CREATE INDEX IF NOT EXISTS idx_mp_prediction_mode ON model_predictions(prediction_mode, prediction_date DESC);
 
 
 -- =====================================================
