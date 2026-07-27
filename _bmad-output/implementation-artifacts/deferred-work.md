@@ -43,3 +43,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-refactor-verification-and-result-message.md`
   summary: Make verification notification delivery failure observable to the workflow.
   evidence: `verify_v3.py` currently ignores a false return from `send_message()`, so a rejected or failed Telegram delivery still logs successful verification.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-ddt-approval-window-21-to-12.md`
+  summary: Persist accepted DDT run intent so a bot or laptop crash can resume the approved run after restart.
+  evidence: Pending approvals and the accepted-run reservation remain in memory; adding durable pending state is explicitly Ask First in the approved spec and cannot be inferred inside this patch.

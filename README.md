@@ -85,8 +85,6 @@ DDT không còn chạy subprocess trong GitHub Actions. Production chỉ đọc 
    TELEGRAM_BOT_TOKEN=...
    DDT_ALLOWED_CHAT_IDS=123456789
    DDT_ALLOWED_USER_IDS=123456789
-   # Tùy chọn, mặc định 06:30 giờ Việt Nam
-   DDT_LOCAL_PROMPT_TIME=06:30
    ```
 
 3. Cài và kiểm tra LaunchAgent macOS:
@@ -96,9 +94,22 @@ DDT không còn chạy subprocess trong GitHub Actions. Production chỉ đọc 
    scripts/manage_ddt_local_bot.sh status
    ```
 
-4. Bot sẽ gửi prompt hằng ngày. Có thể yêu cầu thủ công bằng `/ddt` hoặc
-   `/ddt YYYY-MM-DD`, sau đó bấm **Đồng ý chạy**. Callback có TTL, chỉ dùng một
-   lần và chỉ chat/user trong allowlist mới được chạy.
+4. Khi máy không có repeating power schedule khác, cài wake 20:55 bằng một
+   lệnh quản trị riêng:
+
+   ```bash
+   scripts/manage_ddt_local_bot.sh wake-status
+   scripts/manage_ddt_local_bot.sh wake-install
+   ```
+
+   `wake-install` cần quyền admin của macOS và sẽ dừng nếu phát hiện repeating
+   schedule không thuộc DDT; script không âm thầm ghi đè lịch power toàn máy.
+
+5. Bot giữ máy thức từ 20:55, gửi prompt lúc 21:00 cho kỳ quay ngày hôm sau và
+   nhận xác nhận đến trước 12:00 trưa ngày quay. `/ddt` tự suy ngày từ cửa sổ
+   đang mở; `/ddt YYYY-MM-DD` cũng chỉ hợp lệ trong đúng cửa sổ của ngày đó.
+   Callback chỉ dùng một lần và chỉ chat/user trong allowlist mới được chạy.
+   Run được duyệt trước 12:00 vẫn hoàn tất và gửi kết quả nếu chạy qua 12:00.
 
 Các lệnh vận hành:
 
@@ -107,10 +118,14 @@ scripts/manage_ddt_local_bot.sh start
 scripts/manage_ddt_local_bot.sh stop
 scripts/manage_ddt_local_bot.sh restart
 scripts/manage_ddt_local_bot.sh status
+scripts/manage_ddt_local_bot.sh wake-status
 ```
 
 Log local nằm tại `.local/ddt-bot/` và đã được ignore. File launchd chỉ chứa
-đường dẫn thực thi; token/key vẫn được process nạp từ `.env`.
+đường dẫn thực thi; token/key vẫn được process nạp từ `.env`. Để wake/giữ thức
+ổn định, giữ nắp MacBook mở; cắm sạc được khuyến nghị. Wake từ trạng thái tắt
+máy hoặc khi chưa đăng nhập/FileVault chưa mở khóa không bảo đảm LaunchAgent
+của user sẽ chạy.
 
 ---
 

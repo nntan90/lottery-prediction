@@ -8,7 +8,6 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as clock_time, timedelta
 from html import escape
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -36,15 +35,23 @@ from src.database.prediction_repo import (
     save_shadow_prediction,
 )
 from src.database.supabase_client import LotteryDB
-from src.utils.operational_date import resolve_operational_date
 from src.xsmn_digit_transition.config import DigitTransitionConfig
 from src.xsmn_ensemble.resolve_provinces import XSMN_ENSEMBLE_SCHEDULE
 
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 DDT_SUBPROCESS_TIMEOUT_SECONDS = 120
-DEFAULT_PROMPT_TIME = "06:30"
+# These operational boundaries are human-approved and intentionally fixed.
+DEFAULT_PROMPT_TIME = "21:00"
+APPROVAL_OPEN_TIME = clock_time(21, 0, tzinfo=VN_TZ)
+APPROVAL_CLOSE_TIME = clock_time(12, 0, tzinfo=VN_TZ)
+POWER_GUARD_TIME = clock_time(20, 55, tzinfo=VN_TZ)
 DEFAULT_REQUEST_TTL_SECONDS = 15 * 60
+CAFFEINATE_PATH = "/usr/bin/caffeinate"
+CAFFEINATE_STOP_TIMEOUT_SECONDS = 2.0
+AWAKE_HEALTHCHECK_SECONDS = 60.0
+PROMPT_RETRY_SECONDS = 60.0
+ASYNC_DB_TIMEOUT_SECONDS = 5.0
 VALID_EXIT_CODES = {
     "success": 0,
     "uncalibrated": 0,
@@ -98,6 +105,93 @@ def _parse_prompt_time(value: str) -> clock_time:
     return clock_time(parsed.hour, parsed.minute, tzinfo=VN_TZ)
 
 
+def _as_vietnam_time(value: datetime) -> datetime:
+    """Normalize an aware datetime to the one operational timezone."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("DDT scheduling requires a timezone-aware datetime")
+    return value.astimezone(VN_TZ)
+
+
+def approval_window(target_date: date) -> tuple[datetime, datetime]:
+    """Return the approval interval [21:00 D-1, 12:00 D) in Vietnam."""
+    if target_date == date.min:
+        raise ValueError("DDT target date is out of supported range")
+    opens_at = datetime.combine(
+        target_date - timedelta(days=1),
+        APPROVAL_OPEN_TIME,
+        tzinfo=VN_TZ,
+    )
+    closes_at = datetime.combine(
+        target_date,
+        APPROVAL_CLOSE_TIME,
+        tzinfo=VN_TZ,
+    )
+    return opens_at, closes_at
+
+
+def power_guard_window(target_date: date) -> tuple[datetime, datetime]:
+    """Return the awake interval [20:55 D-1, 12:00 D) in Vietnam."""
+    starts_at = datetime.combine(
+        target_date - timedelta(days=1),
+        POWER_GUARD_TIME,
+        tzinfo=VN_TZ,
+    )
+    return starts_at, approval_window(target_date)[1]
+
+
+def active_approval_target(value: datetime) -> Optional[date]:
+    """Resolve D only while ``value`` is inside D's approval window."""
+    current = _as_vietnam_time(value)
+    if current.timetz().replace(tzinfo=None) < APPROVAL_CLOSE_TIME.replace(
+        tzinfo=None
+    ):
+        candidate = current.date()
+    elif current.timetz().replace(tzinfo=None) >= APPROVAL_OPEN_TIME.replace(
+        tzinfo=None
+    ):
+        candidate = current.date() + timedelta(days=1)
+    else:
+        return None
+    opens_at, closes_at = approval_window(candidate)
+    return candidate if opens_at <= current < closes_at else None
+
+
+def active_power_guard_target(value: datetime) -> Optional[date]:
+    """Resolve D only while ``value`` is inside D's power guard window."""
+    current = _as_vietnam_time(value)
+    current_time = current.timetz().replace(tzinfo=None)
+    if current_time < APPROVAL_CLOSE_TIME.replace(tzinfo=None):
+        candidate = current.date()
+    elif current_time >= POWER_GUARD_TIME.replace(tzinfo=None):
+        candidate = current.date() + timedelta(days=1)
+    else:
+        return None
+    starts_at, closes_at = power_guard_window(candidate)
+    return candidate if starts_at <= current < closes_at else None
+
+
+def next_prompt_at(value: datetime) -> datetime:
+    """Return the next strictly-future 21:00 prompt boundary."""
+    current = _as_vietnam_time(value)
+    scheduled = datetime.combine(
+        current.date(),
+        APPROVAL_OPEN_TIME,
+        tzinfo=VN_TZ,
+    )
+    return scheduled if current < scheduled else scheduled + timedelta(days=1)
+
+
+def next_power_guard_at(value: datetime) -> datetime:
+    """Return the next strictly-future 20:55 power-guard boundary."""
+    current = _as_vietnam_time(value)
+    scheduled = datetime.combine(
+        current.date(),
+        POWER_GUARD_TIME,
+        tzinfo=VN_TZ,
+    )
+    return scheduled if current < scheduled else scheduled + timedelta(days=1)
+
+
 @dataclass(frozen=True)
 class DDTBotSettings:
     """Environment-owned settings for the local polling process."""
@@ -106,6 +200,7 @@ class DDTBotSettings:
     allowed_chat_ids: frozenset[int]
     allowed_user_ids: frozenset[int]
     prompt_time: clock_time
+    # Retained for constructor compatibility; approvals now close at 12:00 D.
     request_ttl_seconds: int = DEFAULT_REQUEST_TTL_SECONDS
     subprocess_timeout_seconds: int = DDT_SUBPROCESS_TIMEOUT_SECONDS
 
@@ -127,26 +222,21 @@ def load_settings() -> DDTBotSettings:
                 "DDT_ALLOWED_USER_IDS is required for Telegram group chats"
             )
         user_ids = ",".join(str(chat_id) for chat_id in sorted(parsed_chat_ids))
-    ttl = int(os.getenv("DDT_LOCAL_REQUEST_TTL_SECONDS", DEFAULT_REQUEST_TTL_SECONDS))
     timeout = int(
         os.getenv(
             "DDT_LOCAL_TIMEOUT_SECONDS",
             DDT_SUBPROCESS_TIMEOUT_SECONDS,
         )
     )
-    if ttl < 30:
-        raise ValueError("DDT_LOCAL_REQUEST_TTL_SECONDS must be at least 30")
     if timeout < 1:
         raise ValueError("DDT_LOCAL_TIMEOUT_SECONDS must be positive")
     return DDTBotSettings(
         bot_token=token,
         allowed_chat_ids=parsed_chat_ids,
         allowed_user_ids=_parse_id_set(user_ids, name="DDT_ALLOWED_USER_IDS"),
-        prompt_time=_parse_prompt_time(
-            os.getenv("DDT_LOCAL_PROMPT_TIME", DEFAULT_PROMPT_TIME).strip()
-            or DEFAULT_PROMPT_TIME
-        ),
-        request_ttl_seconds=ttl,
+        # The approved window is fixed; legacy overrides remain harmless.
+        prompt_time=_parse_prompt_time(DEFAULT_PROMPT_TIME),
+        request_ttl_seconds=DEFAULT_REQUEST_TTL_SECONDS,
         subprocess_timeout_seconds=timeout,
     )
 
@@ -162,6 +252,82 @@ class PendingDDTRequest:
     requested_by: Optional[int]
     expires_at: datetime
     used: bool = False
+
+
+class AwakeLeaseManager:
+    """Own one non-orphaning caffeinate process for all active awake leases."""
+
+    def __init__(self) -> None:
+        self._leases: set[str] = set()
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def leases(self) -> frozenset[str]:
+        return frozenset(self._leases)
+
+    @property
+    def process(self) -> Optional[asyncio.subprocess.Process]:
+        return self._process
+
+    async def acquire(self, lease: str) -> None:
+        """Acquire an awake reason and start caffeinate at most once."""
+        async with self._lock:
+            self._leases.add(lease)
+            if self._process is not None and self._process.returncode is None:
+                return
+            if self._process is not None:
+                await self._process.wait()
+            self._process = None
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    CAFFEINATE_PATH,
+                    "-i",
+                    "-w",
+                    str(os.getpid()),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                print(f"⚠️ DDT caffeinate unavailable: {_safe_reason(exc)}")
+
+    async def release(self, lease: str) -> None:
+        """Release one reason and reap caffeinate after the final lease."""
+        async with self._lock:
+            self._leases.discard(lease)
+            if self._leases:
+                return
+            await self._stop_process()
+
+    async def shutdown(self) -> None:
+        """Clear all reasons and reap caffeinate during application shutdown."""
+        async with self._lock:
+            self._leases.clear()
+            await self._stop_process()
+
+    async def _stop_process(self) -> None:
+        process = self._process
+        self._process = None
+        if process is None or process.returncode is not None:
+            if process is not None:
+                await process.wait()
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            await process.wait()
+            return
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=CAFFEINATE_STOP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
 
 
 def _last_stderr_line(stderr: str) -> str:
@@ -287,7 +453,10 @@ class DDTLocalController:
         now: Optional[datetime] = None,
     ) -> PendingDDTRequest:
         """Create an expiring approval after resolving exactly two provinces."""
-        created_at = now or datetime.now(VN_TZ)
+        created_at = _as_vietnam_time(now or datetime.now(VN_TZ))
+        opens_at, closes_at = approval_window(target_date)
+        if not opens_at <= created_at < closes_at:
+            raise ValueError(_outside_window_message(created_at))
         self.requests = {
             token: request
             for token, request in self.requests.items()
@@ -303,8 +472,7 @@ class DDTLocalController:
             provinces=(provinces[0], provinces[1]),
             chat_id=chat_id,
             requested_by=requested_by,
-            expires_at=created_at
-            + timedelta(seconds=self.settings.request_ttl_seconds),
+            expires_at=closes_at,
         )
         self.requests[token] = request
         return request
@@ -325,12 +493,15 @@ class DDTLocalController:
             return None, "unknown_request"
         if request.used:
             return None, "already_used"
-        current = now or datetime.now(VN_TZ)
+        current = _as_vietnam_time(now or datetime.now(VN_TZ))
         if request.chat_id != chat_id:
             return None, "wrong_chat"
         if request.requested_by is not None and request.requested_by != user_id:
             return None, "wrong_user"
-        if current >= request.expires_at:
+        opens_at, closes_at = approval_window(request.target_date)
+        if current < opens_at:
+            return None, "not_open"
+        if current >= closes_at or current >= request.expires_at:
             return None, "expired"
         if self.reserved_token is not None or self.run_lock.locked():
             return None, "run_in_progress"
@@ -448,6 +619,26 @@ class DDTLocalController:
             )
 
 
+async def _has_persisted_success(
+    controller: DDTLocalController,
+    target_date: date,
+) -> bool:
+    """Read durable success without blocking Telegram's asyncio event loop."""
+    try:
+        existing = await asyncio.wait_for(
+            asyncio.to_thread(
+                get_shadow_prediction,
+                controller.db,
+                "ddt_shadow",
+                target_date,
+            ),
+            timeout=ASYNC_DB_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return False
+    return bool(existing and existing.get("status") in SHADOW_SUCCESS_STATUSES)
+
+
 def format_outcome_message(
     payload: dict,
     target_date: date,
@@ -510,8 +701,15 @@ def _request_text(request: PendingDDTRequest) -> str:
     return (
         f"🧪 Chạy DDT local cho <b>{request.target_date:%d/%m/%Y}</b>?\n"
         f"📍 <code>{escape(provinces)}</code>\n"
-        "⏳ Xác nhận trong "
-        f"{math.ceil(max(0.0, (request.expires_at - datetime.now(VN_TZ)).total_seconds()) / 60)} phút."
+        f"⏳ Xác nhận trước <b>{request.expires_at:%H:%M %d/%m/%Y}</b>."
+    )
+
+
+def _outside_window_message(value: datetime) -> str:
+    next_open = next_prompt_at(value)
+    return (
+        "DDT chỉ nhận xác nhận từ 21:00 hôm trước đến trước 12:00 ngày quay. "
+        f"Khung tiếp theo mở lúc {next_open:%H:%M %d/%m/%Y}."
     )
 
 
@@ -532,17 +730,20 @@ async def _ddt_command(
         await message.reply_text("DDT đang chạy; hãy thử lại sau.")
         return
     try:
+        now = datetime.now(VN_TZ)
         if len(context.args) > 1:
             raise ValueError("Dùng /ddt hoặc /ddt YYYY-MM-DD")
-        target_date = (
-            date.fromisoformat(context.args[0])
-            if context.args
-            else resolve_operational_date(datetime.now(VN_TZ))
-        )
+        if context.args:
+            target_date = date.fromisoformat(context.args[0])
+        else:
+            target_date = active_approval_target(now)
+            if target_date is None:
+                raise ValueError(_outside_window_message(now))
         request = controller.create_request(
             target_date,
             chat_id=chat.id,
             requested_by=user.id,
+            now=now,
         )
     except ValueError as exc:
         await message.reply_text(_safe_reason(exc))
@@ -582,6 +783,22 @@ async def _ddt_callback(
     if action != "run":
         await query.answer("Callback không hợp lệ.", show_alert=True)
         return
+    request_hint = controller.requests.get(token)
+    if (
+        controller.is_authorized(chat_id, user_id)
+        and request_hint is not None
+        and request_hint.chat_id == chat_id
+        and (
+            request_hint.requested_by is None
+            or request_hint.requested_by == user_id
+        )
+        and await _has_persisted_success(controller, request_hint.target_date)
+    ):
+        await query.answer(
+            "DDT ngày này đã có kết quả thành công.",
+            show_alert=True,
+        )
+        return
     request, outcome = controller.claim_request(
         token,
         chat_id=chat_id,
@@ -591,47 +808,73 @@ async def _ddt_callback(
         await query.answer(outcome, show_alert=True)
         return
 
+    awake_leases: AwakeLeaseManager = context.application.bot_data[
+        "ddt_awake_leases"
+    ]
+    run_lease = f"run:{request.token}"
+    try:
+        await awake_leases.acquire(run_lease)
+    except BaseException:
+        controller.release_request(request.token)
+        await awake_leases.release(run_lease)
+        raise
+
     async def run_and_notify() -> None:
-        result_message = await controller.execute_request(request)
         try:
-            await context.bot.send_message(
-                chat_id=request.chat_id,
-                text=result_message,
-                parse_mode="HTML",
-            )
-        except Exception:
+            result_message = await controller.execute_request(request)
             try:
-                await query.edit_message_text(
-                    result_message,
+                await context.bot.send_message(
+                    chat_id=request.chat_id,
+                    text=result_message,
                     parse_mode="HTML",
                 )
-            except Exception as exc:
-                print(f"⚠️ DDT outcome delivery failed: {_safe_reason(exc)}")
+            except Exception:
+                try:
+                    await query.edit_message_text(
+                        result_message,
+                        parse_mode="HTML",
+                    )
+                except Exception as exc:
+                    print(f"⚠️ DDT outcome delivery failed: {_safe_reason(exc)}")
+        finally:
+            controller.release_request(request.token)
+            if await _has_persisted_success(controller, request.target_date):
+                await awake_leases.release("approval_window")
+            await awake_leases.release(run_lease)
 
-    task = context.application.create_task(
-        run_and_notify(),
-        name=f"ddt-{request.target_date.isoformat()}",
-    )
-    task.add_done_callback(lambda _task: controller.release_request(request.token))
-    await query.answer("Đã nhận; DDT đang chạy nền.")
-    await query.edit_message_text(
-        f"⏳ DDT {request.target_date:%d/%m/%Y} đang chạy…"
-    )
+    try:
+        try:
+            await query.answer("Đã nhận; DDT đang chạy nền.")
+        except Exception as exc:
+            print(f"⚠️ DDT callback acknowledgement failed: {_safe_reason(exc)}")
+        try:
+            await query.edit_message_text(
+                f"⏳ DDT {request.target_date:%d/%m/%Y} đang chạy…"
+            )
+        except Exception as exc:
+            print(f"⚠️ DDT running message failed: {_safe_reason(exc)}")
+        context.application.create_task(
+            run_and_notify(),
+            name=f"ddt-{request.target_date.isoformat()}",
+        )
+    except BaseException:
+        controller.release_request(request.token)
+        await awake_leases.release(run_lease)
+        raise
 
 
 async def _send_daily_prompts(
     application: Application,
     target_date: date,
-) -> None:
+    chat_ids: Optional[Sequence[int]] = None,
+) -> set[int]:
     """Send one prompt per configured chat while keeping scheduler failures local."""
     controller: DDTLocalController = application.bot_data["ddt_controller"]
-    try:
-        existing = get_shadow_prediction(controller.db, "ddt_shadow", target_date)
-    except Exception:
-        existing = None
-    if existing and existing.get("status") in SHADOW_SUCCESS_STATUSES:
-        return
-    for chat_id in sorted(controller.settings.allowed_chat_ids):
+    recipients = set(chat_ids or controller.settings.allowed_chat_ids)
+    if await _has_persisted_success(controller, target_date):
+        return recipients
+    delivered: set[int] = set()
+    for chat_id in sorted(recipients):
         if controller.reserved_token is not None or controller.run_lock.locked():
             continue
         try:
@@ -646,6 +889,7 @@ async def _send_daily_prompts(
                 parse_mode="HTML",
                 reply_markup=_request_keyboard(request),
             )
+            delivered.add(chat_id)
         except Exception as exc:
             try:
                 await application.bot.send_message(
@@ -658,28 +902,84 @@ async def _send_daily_prompts(
                 )
             except Exception:
                 continue
+    return delivered
 
 
 async def _daily_prompt_loop(application: Application) -> None:
+    """Send at 21:00 or once on a wake/restart inside the active window."""
     controller: DDTLocalController = application.bot_data["ddt_controller"]
-    prompt_time = controller.settings.prompt_time
-    now = datetime.now(VN_TZ)
-    scheduled_today = datetime.combine(now.date(), prompt_time, tzinfo=VN_TZ)
-    if now >= scheduled_today:
-        await _send_daily_prompts(
-            application,
-            resolve_operational_date(now),
-        )
+    prompt_target: Optional[date] = None
+    delivered_chats: set[int] = set()
     while True:
         now = datetime.now(VN_TZ)
-        scheduled = datetime.combine(now.date(), prompt_time, tzinfo=VN_TZ)
-        if scheduled <= now:
-            scheduled += timedelta(days=1)
-        await asyncio.sleep(max(1.0, (scheduled - now).total_seconds()))
-        await _send_daily_prompts(
-            application,
-            resolve_operational_date(datetime.now(VN_TZ)),
+        target_date = active_approval_target(now)
+        if target_date is None:
+            prompt_target = None
+            delivered_chats.clear()
+            scheduled = next_prompt_at(now)
+            await asyncio.sleep(max(1.0, (scheduled - now).total_seconds()))
+            continue
+        if target_date != prompt_target:
+            prompt_target = target_date
+            delivered_chats.clear()
+        missing = set(controller.settings.allowed_chat_ids) - delivered_chats
+        if missing:
+            delivered_chats.update(
+                await _send_daily_prompts(
+                    application,
+                    target_date,
+                    sorted(missing),
+                )
+            )
+        if delivered_chats >= set(controller.settings.allowed_chat_ids):
+            scheduled = next_prompt_at(datetime.now(VN_TZ))
+            await asyncio.sleep(
+                max(1.0, (scheduled - datetime.now(VN_TZ)).total_seconds())
+            )
+            continue
+        closes_at = approval_window(target_date)[1]
+        retry_now = datetime.now(VN_TZ)
+        retry_delay = min(
+            PROMPT_RETRY_SECONDS,
+            max(1.0, (closes_at - retry_now).total_seconds()),
         )
+        await asyncio.sleep(retry_delay)
+
+
+async def _awake_guard_loop(application: Application) -> None:
+    """Hold the approval lease from the 20:55 wake through 12:00."""
+    awake_leases: AwakeLeaseManager = application.bot_data["ddt_awake_leases"]
+    controller: DDTLocalController = application.bot_data["ddt_controller"]
+    lease = "approval_window"
+    lease_active = False
+    try:
+        while True:
+            now = datetime.now(VN_TZ)
+            target_date = active_power_guard_target(now)
+            needs_approval = (
+                target_date is not None
+                and not await _has_persisted_success(controller, target_date)
+            )
+            if needs_approval:
+                await awake_leases.acquire(lease)
+                lease_active = True
+                assert target_date is not None
+                closes_at = power_guard_window(target_date)[1]
+                await asyncio.sleep(
+                    min(
+                        AWAKE_HEALTHCHECK_SECONDS,
+                        max(1.0, (closes_at - now).total_seconds()),
+                    )
+                )
+                continue
+            if lease_active:
+                await awake_leases.release(lease)
+                lease_active = False
+            starts_at = next_power_guard_at(now)
+            await asyncio.sleep(max(1.0, (starts_at - now).total_seconds()))
+    finally:
+        if lease_active:
+            await awake_leases.release(lease)
 
 
 async def _post_init(application: Application) -> None:
@@ -687,13 +987,27 @@ async def _post_init(application: Application) -> None:
         _daily_prompt_loop(application),
         name="ddt-daily-prompt",
     )
+    application.bot_data["ddt_awake_task"] = asyncio.create_task(
+        _awake_guard_loop(application),
+        name="ddt-awake-guard",
+    )
 
 
 async def _post_shutdown(application: Application) -> None:
-    task = application.bot_data.get("ddt_prompt_task")
-    if task is not None:
+    tasks = [
+        application.bot_data.get("ddt_prompt_task"),
+        application.bot_data.get("ddt_awake_task"),
+    ]
+    active_tasks = [task for task in tasks if task is not None]
+    for task in active_tasks:
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    if active_tasks:
+        await asyncio.gather(*active_tasks, return_exceptions=True)
+    awake_leases: Optional[AwakeLeaseManager] = application.bot_data.get(
+        "ddt_awake_leases"
+    )
+    if awake_leases is not None:
+        await awake_leases.shutdown()
 
 
 def build_application(
@@ -709,6 +1023,7 @@ def build_application(
         .build()
     )
     application.bot_data["ddt_controller"] = DDTLocalController(db, settings)
+    application.bot_data["ddt_awake_leases"] = AwakeLeaseManager()
     application.add_handler(CommandHandler("ddt", _ddt_command))
     application.add_handler(CallbackQueryHandler(_ddt_callback, pattern=r"^ddt:"))
     return application
