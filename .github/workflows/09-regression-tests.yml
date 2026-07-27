@@ -6,8 +6,10 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'config/**'
       - 'requirements.txt'
+      - '.github/workflows/09-regression-tests.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -29,6 +31,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
