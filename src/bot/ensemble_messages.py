@@ -14,6 +14,9 @@ class ShadowRow:
 
     label: str
     top_pairs: Sequence[tuple[int, float]] = ()
+    numbers: Sequence[int] = ()
+    aggregate_score: Optional[float] = None
+    aggregate_label: Optional[str] = None
     status: Optional[str] = None
 
 
@@ -24,11 +27,26 @@ def _format_numbers(numbers: Sequence[int]) -> str:
 def _format_shadow_row(
     label: str,
     top_pairs: Sequence[tuple[int, float]],
+    numbers: Sequence[int],
+    aggregate_score: float | None,
+    aggregate_label: str | None,
     status: str | None,
 ) -> str | None:
     """Format one shadow row without implying it participates in production."""
     safe_label = html.escape(label)
     normalized_status = (status or "").strip()
+    if numbers:
+        number_text = _format_numbers(numbers[:3])
+        score_text = ""
+        if aggregate_score is not None:
+            safe_score_label = html.escape(
+                aggregate_label or "điểm tổ hợp chưa calibration"
+            )
+            score_text = (
+                f" • {safe_score_label}: <b>{aggregate_score:.4f}</b>"
+            )
+        suffix = f" • {html.escape(normalized_status)}" if normalized_status else ""
+        return f"<b>{safe_label}:</b> {number_text}{score_text}{suffix}"
     if top_pairs:
         scored = " • ".join(
             f"<code>{number:02d}</code> ({score:.3f})"
@@ -104,12 +122,22 @@ def format_compact_ensemble_message(
     primary_shadow = _format_shadow_row(
         shadow_label,
         shadow_top_pairs,
+        (),
+        None,
+        None,
         shadow_status,
     )
     if primary_shadow:
         shadow_rows.append(primary_shadow)
     for shadow in additional_shadows:
-        row = _format_shadow_row(shadow.label, shadow.top_pairs, shadow.status)
+        row = _format_shadow_row(
+            shadow.label,
+            shadow.top_pairs,
+            shadow.numbers,
+            shadow.aggregate_score,
+            shadow.aggregate_label,
+            shadow.status,
+        )
         if row:
             shadow_rows.append(row)
 

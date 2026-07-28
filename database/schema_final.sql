@@ -239,13 +239,13 @@ CREATE INDEX IF NOT EXISTS idx_tq_created  ON training_queue(created_at DESC);
 
 
 -- =====================================================
--- 8. TABLE: model_predictions (V3.1 — XSMN Ensemble)
--- Log Top-N output từ mỗi sub-model trong ensemble pipeline
+-- 8. TABLE: model_predictions (XSMB/XSMN Ensemble + Shadow Ledger)
+-- Log Top-N output và challenger shadow cho cả hai miền
 -- =====================================================
 CREATE TABLE IF NOT EXISTS model_predictions (
   id              SERIAL PRIMARY KEY,
   prediction_date DATE NOT NULL,
-  region          VARCHAR(10) NOT NULL,     -- 'XSMN'
+  region          VARCHAR(10) NOT NULL,     -- 'XSMB' | 'XSMN'
   province        VARCHAR(50),              -- slug tỉnh
 
   model_name      VARCHAR(50) NOT NULL,     -- 'freq_gap' | 'markov' | 'xgboost_core'
@@ -285,18 +285,23 @@ CREATE TABLE IF NOT EXISTS model_predictions (
   CONSTRAINT model_predictions_unique UNIQUE (prediction_date, region, province, model_name)
 );
 
-COMMENT ON TABLE model_predictions IS 'Log Top-5 output từ mỗi sub-model trong XSMN ensemble pipeline';
+COMMENT ON TABLE model_predictions IS 'Log Top-N output and shadow challenger records for XSMB and XSMN';
 COMMENT ON COLUMN model_predictions.prediction_mode IS 'production | shadow; shadow rows never contribute to ensemble verdicts';
 COMMENT ON COLUMN model_predictions.model_version IS 'Stable producer/model version for production or shadow audit';
-COMMENT ON COLUMN model_predictions.score_semantics IS 'Probability only when calibrated; otherwise explicitly uncalibrated likelihood';
-COMMENT ON COLUMN model_predictions.run_metadata IS 'Province scope, cutoff, execution source, runtime and deterministic config';
+COMMENT ON COLUMN model_predictions.score_semantics IS 'Explicit score meaning; probability wording is allowed only after out-of-fold calibration';
+COMMENT ON COLUMN model_predictions.run_metadata IS 'Cutoff, scope, active weights, contributing/skipped models and deterministic audit metadata';
 COMMENT ON COLUMN model_predictions.hit_count IS 'Count of unique canonical Top-3 pairs matched against the exact result scope';
-COMMENT ON COLUMN model_predictions.combo_hit IS 'True when at least 2 of the canonical Top 3 pairs matched';
+COMMENT ON COLUMN model_predictions.combo_hit IS 'For canonical Top-3 ensemble/shadow rows, true only when hit_count is at least 2';
 COMMENT ON COLUMN model_predictions.verified_at IS 'Timestamp when post-draw verification completed';
 CREATE INDEX IF NOT EXISTS idx_mp_date    ON model_predictions(prediction_date DESC);
 CREATE INDEX IF NOT EXISTS idx_mp_region  ON model_predictions(region, province);
 CREATE INDEX IF NOT EXISTS idx_mp_model   ON model_predictions(model_name);
 CREATE INDEX IF NOT EXISTS idx_mp_prediction_mode ON model_predictions(prediction_mode, prediction_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mp_xsmb_combo_shadow_unique
+  ON model_predictions (prediction_date, region, model_name)
+  WHERE region = 'XSMB'
+    AND province IS NULL
+    AND model_name = 'xsmb_combo_shadow';
 
 
 -- =====================================================

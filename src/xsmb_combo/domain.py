@@ -30,11 +30,15 @@ class PairScoreVector:
     model_name: str
     scores: Tuple[float, ...]
     source_pairs: Tuple[int, ...]
+    source_family: str = "unknown"
     score_kind: str = "relative_evidence"
+    coverage_kind: str = "legacy_top_n"
 
     def __post_init__(self) -> None:
         if not self.model_name:
             raise ValueError("model_name must not be empty")
+        if not self.source_family:
+            raise ValueError("source_family must not be empty")
         if len(self.scores) != PAIR_COUNT:
             raise ValueError(f"scores must contain {PAIR_COUNT} values")
         if any(not math.isfinite(score) or score < 0.0 for score in self.scores):
@@ -78,7 +82,7 @@ class JointPairEvidence:
 
 @dataclass(frozen=True)
 class ComboSelectorResult:
-    """Result of exhaustive selection over a bounded candidate pool."""
+    """Result of deterministic exhaustive selection for the shadow challenger."""
 
     status: SelectorStatus
     top_pairs: Tuple[int, ...] = ()
@@ -93,3 +97,7 @@ class ComboSelectorResult:
     joint_pair_evidence: Tuple[JointPairEvidence, ...] = ()
     triple_probability: float = 0.0
     diagnostics: Tuple[str, ...] = ()
+    score_semantics: str = "combo_score_uncalibrated"
+    selector_version: str = "xsmb_hybrid_combo_v6"
+    active_weights: Tuple[Tuple[str, float], ...] = ()
+    source_families: Tuple[Tuple[str, str], ...] = ()

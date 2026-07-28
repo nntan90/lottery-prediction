@@ -21,6 +21,19 @@ from collections import defaultdict
 from src.xsmb_ensemble.data_utils import _load_tails_by_draws, _load_tails_by_weekday
 
 
+def _compress_context_by_frequency(
+    values,
+    context_frequency: np.ndarray,
+    top_k: int,
+) -> list[int]:
+    """Select context pairs by evidence strength with deterministic ties."""
+    valid = {int(pair) for pair in values if 0 <= int(pair) <= 99}
+    return sorted(
+        valid,
+        key=lambda pair: (-context_frequency[pair], pair),
+    )[:top_k]
+
+
 def _load_tails_sequential(
     db,
     region: str = "XSMB",
@@ -127,6 +140,17 @@ def predict_markov(
         # Dùng dict thay vì full matrix để tiết kiệm RAM
         transition_2nd: dict[tuple[int, int], np.ndarray] = {}
 
+        # Compression must be driven by evidence, not by the numeric value of
+        # a pair.  The previous ``sorted(... )[:K]`` implementation silently
+        # favoured 00..14 whenever a draw contained more than K unique tails.
+        # Use decay-weighted global frequency as a deterministic context rank.
+        context_frequency = np.zeros(100, dtype=float)
+        for draw_index, draw in enumerate(draws):
+            draw_weight = DECAY_LAMBDA ** (n - 1 - draw_index)
+            for pair in draw:
+                if 0 <= pair <= 99:
+                    context_frequency[pair] += draw_weight
+
         if n >= 3:
             for t in range(n - 2):
                 set_t0 = draws[t]       # kỳ t-2
@@ -136,8 +160,12 @@ def predict_markov(
                 weight = DECAY_LAMBDA ** (n - 3 - t)
 
                 # Compress: chỉ lấy top-K pairs mỗi kỳ
-                ctx0 = sorted([p for p in set_t0 if 0 <= p <= 99])[:TOP_K_COMPRESS]
-                ctx1 = sorted([p for p in set_t1 if 0 <= p <= 99])[:TOP_K_COMPRESS]
+                ctx0 = _compress_context_by_frequency(
+                    set_t0, context_frequency, TOP_K_COMPRESS
+                )
+                ctx1 = _compress_context_by_frequency(
+                    set_t1, context_frequency, TOP_K_COMPRESS
+                )
 
                 for i in ctx0:
                     for k in ctx1:
@@ -170,8 +198,12 @@ def predict_markov(
         pred_2nd = np.zeros(100, dtype=float)
         n_2nd_states = 0
         if transition_2nd and context_t1 and context_t2:
-            ctx0_comp = sorted([p for p in context_t2 if 0 <= p <= 99])[:TOP_K_COMPRESS]
-            ctx1_comp = sorted([p for p in context_t1 if 0 <= p <= 99])[:TOP_K_COMPRESS]
+            ctx0_comp = _compress_context_by_frequency(
+                context_t2, context_frequency, TOP_K_COMPRESS
+            )
+            ctx1_comp = _compress_context_by_frequency(
+                context_t1, context_frequency, TOP_K_COMPRESS
+            )
 
             for i in ctx0_comp:
                 for k in ctx1_comp:
@@ -195,8 +227,11 @@ def predict_markov(
 
         return {
             "model_name": "markov",
+            "source_family": "transition",
             "province": province,
             "top_pairs": top_pairs,
+            "score_vector": [float(score) for score in predictions],
+            "score_semantics": "relative_score_uncalibrated",
             "n_draws_used": n,
             "status": "success",
             "error_message": None,

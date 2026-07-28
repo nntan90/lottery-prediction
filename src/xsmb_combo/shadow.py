@@ -1,4 +1,4 @@
-"""Default-off integration helpers for the additive XSMB combo selector."""
+"""Fault-isolated integration helpers for the XSMB combo v6 shadow."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from src.xsmb_ensemble.data_utils import _load_tails_by_draws
 
 MODE_ENV_VAR = "XSMB_COMBO_SELECTOR_MODE"
 VALID_MODES = {"off", "shadow"}
+EXPECTED_XSMB_TAIL_ROWS = 27
 
 
 def get_combo_selector_mode(value: str | None = None) -> str:
@@ -30,6 +31,17 @@ def _history_before_target(
     """Validate the data cutoff and return draw-level unique tail sets."""
     if history_frame.empty:
         return ()
+    if "tail_count" in history_frame.columns:
+        incomplete = history_frame[
+            history_frame["tail_count"] != EXPECTED_XSMB_TAIL_ROWS
+        ]
+        if not incomplete.empty:
+            first = incomplete.iloc[0]
+            raise ValueError(
+                "incomplete XSMB draw: "
+                f"{first['draw_date']} has {int(first['tail_count'])}/"
+                f"{EXPECTED_XSMB_TAIL_ROWS} tail rows"
+            )
     for draw_date in history_frame["draw_date"]:
         resolved = draw_date.date() if hasattr(draw_date, "date") else date.fromisoformat(str(draw_date))
         if resolved >= target_date:
@@ -46,7 +58,7 @@ def run_xsmb_combo_shadow(
     *,
     weights: Mapping[str, float] | None = None,
     history_draws: int = 180,
-    candidate_pool_size: int = 10,
+    candidate_pool_size: int = 100,
     objective: str = "combo_probability",
     minimum_history: int = 30,
 ) -> ComboSelectorResult:

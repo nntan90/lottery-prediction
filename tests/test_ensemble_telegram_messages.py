@@ -271,3 +271,29 @@ def test_xsmb_layout_has_no_station_or_shadow_section() -> None:
     assert "⚖️ <b>Trọng số:</b> Freq 0.20" in message
     assert "📍" not in message
     assert "SHADOW" not in message
+
+
+def test_xsmb_combo_shadow_shows_one_uncalibrated_aggregate_score() -> None:
+    message = format_compact_ensemble_message(
+        region="XSMB",
+        target_date=date(2026, 7, 28),
+        dow_label="Thứ Ba",
+        top_pairs=((60, 0.138), (83, 0.103), (52, 0.081)),
+        models_active=5,
+        models_total=5,
+        version="Ensemble v5.1",
+        additional_shadows=(
+            ShadowRow(
+                label="Combo v6 shadow",
+                numbers=(12, 34, 56),
+                aggregate_score=0.184321,
+                aggregate_label="điểm tổ hợp chưa calibration",
+                status="không thay production",
+            ),
+        ),
+    )
+
+    assert "<code>12</code> • <code>34</code> • <code>56</code>" in message
+    assert "điểm tổ hợp chưa calibration: <b>0.1843</b>" in message
+    assert message.count("0.1843") == 1
+    assert "xác suất" not in message.casefold()

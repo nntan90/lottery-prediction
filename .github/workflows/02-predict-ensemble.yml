@@ -37,6 +37,7 @@ jobs:
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: .
+          XSMB_COMBO_SELECTOR_MODE: shadow
           # TARGET_PROVINCES: Auto-resolved by resolve_provinces.py based on DOW
         run: |
           python src/scripts/predict_ensemble.py

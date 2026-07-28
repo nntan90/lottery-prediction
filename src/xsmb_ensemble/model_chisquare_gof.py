@@ -15,6 +15,12 @@ import numpy as np
 from src.xsmb_ensemble.data_utils import _load_tails_by_draws, compute_pair_appeared_matrix
 
 
+SUM_GROUP_CARDINALITIES = np.array(
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+    dtype=float,
+)
+
+
 def predict_chisquare_gof(
     db,
     province: Optional[str] = None,
@@ -52,12 +58,18 @@ def predict_chisquare_gof(
             group_scores[w] = {
                 "decile": _positive_residual_scores(decile_counts),
                 "tail": _positive_residual_scores(tail_counts),
-                "sum": _positive_residual_scores(sum_counts),
+                "sum": _positive_residual_scores(
+                    sum_counts,
+                    expected_weights=SUM_GROUP_CARDINALITIES,
+                ),
             }
             p_strengths[w] = {
                 "decile": _p_strength(decile_counts),
                 "tail": _p_strength(tail_counts),
-                "sum": _p_strength(sum_counts),
+                "sum": _p_strength(
+                    sum_counts,
+                    expected_weights=SUM_GROUP_CARDINALITIES,
+                ),
             }
 
         pair_freq_30 = appeared[-min(n, 30):].mean(axis=0)
@@ -88,8 +100,11 @@ def predict_chisquare_gof(
 
         return {
             "model_name": "chisquare_gof",
+            "source_family": "distributional_frequency",
             "province": province,
             "top_pairs": top_pairs,
+            "score_vector": [float(score) for score in scores],
+            "score_semantics": "relative_score_uncalibrated",
             "n_draws_used": n,
             "status": "success",
             "error_message": None,
@@ -111,20 +126,41 @@ def _group_counts(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return decile_counts, tail_counts, sum_counts
 
 
-def _positive_residual_scores(counts: np.ndarray) -> np.ndarray:
+def _expected_counts(
+    counts: np.ndarray,
+    expected_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return group expectations, accounting for unequal group cardinality."""
     total = float(counts.sum())
     if total <= 0:
         return np.zeros_like(counts, dtype=float)
-    expected = total / len(counts)
-    residual = (counts - expected) / math.sqrt(expected + 1e-9)
+    if expected_weights is None:
+        return np.full(len(counts), total / len(counts), dtype=float)
+    weights = np.asarray(expected_weights, dtype=float)
+    if weights.shape != counts.shape or np.any(weights < 0) or weights.sum() <= 0:
+        raise ValueError("expected_weights must match counts and have positive mass")
+    return total * weights / weights.sum()
+
+
+def _positive_residual_scores(
+    counts: np.ndarray,
+    expected_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    expected = _expected_counts(counts, expected_weights)
+    if expected.sum() <= 0:
+        return np.zeros_like(counts, dtype=float)
+    residual = (counts - expected) / np.sqrt(expected + 1e-9)
     return _safe_minmax(np.maximum(residual, 0.0))
 
 
-def _p_strength(counts: np.ndarray) -> float:
+def _p_strength(
+    counts: np.ndarray,
+    expected_weights: Optional[np.ndarray] = None,
+) -> float:
     total = float(counts.sum())
     if total <= 0:
         return 0.0
-    expected = np.full(len(counts), total / len(counts), dtype=float)
+    expected = _expected_counts(counts, expected_weights)
     chi2 = float(((counts - expected) ** 2 / (expected + 1e-9)).sum())
     p_value = _chi_square_sf_approx(chi2, len(counts) - 1)
     return min(max(1.0 - p_value, 0.0), 1.0)

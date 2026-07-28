@@ -213,6 +213,29 @@ def test_formatter_keeps_unverified_shadow_out_of_multi_denominator() -> None:
     assert "Multi-Model đạt ≥2/3: 1/1 (100%)" in message
 
 
+def test_formatter_separates_xsmb_combo_shadow_and_uses_two_of_three_verdict() -> None:
+    message = format_verification_message(
+        "28/07/2026",
+        [],
+        {},
+        shadow_results=[
+            {
+                "model_name": "xsmb_combo_shadow",
+                "status": "success",
+                "pairs": [12, 34, 56],
+                "matched": [12],
+                "hit_count": 1,
+                "combo_hit": False,
+                "verification_status": "verified",
+            }
+        ],
+    )
+
+    assert "XSMB Combo v6: 12 | 34 | 56 → 12" in message
+    assert "(1/3 · chưa đạt shadow)" in message
+    assert "Multi-Model: không có dữ liệu để đánh giá" in message
+
+
 def test_formatter_filters_matches_to_displayed_top_n() -> None:
     message = format_verification_message(
         "25/07/2026",
@@ -544,3 +567,66 @@ def test_shadow_waits_until_both_target_provinces_have_results() -> None:
     message = notifier.send_message.await_args.args[0]
     assert "DDT: chờ kết quả xổ số" in message
     assert "CMR: không có Top 3 hợp lệ" in message
+
+
+def test_insufficient_xsmb_shadow_is_not_mislabeled_pending_results() -> None:
+    store = {
+        "prediction_results": [],
+        "tails_2d": [],
+        "model_predictions": [
+            {
+                "id": 4,
+                "prediction_date": "2026-07-28",
+                "region": "XSMB",
+                "province": None,
+                "model_name": "xsmb_combo_shadow",
+                "prediction_mode": "shadow",
+                "status": "insufficient_history",
+                "error_message": "need at least 30 draws",
+            }
+        ],
+    }
+    db = SimpleNamespace(supabase=_FakeSupabase(store))
+    notifier = SimpleNamespace(send_message=AsyncMock(return_value=True))
+
+    asyncio.run(verify_date(db, notifier, date(2026, 7, 28)))
+
+    message = notifier.send_message.await_args.args[0]
+    assert "XSMB Combo v6: chưa đủ dữ liệu · need at least 30 draws" in message
+    assert "XSMB Combo v6: chờ kết quả xổ số" not in message
+
+
+def test_partial_xsmb_draw_keeps_shadow_verification_pending() -> None:
+    shadow = {
+        "id": 5,
+        "prediction_date": "2026-07-28",
+        "region": "XSMB",
+        "province": None,
+        "model_name": "xsmb_combo_shadow",
+        "prediction_mode": "shadow",
+        "status": "success",
+        "pair_1": 12,
+        "pair_2": 34,
+        "pair_3": 56,
+    }
+    store = {
+        "prediction_results": [],
+        "tails_2d": [
+            {
+                "region": "XSMB",
+                "draw_date": "2026-07-28",
+                "province": None,
+                "tail_2d": 12,
+            }
+        ],
+        "model_predictions": [shadow],
+    }
+    db = SimpleNamespace(supabase=_FakeSupabase(store))
+    notifier = SimpleNamespace(send_message=AsyncMock(return_value=True))
+
+    asyncio.run(verify_date(db, notifier, date(2026, 7, 28)))
+
+    assert "verified_at" not in shadow
+    assert "combo_hit" not in shadow
+    message = notifier.send_message.await_args.args[0]
+    assert "XSMB Combo v6: chờ kết quả xổ số" in message

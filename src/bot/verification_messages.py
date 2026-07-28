@@ -26,6 +26,12 @@ MODEL_SHORT_NAMES = {
 SHADOW_LABELS = {
     "cmr_shadow": "CMR",
     "ddt_shadow": "DDT",
+    "xsmb_combo_shadow": "XSMB Combo v6",
+}
+SHADOW_ORDER = {
+    "xsmb_combo_shadow": 0,
+    "cmr_shadow": 1,
+    "ddt_shadow": 2,
 }
 
 REGION_ORDER = {"XSMB": 0, "XSMN": 1}
@@ -277,7 +283,7 @@ def _shadow_lines(
     ordered = sorted(
         shadow_results,
         key=lambda row: (
-            0 if row.get("model_name") == "cmr_shadow" else 1,
+            SHADOW_ORDER.get(str(row.get("model_name") or ""), 99),
             str(row.get("model_name") or ""),
         ),
     )
@@ -291,7 +297,11 @@ def _shadow_lines(
         if verification_status == "no_prediction":
             status = str(result.get("status") or "error")
             reason = escape(" ".join(str(result.get("reason") or "").split())[:120])
-            if status == "insufficient_evidence":
+            if status in {
+                "insufficient_evidence",
+                "insufficient_candidates",
+                "insufficient_history",
+            }:
                 text = "chưa đủ dữ liệu"
                 icon = "⏳"
             else:

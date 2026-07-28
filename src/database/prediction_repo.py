@@ -10,15 +10,22 @@ All prediction scripts should use this single repository for DB writes.
 from datetime import date
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 from src.database.supabase_client import LotteryDB
+
+if TYPE_CHECKING:
+    from src.xsmb_combo.domain import ComboSelectorResult
 
 
 RUNTIME_ONLY_FIELDS = ("scoring_log", "candidate_log")
 ENSEMBLE_AUDIT_FIELDS = (
     "ensemble_method", "contributing_models", "final_scores", "run_metadata",
 )
-SHADOW_MODEL_NAMES = frozenset({"cmr_shadow", "ddt_shadow"})
+SHADOW_MODEL_NAMES = frozenset({
+    "cmr_shadow",
+    "ddt_shadow",
+    "xsmb_combo_shadow",
+})
 SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
 SHADOW_TRACKING_FIELDS = (
     "prediction_mode",
@@ -265,13 +272,21 @@ def get_shadow_prediction(
     db: LotteryDB,
     model_name: str,
     target_date: date | str,
+    *,
+    region: str = "XSMN",
+    province: Optional[str] = "all",
 ) -> Optional[dict]:
-    """Read one canonical XSMN/all shadow row."""
+    """Read one canonical shadow row while preserving XSMN/all defaults."""
     date_value = target_date.isoformat() if isinstance(target_date, date) else str(target_date)
     try:
         rows = db.supabase.table("model_predictions").select("*") \
-            .eq("prediction_date", date_value).eq("region", "XSMN") \
-            .eq("province", "all").eq("model_name", model_name).execute().data
+            .eq("prediction_date", date_value).eq("region", region)
+        rows = (
+            rows.is_("province", "null")
+            if province is None
+            else rows.eq("province", province)
+        )
+        rows = rows.eq("model_name", model_name).execute().data
         return rows[0] if rows else None
     except Exception as exc:
         error = str(exc).upper()
@@ -282,10 +297,13 @@ def get_shadow_prediction(
 
 def _same_shadow_prediction(existing: dict, incoming: dict) -> bool:
     """Return whether a retry keeps the canonical Top 3 and province scope."""
-    if any(
-        existing.get(f"pair_{index}") != incoming.get(f"pair_{index}")
-        for index in range(1, 4)
-    ):
+    existing_pairs = {
+        existing.get(f"pair_{index}") for index in range(1, 4)
+    }
+    incoming_pairs = {
+        incoming.get(f"pair_{index}") for index in range(1, 4)
+    }
+    if existing_pairs != incoming_pairs:
         return False
     old_metadata = existing.get("run_metadata")
     new_metadata = incoming.get("run_metadata")
@@ -316,8 +334,14 @@ def _prepare_shadow_retry(existing: Optional[dict], incoming: dict) -> dict:
 
 def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
     """Persist a shadow row idempotently; a failure never downgrades success."""
+    region = str(record.get("region") or "XSMN")
+    province = record.get("province", "all")
     existing = get_shadow_prediction(
-        db, str(record["model_name"]), str(record["prediction_date"])
+        db,
+        str(record["model_name"]),
+        str(record["prediction_date"]),
+        region=region,
+        province=province,
     )
     if (
         existing
@@ -325,14 +349,54 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
         and record.get("status") not in SHADOW_SUCCESS_STATUSES
     ):
         return False
+    if (
+        existing
+        and existing.get("verified_at")
+        and not _same_shadow_prediction(existing, record)
+    ):
+        # A verified ledger row is immutable.  A regenerated Top 3 belongs to
+        # a new model version/date, never an overwrite of settled evidence.
+        return False
 
     def write(value: dict, current: Optional[dict]) -> bool:
         if current:
-            query = db.supabase.table("model_predictions").update(value) \
+            update_value = value.copy()
+            same_prediction = _same_shadow_prediction(current, value)
+            if current.get("verified_at") and not same_prediction:
+                return False
+            if (
+                value.get("status") in SHADOW_SUCCESS_STATUSES
+                and same_prediction
+            ):
+                # A verification may complete after the retry read. Omitting
+                # lifecycle fields prevents the retry from clearing it.
+                for field in (
+                    "hit",
+                    "matched_pairs",
+                    "hit_count",
+                    "combo_hit",
+                    "verified_at",
+                ):
+                    update_value.pop(field, None)
+            query = db.supabase.table("model_predictions").update(update_value) \
                 .eq("id", current["id"])
+            if not same_prediction:
+                # Close the read/update race with verification.  Once
+                # verified_at is set, a retry with a different Top 3 cannot
+                # replace the settled ledger row.
+                query = query.is_("verified_at", "null")
             if value.get("status") not in SHADOW_SUCCESS_STATUSES:
                 query = query.neq("status", "success")
-            query.execute()
+            response = query.execute()
+            if not same_prediction and not (getattr(response, "data", None) or []):
+                latest = get_shadow_prediction(
+                    db,
+                    str(value["model_name"]),
+                    str(value["prediction_date"]),
+                    region=str(value.get("region") or region),
+                    province=value.get("province", province),
+                )
+                return bool(latest and _same_shadow_prediction(latest, value))
             return True
         try:
             db.supabase.table("model_predictions").insert(value).execute()
@@ -344,6 +408,8 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                 db,
                 str(value["model_name"]),
                 str(value["prediction_date"]),
+                region=str(value.get("region") or region),
+                province=value.get("province", province),
             )
             if (
                 raced
@@ -371,3 +437,88 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
         )
         saved = write(legacy_record, existing)
     return saved
+
+
+def normalize_xsmb_combo_shadow(
+    result: "ComboSelectorResult",
+    *,
+    target_date: date | str,
+    execution_source: str,
+) -> dict:
+    """Normalize combo v6 to an auditable XSMB shadow ledger row.
+
+    The single aggregate objective is stored in ``score_1`` only. It must not
+    be repeated as if each selected pair had an independently calibrated
+    probability.
+    """
+    date_value = (
+        target_date.isoformat()
+        if isinstance(target_date, date)
+        else str(target_date)
+    )
+    status = (
+        result.status.value
+        if hasattr(result.status, "value")
+        else str(result.status)
+    )
+    pairs = list(result.top_pairs) if status == "success" else []
+    if status == "success" and len(pairs) != 3:
+        status = "error"
+        pairs = []
+
+    diagnostics = "; ".join(result.diagnostics)
+    slots: dict[str, Any] = {}
+    for index in range(5):
+        slots[f"pair_{index + 1}"] = (
+            int(pairs[index]) if index < len(pairs) else None
+        )
+        slots[f"score_{index + 1}"] = (
+            float(result.objective_score)
+            if index == 0 and pairs
+            else None
+        )
+
+    return {
+        "prediction_date": date_value,
+        "region": "XSMB",
+        "province": None,
+        "model_name": "xsmb_combo_shadow",
+        "model_type": "shadow",
+        **slots,
+        "execution_time_ms": None,
+        "error_message": _safe_reason(
+            diagnostics or (None if status == "success" else status)
+        ),
+        "status": status,
+        "prediction_mode": "shadow",
+        "model_version": result.selector_version,
+        "score_semantics": result.score_semantics,
+        "run_metadata": {
+            "data_cutoff": date_value,
+            "data_cutoff_rule": "draw_date < target_date",
+            "execution_source": execution_source,
+            "objective": result.objective,
+            "objective_score": result.objective_score,
+            "fusion_role": "production_weighted_tie_break",
+            "expected_winning_circles": result.expected_winning_circles,
+            "candidate_pool_size": len(result.candidate_pool),
+            "evaluated_triples": result.evaluated_triples,
+            "contributing_models": list(result.contributing_models),
+            "skipped_models": list(result.skipped_models),
+            "active_weights": dict(result.active_weights),
+            "source_families": dict(result.source_families),
+            "joint_pair_evidence": [
+                {
+                    "pair_a": edge.pair_a,
+                    "pair_b": edge.pair_b,
+                    "joint_score_uncalibrated": edge.probability,
+                }
+                for edge in result.joint_pair_evidence
+            ],
+        },
+        "hit": None,
+        "matched_pairs": None,
+        "hit_count": None,
+        "combo_hit": None,
+        "verified_at": None,
+    }

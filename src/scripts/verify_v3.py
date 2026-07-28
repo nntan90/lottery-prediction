@@ -343,9 +343,26 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             )
             province_scope = tuple(
                 _shadow_provinces(pred, target_date)
-                if is_shadow
+                if is_shadow and region.upper() == "XSMN"
                 else ()
             )
+            shadow_status = str(pred.get("status") or "error")
+            if is_shadow and shadow_status not in {"success", "uncalibrated"}:
+                shadow_results.append({
+                    "model_name": model_name,
+                    "status": shadow_status,
+                    "reason": pred.get("error_message"),
+                    "pairs": [
+                        pred.get("pair_1"),
+                        pred.get("pair_2"),
+                        pred.get("pair_3"),
+                    ],
+                    "matched": [],
+                    "hit_count": None,
+                    "combo_hit": None,
+                    "verification_status": "no_prediction",
+                })
+                continue
             cache_key = (region, province, province_scope)
             
             # Lấy tail_set từ cache (nếu đã lấy cho prediction_results)
@@ -371,6 +388,11 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                         if row.get("province")
                     }
                     complete_scope = set(province_scope).issubset(returned_provinces)
+                if is_shadow and region.upper() == "XSMB":
+                    # XSMB has exactly 27 prize rows.  Do not finalize a
+                    # shadow verdict while the crawler is still ingesting a
+                    # partial draw.
+                    complete_scope = len(t_rows) == 27
                 if t_rows and complete_scope:
                     tail_set_cache[cache_key] = {
                         int(r["tail_2d"]) for r in t_rows
@@ -403,19 +425,6 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                     pred.get("pair_2"),
                     pred.get("pair_3"),
                 ]
-                status = str(pred.get("status") or "error")
-                if status not in {"success", "uncalibrated"}:
-                    shadow_results.append({
-                        "model_name": model_name,
-                        "status": status,
-                        "reason": pred.get("error_message"),
-                        "pairs": pairs,
-                        "matched": [],
-                        "hit_count": None,
-                        "combo_hit": None,
-                        "verification_status": "no_prediction",
-                    })
-                    continue
                 evaluation = _evaluate_prediction_pairs(
                     pairs,
                     tail_set,
@@ -435,7 +444,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                 )
                 shadow_results.append({
                     "model_name": model_name,
-                    "status": status,
+                    "status": shadow_status,
                     "reason": pred.get("error_message"),
                     "pairs": pairs,
                     "matched": evaluation["matched"],

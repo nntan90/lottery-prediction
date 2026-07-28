@@ -248,8 +248,11 @@ def predict_cdm(
 
         return {
             "model_name": "cdm",
+            "source_family": "frequency_bayesian",
             "province": province,
             "top_pairs": top_pairs,
+            "score_vector": [float(score) for score in scores],
+            "score_semantics": "relative_score_uncalibrated",
             "n_draws_used": n,
             "alpha_strategy": alpha_strategy,
             "status": "success",

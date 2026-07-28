@@ -176,8 +176,11 @@ def predict_frequency(
 
         return {
             "model_name": "frequency",
+            "source_family": "frequency_gap",
             "province": province,
             "top_pairs": top_pairs,
+            "score_vector": [float(score) for score in scores],
+            "score_semantics": "relative_score_uncalibrated",
             "n_draws_used": n,
             "status": "success",
             "error_message": None,

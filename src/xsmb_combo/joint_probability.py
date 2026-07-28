@@ -38,6 +38,11 @@ class JointProbabilityEstimator:
 
         self.draws: Tuple[frozenset[int], ...] = draws
         self.prior_strength = float(prior_strength)
+        self._pair_draw_bits = [0] * PAIR_COUNT
+        for draw_index, draw in enumerate(draws):
+            draw_bit = 1 << draw_index
+            for pair in draw:
+                self._pair_draw_bits[pair] |= draw_bit
         self._pair_prior_mean = sum(
             self._uniform_inclusion_probability(len(draw), order=2)
             for draw in draws
@@ -70,13 +75,15 @@ class JointProbabilityEstimator:
     def pair_probability(self, pair_a: int, pair_b: int) -> float:
         """Posterior mean of both pairs appearing in the same future draw."""
         key = tuple(sorted((int(pair_a), int(pair_b))))
+        if any(pair < 0 or pair >= PAIR_COUNT for pair in key):
+            raise ValueError("pair_probability values must be between 0 and 99")
         if key[0] == key[1]:
             raise ValueError("pair_probability requires two distinct pairs")
         if key not in self._pair_cache:
-            successes = sum(
-                key[0] in draw and key[1] in draw
-                for draw in self.draws
-            )
+            successes = (
+                self._pair_draw_bits[key[0]]
+                & self._pair_draw_bits[key[1]]
+            ).bit_count()
             self._pair_cache[key] = self._posterior_mean(
                 successes, self._pair_prior_mean
             )
@@ -85,10 +92,16 @@ class JointProbabilityEstimator:
     def triple_probability(self, pair_a: int, pair_b: int, pair_c: int) -> float:
         """Posterior mean of all three pairs appearing in the same draw."""
         key = tuple(sorted((int(pair_a), int(pair_b), int(pair_c))))
+        if any(pair < 0 or pair >= PAIR_COUNT for pair in key):
+            raise ValueError("triple_probability values must be between 0 and 99")
         if len(set(key)) != 3:
             raise ValueError("triple_probability requires three distinct pairs")
         if key not in self._triple_cache:
-            successes = sum(all(pair in draw for pair in key) for draw in self.draws)
+            successes = (
+                self._pair_draw_bits[key[0]]
+                & self._pair_draw_bits[key[1]]
+                & self._pair_draw_bits[key[2]]
+            ).bit_count()
             self._triple_cache[key] = self._posterior_mean(
                 successes, self._triple_prior_mean
             )

@@ -88,6 +88,7 @@ from src.xsmb_combo.shadow import maybe_run_xsmb_combo_shadow
 from src.database.prediction_repo import (
     get_shadow_prediction,
     normalize_shadow_prediction,
+    normalize_xsmb_combo_shadow,
     save_model_prediction,
     save_prediction,
     save_shadow_prediction,
@@ -227,6 +228,33 @@ def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
             status += f": {reason[:120]}"
         return ShadowRow(label="DDT shadow", status=status)
     return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
+
+
+def _xsmb_combo_shadow_row(result) -> Optional[ShadowRow]:
+    """Convert combo v6 output without presenting its score as probability."""
+    if result is None:
+        return None
+    status = (
+        result.status.value
+        if hasattr(result.status, "value")
+        else str(result.status)
+    )
+    if status == "success" and len(result.top_pairs) == 3:
+        return ShadowRow(
+            label="Combo v6 shadow",
+            numbers=tuple(int(pair) for pair in result.top_pairs),
+            aggregate_score=float(result.objective_score),
+            aggregate_label="điểm tổ hợp chưa calibration",
+            status="không thay production",
+        )
+    reason = "; ".join(result.diagnostics[:2])
+    if status in {"insufficient_candidates", "insufficient_history"}:
+        text = "Chưa đủ dữ liệu"
+    else:
+        text = "Tạm không khả dụng"
+    if reason:
+        text += f": {reason[:120]}"
+    return ShadowRow(label="Combo v6 shadow", status=text)
 
 
 def _flatten_tail_rows_by_draw(rows: list[dict]) -> list[int]:
@@ -826,11 +854,37 @@ async def run_xsmb_ensemble(
 
     # Additive combo-objective selector. Default mode is "off"; "shadow"
     # computes and logs an alternative without changing the saved legacy Top 3.
-    maybe_run_xsmb_combo_shadow(
+    combo_shadow_result = maybe_run_xsmb_combo_shadow(
         db,
         all_model_results,
         target_date,
+        weights=ensemble_output.get("active_weights"),
     )
+    combo_shadow_row = _xsmb_combo_shadow_row(combo_shadow_result)
+    if combo_shadow_result is not None:
+        try:
+            combo_record = normalize_xsmb_combo_shadow(
+                combo_shadow_result,
+                target_date=target_date,
+                execution_source=(
+                    "github_actions"
+                    if os.getenv("GITHUB_ACTIONS", "").lower() == "true"
+                    else "local_manual"
+                ),
+            )
+            saved = save_shadow_prediction(db, combo_record)
+            if not saved:
+                combo_shadow_row = None
+                print(
+                    "  ⚠️  XSMB combo shadow not persisted; "
+                    "omitting it from Telegram"
+                )
+        except Exception as exc:
+            combo_shadow_row = None
+            print(
+                "  ⚠️  XSMB combo shadow persistence failed; "
+                f"champion preserved: {exc}"
+            )
 
     # Save prediction
     prediction = xsmb_format_ensemble_result("XSMB", None, ensemble_output, target_date)
@@ -863,7 +917,7 @@ async def run_xsmb_ensemble(
             for candidate in ensemble_output.get("top_candidates", [])
             if int(candidate["pair"]) not in selected_numbers
         ]
-        msg = format_compact_ensemble_message(
+        message_kwargs = dict(
             region="XSMB",
             target_date=target_date,
             dow_label=get_dow_label(target_date),
@@ -877,6 +931,9 @@ async def run_xsmb_ensemble(
             model_labels=XSMB_MODEL_SHORT_NAMES,
             missing_by_scope={"XSMB": missing_models},
         )
+        if combo_shadow_row is not None:
+            message_kwargs["additional_shadows"] = (combo_shadow_row,)
+        msg = format_compact_ensemble_message(**message_kwargs)
 
         if not await _send_chunked(notifier, msg, "predict_ensemble_xsmb"):
             raise RuntimeError("Telegram notification failed for XSMB")

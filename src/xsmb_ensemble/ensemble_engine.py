@@ -439,7 +439,14 @@ def compute_xsmb_ensemble(
     if div_log:
         candidate_log += f"\n\n{div_log}"
 
-    top_pairs = [(pair, round(score, 4)) for pair, score in diverse_selection]
+    # Preserve the legacy diversity-selected set, but display medals in actual
+    # final-score order.  Previously the selector's unit-group traversal leaked
+    # into presentation, allowing a lower score to receive the gold medal.
+    display_selection = sorted(
+        diverse_selection,
+        key=lambda item: (-item[1], item[0]),
+    )
+    top_pairs = [(pair, round(score, 4)) for pair, score in display_selection]
     print(f"     🎯 Top {top_n_output} (Diverse): {[f'{p:02d}' for p, _ in top_pairs]}")
 
     # ── Scoring Log cho Telegram ──

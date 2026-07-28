@@ -284,11 +284,26 @@ class XSMBLotoAnalyzer:
             if (pair // 10) != (pair % 10):
                 touch_dist[pair % 10] += count
                 
-        sorted_sums = sorted(sum_dist.items(), key=lambda x: x[1], reverse=True)
+        # A digit-sum group contains between one and ten pairs.  Ranking raw
+        # totals systematically favours sums near 9, so compare observations
+        # per available pair while preserving the legacy raw distribution.
+        sum_cardinality = {
+            value: min(value + 1, 19 - value)
+            for value in range(19)
+        }
+        normalized_sum_dist = {
+            value: count / sum_cardinality[value]
+            for value, count in sum_dist.items()
+        }
+        sorted_sums = sorted(
+            normalized_sum_dist.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
         sorted_touches = sorted(touch_dist.items(), key=lambda x: x[1], reverse=True)
         
         return {
             "sum_distribution": sum_dist,
+            "sum_distribution_per_pair": normalized_sum_dist,
             "strong_sums": [s for s, c in sorted_sums[:3]],
             "touch_distribution": touch_dist,
             "strong_touches": [t for t, c in sorted_touches[:3]],
@@ -396,6 +411,7 @@ class XSMBLotoAnalyzer:
         return {
             "top_3": top_3,
             "top_scored": top_scored,
+            "score_vector": [float(max(scores[pair], 0.0)) for pair in range(100)],
             "criteria": [
                 "Chạm/Đầu/Đuôi mạnh (14 ngày)",
                 "Chu kỳ nổ lý tưởng (1-7 ngày)",

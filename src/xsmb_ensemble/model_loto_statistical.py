@@ -56,7 +56,11 @@ def predict_loto_statistical(
             )
 
         raw_scores = [max(float(score), 0.0) for _, score in scored]
-        max_score = max(raw_scores)
+        full_raw_scores = [
+            max(float(score), 0.0)
+            for score in result.get("score_vector", [])
+        ]
+        max_score = max(full_raw_scores or raw_scores)
 
         top_pairs = []
         for pair, score in scored[:top_n]:
@@ -70,8 +74,14 @@ def predict_loto_statistical(
 
         return {
             "model_name": "loto_statistical",
+            "source_family": "loto_report",
             "province": province,
             "top_pairs": top_pairs,
+            "score_vector": [
+                float(score / max_score) if max_score > 1e-10 else 0.0
+                for score in full_raw_scores
+            ],
+            "score_semantics": "relative_score_uncalibrated",
             "n_draws_used": n_used,
             "model_version": "loto_statistical_v1",
             "status": "success",

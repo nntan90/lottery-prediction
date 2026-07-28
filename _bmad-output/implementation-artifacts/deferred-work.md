@@ -56,3 +56,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-backfill-xsmn-lstm-missing-weekdays.md`
   summary: Khóa uniqueness cho active model theo `(region, province, weekday, model_name)`.
   evidence: Preflight và postflight application-level không loại trừ hai publisher đồng thời cùng tạo duplicate active rows; schema chưa chứng minh có partial unique constraint tương ứng.
+- source_spec: `_bmad-output/implementation-artifacts/spec-refactor-xsmb-hybrid-combo-v6.md`
+  summary: Bổ sung định danh prize-slot hoặc constraint ingestion để chứng minh một kỳ XSMB có đủ đúng 27 vị trí giải.
+  evidence: `tails_2d` chỉ lưu `prize_code` và không có slot index/uniqueness, nên gate đếm 27 rows fail-safe với partial count nhưng không thể phân biệt một slot bị thiếu được thay bằng duplicate cùng giải.

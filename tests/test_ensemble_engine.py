@@ -8,6 +8,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
+import numpy as np
 from src.xsmn_ensemble.ensemble_engine import (
     compute_global_borda,
     compute_xsmn_province_representative_ensemble,
@@ -17,6 +18,12 @@ from src.xsmn_ensemble.ensemble_engine import (
     BORDA_POINTS,
 )
 from src.xsmb_ensemble.ensemble_engine import compute_xsmb_ensemble
+from src.xsmb_ensemble.model_chisquare_gof import (
+    SUM_GROUP_CARDINALITIES,
+    _p_strength,
+    _positive_residual_scores,
+)
+from src.xsmb_ensemble.model_markov import _compress_context_by_frequency
 
 
 class TestComputeGlobalBorda(unittest.TestCase):
@@ -289,6 +296,48 @@ class TestComputeXsmbEnsemble(unittest.TestCase):
         self.assertIn("gap_overdue", candidate_42["models"])
         self.assertIn("Freq", out["candidate_log"])
         self.assertTrue(final_pairs.issubset(candidate_pairs))
+
+    def test_xsmb_medals_are_sorted_by_final_score(self):
+        results = [
+            self._make_result(
+                "frequency",
+                [83, 10, 20, 30, 40, 50, 60, 70, 80, 90],
+            ),
+        ]
+
+        out = compute_xsmb_ensemble(results, [], top_n_output=3)
+        displayed_scores = [score for _, score in out["top_pairs"]]
+
+        self.assertEqual(displayed_scores, sorted(displayed_scores, reverse=True))
+
+    def test_markov_context_compression_uses_frequency_not_numeric_value(self):
+        frequency = np.zeros(100, dtype=float)
+        frequency[90] = 10.0
+        frequency[80] = 8.0
+        frequency[1] = 1.0
+
+        compressed = _compress_context_by_frequency(
+            {1, 80, 90},
+            frequency,
+            top_k=2,
+        )
+
+        self.assertEqual(compressed, [90, 80])
+
+    def test_chigof_digit_sum_expectation_accounts_for_cardinality(self):
+        proportional_counts = SUM_GROUP_CARDINALITIES * 10.0
+
+        residuals = _positive_residual_scores(
+            proportional_counts,
+            expected_weights=SUM_GROUP_CARDINALITIES,
+        )
+        strength = _p_strength(
+            proportional_counts,
+            expected_weights=SUM_GROUP_CARDINALITIES,
+        )
+
+        self.assertTrue(np.allclose(residuals, 0.0))
+        self.assertAlmostEqual(strength, 0.0)
 
 
 if __name__ == "__main__":

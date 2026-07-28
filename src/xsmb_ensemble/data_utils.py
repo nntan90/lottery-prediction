@@ -28,7 +28,7 @@ def _load_tails_by_draws(
     Tương thích interface với XSMN version.
 
     Returns:
-        DataFrame: columns ['draw_date', 'tail_set']
+        DataFrame: columns ['draw_date', 'tail_set', 'tail_count']
         Mỗi row = 1 kỳ quay, tail_set = frozenset of ints
         Sorted ascending (cũ → mới)
     """
@@ -69,11 +69,13 @@ def _load_tails_by_draws(
         offset += limit
 
     if not all_rows:
-        return pd.DataFrame(columns=["draw_date", "tail_set"])
+        return pd.DataFrame(columns=["draw_date", "tail_set", "tail_count"])
 
     df = pd.DataFrame(all_rows)
-    grouped = df.groupby("draw_date")["tail_2d"].apply(frozenset).reset_index()
-    grouped.columns = ["draw_date", "tail_set"]
+    grouped = df.groupby("draw_date").agg(
+        tail_set=("tail_2d", frozenset),
+        tail_count=("tail_2d", "size"),
+    ).reset_index()
 
     grouped["draw_date"] = pd.to_datetime(grouped["draw_date"])
     grouped = grouped.sort_values("draw_date").tail(n_draws)

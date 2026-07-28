@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from typing import Mapping, Sequence
 
 from src.xsmb_combo.domain import (
@@ -25,7 +26,11 @@ SUPPORTED_OBJECTIVES = {"combo_probability", "expected_circles"}
 def _fuse_relative_evidence(
     adapted: AdapterResult,
     weights: Mapping[str, float] | None,
-) -> tuple[list[float], tuple[str, ...]]:
+) -> tuple[
+    list[float],
+    tuple[str, ...],
+    tuple[tuple[str, float], ...],
+]:
     fused = [0.0] * PAIR_COUNT
     active_vectors = [
         vector
@@ -33,11 +38,13 @@ def _fuse_relative_evidence(
         if sum(vector.scores) > 1e-12
     ]
     if not active_vectors:
-        return fused, ()
+        return fused, (), ()
 
     raw_weights: dict[str, float] = {}
     for vector in active_vectors:
         weight = float((weights or {}).get(vector.model_name, 1.0))
+        if not math.isfinite(weight):
+            weight = 0.0
         raw_weights[vector.model_name] = max(weight, 0.0)
     weight_sum = sum(raw_weights.values())
     if weight_sum <= 1e-12:
@@ -51,7 +58,18 @@ def _fuse_relative_evidence(
             if score > 0.0:
                 fused[pair] += model_weight * (score / model_total)
 
-    return fused, tuple(vector.model_name for vector in active_vectors)
+    normalized_weights = tuple(
+        (
+            vector.model_name,
+            raw_weights[vector.model_name] / weight_sum,
+        )
+        for vector in active_vectors
+    )
+    return (
+        fused,
+        tuple(vector.model_name for vector in active_vectors),
+        normalized_weights,
+    )
 
 
 def select_combo(
@@ -59,26 +77,42 @@ def select_combo(
     historical_tail_sets: Sequence[frozenset[int]],
     *,
     weights: Mapping[str, float] | None = None,
-    candidate_pool_size: int = 10,
+    candidate_pool_size: int = 100,
     objective: str = "combo_probability",
     minimum_history: int = 30,
     prior_strength: float = 12.0,
 ) -> ComboSelectorResult:
-    """Select the best triple from a fusion-ranked candidate pool.
+    """Select the best triple from all available full-vector candidates.
 
-    Fusion evidence is used only to form the pool and break exact ties. The
-    optimization objective itself comes from draw-level joint evidence.
+    Full 100-pair vectors produce the complete ``C(100, 3)`` search. Legacy
+    Top-N results remain supported and naturally restrict coverage to their
+    union. Fusion evidence breaks exact joint-score ties; it is not a
+    calibrated probability.
     """
     if objective not in SUPPORTED_OBJECTIVES:
         raise ValueError(f"unsupported objective: {objective}")
     if candidate_pool_size < 3:
         raise ValueError("candidate_pool_size must be at least 3")
 
-    fused, contributing = _fuse_relative_evidence(adapted, weights)
+    fused, contributing, active_weights = _fuse_relative_evidence(
+        adapted,
+        weights,
+    )
     ranked = sorted(range(PAIR_COUNT), key=lambda pair: (-fused[pair], pair))
+    covered_pairs = {
+        pair
+        for vector in adapted.vectors
+        if vector.model_name in contributing
+        for pair in vector.source_pairs
+    }
     candidate_pool = tuple(
-        pair for pair in ranked if fused[pair] > 0.0
+        pair for pair in ranked if pair in covered_pairs
     )[:candidate_pool_size]
+    source_families = tuple(
+        (vector.model_name, vector.source_family)
+        for vector in adapted.vectors
+        if vector.model_name in contributing
+    )
 
     base_kwargs = {
         "objective": objective,
@@ -86,6 +120,8 @@ def select_combo(
         "contributing_models": contributing,
         "skipped_models": adapted.skipped_models,
         "diagnostics": adapted.warnings,
+        "active_weights": active_weights,
+        "source_families": source_families,
     }
     if len(candidate_pool) < 3:
         return ComboSelectorResult(
@@ -185,4 +221,6 @@ def select_combo(
         joint_pair_evidence=pair_evidence,
         triple_probability=round(triple_prob, 8),
         diagnostics=adapted.warnings,
+        active_weights=active_weights,
+        source_families=source_families,
     )

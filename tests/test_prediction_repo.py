@@ -242,6 +242,55 @@ class TestSaveModelPrediction(unittest.TestCase):
 
 
 class TestShadowPredictionLifecycle(unittest.TestCase):
+    def test_normalize_xsmb_combo_stores_one_aggregate_score_and_audit(self):
+        from src.database.prediction_repo import normalize_xsmb_combo_shadow
+        from src.xsmb_combo.domain import ComboSelectorResult, SelectorStatus
+
+        result = ComboSelectorResult(
+            status=SelectorStatus.SUCCESS,
+            top_pairs=(12, 34, 56),
+            objective_score=0.184321,
+            candidate_pool=tuple(range(100)),
+            contributing_models=("frequency", "markov"),
+            skipped_models=("cdm",),
+            evaluated_triples=161_700,
+            active_weights=(("frequency", 0.4), ("markov", 0.6)),
+            source_families=(
+                ("frequency", "frequency_gap"),
+                ("markov", "transition"),
+            ),
+        )
+
+        record = normalize_xsmb_combo_shadow(
+            result,
+            target_date=date(2026, 7, 28),
+            execution_source="github_actions",
+        )
+
+        self.assertEqual(record["region"], "XSMB")
+        self.assertIsNone(record["province"])
+        self.assertEqual(record["model_name"], "xsmb_combo_shadow")
+        self.assertEqual(
+            [record["pair_1"], record["pair_2"], record["pair_3"]],
+            [12, 34, 56],
+        )
+        self.assertEqual(record["score_1"], 0.184321)
+        self.assertIsNone(record["score_2"])
+        self.assertIsNone(record["score_3"])
+        self.assertEqual(
+            record["score_semantics"],
+            "combo_score_uncalibrated",
+        )
+        self.assertEqual(record["run_metadata"]["evaluated_triples"], 161_700)
+        self.assertEqual(
+            record["run_metadata"]["fusion_role"],
+            "production_weighted_tie_break",
+        )
+        self.assertEqual(
+            record["run_metadata"]["active_weights"],
+            {"frequency": 0.4, "markov": 0.6},
+        )
+
     def test_normalize_ddt_keeps_top_three_and_audit_metadata(self):
         from src.database.prediction_repo import normalize_shadow_prediction
 
@@ -360,9 +409,9 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             "id": 9,
             "status": "success",
             "model_name": "ddt_shadow",
-            "pair_1": 3,
-            "pair_2": 12,
-            "pair_3": 25,
+            "pair_1": 25,
+            "pair_2": 3,
+            "pair_3": 12,
             "run_metadata": {"provinces": ["a", "b"]},
             "hit": True,
             "matched_pairs": [3, 12],
@@ -390,14 +439,44 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
 
         self.assertTrue(save_shadow_prediction(db, incoming))
         updated = db.updated["model_predictions"][0]
-        self.assertTrue(updated["hit"])
-        self.assertEqual(updated["matched_pairs"], [3, 12])
-        self.assertEqual(updated["hit_count"], 2)
-        self.assertTrue(updated["combo_hit"])
-        self.assertEqual(
-            updated["verified_at"],
-            "2026-07-26T14:00:00+00:00",
-        )
+        for field in (
+            "hit",
+            "matched_pairs",
+            "hit_count",
+            "combo_hit",
+            "verified_at",
+        ):
+            self.assertNotIn(field, updated)
+
+    def test_verified_shadow_rejects_retry_with_different_top_three(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "xsmb_combo_shadow",
+            "pair_1": 12,
+            "pair_2": 34,
+            "pair_3": 56,
+            "hit_count": 2,
+            "combo_hit": True,
+            "verified_at": "2026-07-28T14:00:00+00:00",
+        }
+        db = MockDB({"model_predictions": [existing]})
+        incoming = {
+            "prediction_date": "2026-07-28",
+            "region": "XSMB",
+            "province": None,
+            "model_name": "xsmb_combo_shadow",
+            "status": "success",
+            "pair_1": 10,
+            "pair_2": 20,
+            "pair_3": 30,
+            "verified_at": None,
+        }
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertNotIn("model_predictions", db.updated)
 
 
 if __name__ == "__main__":
