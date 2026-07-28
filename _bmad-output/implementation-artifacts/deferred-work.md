@@ -47,3 +47,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-ddt-approval-window-21-to-12.md`
   summary: Persist accepted DDT run intent so a bot or laptop crash can resume the approved run after restart.
   evidence: Pending approvals and the accepted-run reservation remain in memory; adding durable pending state is explicitly Ask First in the approved spec and cannot be inferred inside this patch.
+- source_spec: `_bmad-output/implementation-artifacts/spec-backfill-xsmn-lstm-missing-weekdays.md`
+  summary: Bảo đảm publication LSTM không để lại object Storage mồ côi khi registry insert thất bại.
+  evidence: `train_lstm.py` upload trước registry insert; lỗi ở bước insert giữ active row cũ nhưng chưa cleanup object vừa upload.
+- source_spec: `_bmad-output/implementation-artifacts/spec-backfill-xsmn-lstm-missing-weekdays.md`
+  summary: Thêm supervisor Telegram cho lỗi native signal của subprocess training.
+  evidence: PyTorch local thoát `SIGSEGV (-11)` trước khi notifier bên trong CLI có thể gửi cảnh báo; wrapper hiện chỉ log console.
+- source_spec: `_bmad-output/implementation-artifacts/spec-backfill-xsmn-lstm-missing-weekdays.md`
+  summary: Khóa uniqueness cho active model theo `(region, province, weekday, model_name)`.
+  evidence: Preflight và postflight application-level không loại trừ hai publisher đồng thời cùng tạo duplicate active rows; schema chưa chứng minh có partial unique constraint tương ứng.
