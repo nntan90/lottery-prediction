@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -762,6 +763,395 @@ def test_prompt_loop_retries_transient_delivery_failure(monkeypatch) -> None:
         asyncio.run(ddt_local_bot._daily_prompt_loop(application))
 
     assert attempts == 2
+
+
+def test_prompt_delivery_failure_is_timestamped_redacted_and_retryable(
+    monkeypatch,
+    capsys,
+) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _vn(2026, 7, 28, 9, 0)
+
+    class FailingBot:
+        async def send_message(self, **_kwargs) -> None:
+            raise RuntimeError(
+                "token=test-secret https://api.telegram.org/bottest-secret"
+            )
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    application = SimpleNamespace(
+        bot_data={"ddt_controller": controller},
+        bot=FailingBot(),
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-secret")
+
+    delivered = asyncio.run(
+        ddt_local_bot._send_daily_prompts(
+            application,
+            date(2026, 7, 28),
+        )
+    )
+
+    assert delivered == set()
+    assert controller.reserved_token is None
+    assert controller.requests == {}
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert [event["event"] for event in events] == [
+        "ddt_prompt_delivery_failed",
+        "ddt_prompt_fallback_delivery_failed",
+    ]
+    assert all(event["timestamp"].startswith("2026-07-28T09:00:00") for event in events)
+    serialized = json.dumps(events)
+    assert "test-secret" not in serialized
+    assert "api.telegram.org" not in serialized
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Authorization: Bearer abc123",
+        "access_token=abc123",
+        "password='abc 123'",
+        "x-api-key: abc123",
+        "client_secret=abc123",
+    ],
+)
+def test_safe_reason_redacts_common_credential_shapes(reason: str) -> None:
+    redacted = ddt_local_bot._safe_reason(reason)
+
+    assert "abc123" not in redacted
+    assert "abc 123" not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_structured_logging_failure_cannot_kill_scheduler(monkeypatch) -> None:
+    def fail_print(*_args, **_kwargs) -> None:
+        raise OSError("stdout unavailable")
+
+    monkeypatch.setattr("builtins.print", fail_print)
+
+    ddt_local_bot._log_event("ERROR", "test", "diagnostic")
+
+
+def test_prompt_success_is_logged_and_recorded_immediately(
+    monkeypatch,
+    capsys,
+) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _vn(2026, 7, 28, 9, 0)
+
+    class SuccessfulBot:
+        async def send_message(self, **_kwargs) -> None:
+            return None
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    state = ddt_local_bot.PromptDeliveryState(
+        target_date=date(2026, 7, 28),
+    )
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_controller": controller,
+            "ddt_prompt_delivery_state": state,
+        },
+        bot=SuccessfulBot(),
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+
+    delivered = asyncio.run(
+        ddt_local_bot._send_daily_prompts(
+            application,
+            date(2026, 7, 28),
+        )
+    )
+
+    assert delivered == {100}
+    assert state.delivered_chats == {100}
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "ddt_prompt_delivered"
+    assert event["target_date"] == "2026-07-28"
+
+
+def test_prompt_fallback_notifies_once_while_primary_keeps_retrying(
+    monkeypatch,
+) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _vn(2026, 7, 28, 9, 0)
+
+    class PayloadRejectingBot:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fallback_calls = 0
+
+        async def send_message(self, **kwargs) -> None:
+            self.calls += 1
+            if kwargs.get("reply_markup") is not None:
+                raise RuntimeError("prompt payload rejected")
+            self.fallback_calls += 1
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    state = ddt_local_bot.PromptDeliveryState(
+        target_date=date(2026, 7, 28),
+    )
+    bot = PayloadRejectingBot()
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_controller": controller,
+            "ddt_prompt_delivery_state": state,
+        },
+        bot=bot,
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+
+    async def scenario() -> None:
+        await ddt_local_bot._send_daily_prompts(
+            application,
+            date(2026, 7, 28),
+        )
+        await ddt_local_bot._send_daily_prompts(
+            application,
+            date(2026, 7, 28),
+        )
+
+    asyncio.run(scenario())
+
+    assert bot.calls == 3
+    assert bot.fallback_calls == 1
+    assert state.failure_notified_chats == {100}
+    assert controller.requests == {}
+
+
+def test_partial_multi_chat_delivery_survives_worker_cancellation(
+    monkeypatch,
+) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _vn(2026, 7, 28, 9, 0)
+
+    class CancellingBot:
+        async def send_message(self, **kwargs) -> None:
+            if kwargs["chat_id"] == 101:
+                raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(
+        object(),
+        _settings(allowed_chat_ids=frozenset({100, 101})),
+    )
+    state = ddt_local_bot.PromptDeliveryState(
+        target_date=date(2026, 7, 28),
+    )
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_controller": controller,
+            "ddt_prompt_delivery_state": state,
+        },
+        bot=CancellingBot(),
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            ddt_local_bot._send_daily_prompts(
+                application,
+                date(2026, 7, 28),
+            )
+        )
+
+    assert state.delivered_chats == {100}
+
+
+def test_prompt_delivery_state_survives_worker_restart(monkeypatch) -> None:
+    frozen_now = _vn(2026, 7, 28, 9, 0)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_now
+
+    sends = 0
+
+    async def send(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        return {100}
+
+    async def stop_on_sleep(_seconds):
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    state = ddt_local_bot.PromptDeliveryState(
+        target_date=date(2026, 7, 28),
+        delivered_chats={100},
+    )
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_controller": controller,
+            "ddt_prompt_delivery_state": state,
+        }
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_send_daily_prompts", send)
+    monkeypatch.setattr(asyncio, "sleep", stop_on_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._daily_prompt_loop(application))
+
+    assert sends == 0
+    assert state.delivered_chats == {100}
+
+
+@pytest.mark.parametrize("failure_mode", ["raise", "return"])
+def test_scheduler_supervisor_restarts_stopped_worker(
+    monkeypatch,
+    failure_mode: str,
+) -> None:
+    monkeypatch.setattr(ddt_local_bot, "WORKER_RESTART_SECONDS", 0.0)
+    starts = 0
+
+    async def scenario() -> None:
+        nonlocal starts
+        restarted = asyncio.Event()
+
+        async def worker(_application) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == 1:
+                if failure_mode == "raise":
+                    raise RuntimeError("transient scheduler failure")
+                return
+            restarted.set()
+            await asyncio.Event().wait()
+
+        application = SimpleNamespace(bot_data={})
+        supervisor = asyncio.create_task(
+            ddt_local_bot._supervise_worker(
+                application,
+                "test",
+                worker,
+            )
+        )
+        await asyncio.wait_for(restarted.wait(), timeout=1.0)
+        supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+
+        assert application.bot_data["ddt_worker_tasks"] == {}
+
+    asyncio.run(scenario())
+    assert starts == 2
+
+
+def test_fatal_supervisor_callback_stops_application_outside_shutdown(
+    capsys,
+) -> None:
+    async def scenario() -> None:
+        class FakeApplication:
+            def __init__(self) -> None:
+                self.bot_data = {"ddt_shutting_down": False}
+                self.stop_calls = 0
+                self.running = True
+
+            def stop_running(self) -> None:
+                self.stop_calls += 1
+
+        async def fail() -> None:
+            raise RuntimeError("supervisor failure")
+
+        application = FakeApplication()
+        task = asyncio.create_task(fail())
+        await asyncio.gather(task, return_exceptions=True)
+        ddt_local_bot._supervisor_done(application, "prompt", task)
+
+        assert application.stop_calls == 1
+        assert application.bot_data["ddt_fatal_stop_requested"] is True
+
+    asyncio.run(scenario())
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "ddt_scheduler_supervisor_stopped"
+
+
+def test_fatal_supervisor_callback_stops_loop_before_application_start(
+    monkeypatch,
+) -> None:
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    class FakeApplication:
+        running = False
+
+        def __init__(self) -> None:
+            self.bot_data = {"ddt_shutting_down": False}
+            self.stop_calls = 0
+
+        def stop_running(self) -> None:
+            self.stop_calls += 1
+
+    task = SimpleNamespace(
+        cancelled=lambda: False,
+        exception=lambda: RuntimeError("startup supervisor failure"),
+    )
+    loop = FakeLoop()
+    application = FakeApplication()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
+
+    ddt_local_bot._supervisor_done(application, "prompt", task)
+
+    assert application.stop_calls == 0
+    assert loop.stop_calls == 1
+
+
+def test_post_shutdown_marks_expected_shutdown_before_reaping(
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        class FakeLeases:
+            def __init__(self) -> None:
+                self.shutdown_called = False
+
+            async def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        class FakeApplication:
+            def __init__(self) -> None:
+                self.bot_data = {"ddt_awake_leases": FakeLeases()}
+                self.stop_calls = 0
+
+            def stop_running(self) -> None:
+                self.stop_calls += 1
+
+        async def worker(_application) -> None:
+            await asyncio.Event().wait()
+
+        application = FakeApplication()
+        monkeypatch.setattr(ddt_local_bot, "_daily_prompt_loop", worker)
+        monkeypatch.setattr(ddt_local_bot, "_awake_guard_loop", worker)
+        await ddt_local_bot._post_init(application)
+        await asyncio.sleep(0)
+        await ddt_local_bot._post_shutdown(application)
+        await asyncio.sleep(0)
+
+        assert application.bot_data["ddt_shutting_down"] is True
+        assert application.stop_calls == 0
+        assert application.bot_data["ddt_awake_leases"].shutdown_called is True
+        assert application.bot_data["ddt_prompt_task"].done()
+        assert application.bot_data["ddt_awake_task"].done()
+        assert application.bot_data["ddt_worker_tasks"] == {}
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

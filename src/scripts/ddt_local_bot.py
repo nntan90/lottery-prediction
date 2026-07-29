@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time as clock_time, timedelta
 from html import escape
 import json
@@ -14,7 +14,7 @@ import re
 import secrets
 import sys
 import time
-from typing import Optional, Sequence
+from typing import Awaitable, Callable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -51,6 +51,7 @@ CAFFEINATE_PATH = "/usr/bin/caffeinate"
 CAFFEINATE_STOP_TIMEOUT_SECONDS = 2.0
 AWAKE_HEALTHCHECK_SECONDS = 60.0
 PROMPT_RETRY_SECONDS = 60.0
+WORKER_RESTART_SECONDS = 5.0
 ASYNC_DB_TIMEOUT_SECONDS = 5.0
 VALID_EXIT_CODES = {
     "success": 0,
@@ -60,12 +61,51 @@ VALID_EXIT_CODES = {
 }
 
 
+def _log_event(
+    level: str,
+    event: str,
+    message: str,
+    **fields: object,
+) -> None:
+    """Write one timestamped, redacted JSON event to the launchd log."""
+    try:
+        payload: dict[str, object] = {
+            "timestamp": datetime.now(VN_TZ).isoformat(),
+            "level": level.upper(),
+            "event": event,
+            "message": _safe_reason(message),
+        }
+        for key, value in fields.items():
+            if value is None or isinstance(value, (bool, int, float)):
+                payload[key] = value
+            else:
+                payload[key] = _safe_reason(value)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+    except Exception:
+        # Diagnostics must never become a second scheduler failure.
+        return
+
+
 def _safe_reason(value: object, limit: int = 240) -> str:
     """Return a compact redacted reason suitable for persistence/Telegram."""
     text = " ".join(str(value).split()) or "ddt_execution_failed"
     text = re.sub(r"https?://\S+", "[redacted-url]", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"(?i)\b(bearer|token|authorization|apikey|api_key)\s*[:=]?\s*\S+",
+        r"(?i)\bauthorization\b\s*[:=]\s*(?:bearer\s+)?"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        "authorization=[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bbearer\b\s+(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        "bearer [redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b("
+        r"token|access_token|refresh_token|apikey|api_key|x-api-key|"
+        r"password|passwd|client_secret|access_key|service_key"
+        r")\b\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
         r"\1=[redacted]",
         text,
     )
@@ -254,6 +294,15 @@ class PendingDDTRequest:
     used: bool = False
 
 
+@dataclass
+class PromptDeliveryState:
+    """Remember delivered chats across prompt-worker restarts."""
+
+    target_date: Optional[date] = None
+    delivered_chats: set[int] = field(default_factory=set)
+    failure_notified_chats: set[int] = field(default_factory=set)
+
+
 class AwakeLeaseManager:
     """Own one non-orphaning caffeinate process for all active awake leases."""
 
@@ -289,7 +338,12 @@ class AwakeLeaseManager:
                     stderr=asyncio.subprocess.DEVNULL,
                 )
             except Exception as exc:
-                print(f"⚠️ DDT caffeinate unavailable: {_safe_reason(exc)}")
+                _log_event(
+                    "WARNING",
+                    "ddt_caffeinate_unavailable",
+                    "DDT caffeinate unavailable",
+                    error=exc,
+                )
 
     async def release(self, lease: str) -> None:
         """Release one reason and reap caffeinate after the final lease."""
@@ -835,7 +889,14 @@ async def _ddt_callback(
                         parse_mode="HTML",
                     )
                 except Exception as exc:
-                    print(f"⚠️ DDT outcome delivery failed: {_safe_reason(exc)}")
+                    _log_event(
+                        "ERROR",
+                        "ddt_outcome_delivery_failed",
+                        "DDT outcome delivery failed",
+                        target_date=request.target_date,
+                        chat_id=request.chat_id,
+                        error=exc,
+                    )
         finally:
             controller.release_request(request.token)
             if await _has_persisted_success(controller, request.target_date):
@@ -846,13 +907,27 @@ async def _ddt_callback(
         try:
             await query.answer("Đã nhận; DDT đang chạy nền.")
         except Exception as exc:
-            print(f"⚠️ DDT callback acknowledgement failed: {_safe_reason(exc)}")
+            _log_event(
+                "WARNING",
+                "ddt_callback_acknowledgement_failed",
+                "DDT callback acknowledgement failed",
+                target_date=request.target_date,
+                chat_id=request.chat_id,
+                error=exc,
+            )
         try:
             await query.edit_message_text(
                 f"⏳ DDT {request.target_date:%d/%m/%Y} đang chạy…"
             )
         except Exception as exc:
-            print(f"⚠️ DDT running message failed: {_safe_reason(exc)}")
+            _log_event(
+                "WARNING",
+                "ddt_running_message_failed",
+                "DDT running message failed",
+                target_date=request.target_date,
+                chat_id=request.chat_id,
+                error=exc,
+            )
         context.application.create_task(
             run_and_notify(),
             name=f"ddt-{request.target_date.isoformat()}",
@@ -877,6 +952,7 @@ async def _send_daily_prompts(
     for chat_id in sorted(recipients):
         if controller.reserved_token is not None or controller.run_lock.locked():
             continue
+        request: Optional[PendingDDTRequest] = None
         try:
             request = controller.create_request(
                 target_date,
@@ -890,7 +966,35 @@ async def _send_daily_prompts(
                 reply_markup=_request_keyboard(request),
             )
             delivered.add(chat_id)
+            state = application.bot_data.get("ddt_prompt_delivery_state")
+            if isinstance(state, PromptDeliveryState):
+                state.delivered_chats.add(chat_id)
+                state.failure_notified_chats.discard(chat_id)
+            _log_event(
+                "INFO",
+                "ddt_prompt_delivered",
+                "DDT prompt delivered",
+                target_date=target_date,
+                chat_id=chat_id,
+            )
         except Exception as exc:
+            if request is not None:
+                controller.release_request(request.token)
+                controller.requests.pop(request.token, None)
+            _log_event(
+                "WARNING",
+                "ddt_prompt_delivery_failed",
+                "DDT prompt delivery failed",
+                target_date=target_date,
+                chat_id=chat_id,
+                error=exc,
+            )
+            state = application.bot_data.get("ddt_prompt_delivery_state")
+            if (
+                isinstance(state, PromptDeliveryState)
+                and chat_id in state.failure_notified_chats
+            ):
+                continue
             try:
                 await application.bot.send_message(
                     chat_id=chat_id,
@@ -900,7 +1004,24 @@ async def _send_daily_prompts(
                     ),
                     parse_mode="HTML",
                 )
-            except Exception:
+                if isinstance(state, PromptDeliveryState):
+                    state.failure_notified_chats.add(chat_id)
+                _log_event(
+                    "INFO",
+                    "ddt_prompt_fallback_delivered",
+                    "DDT prompt fallback delivered",
+                    target_date=target_date,
+                    chat_id=chat_id,
+                )
+            except Exception as fallback_exc:
+                _log_event(
+                    "ERROR",
+                    "ddt_prompt_fallback_delivery_failed",
+                    "DDT prompt fallback delivery failed",
+                    target_date=target_date,
+                    chat_id=chat_id,
+                    error=fallback_exc,
+                )
                 continue
     return delivered
 
@@ -908,30 +1029,36 @@ async def _send_daily_prompts(
 async def _daily_prompt_loop(application: Application) -> None:
     """Send at 21:00 or once on a wake/restart inside the active window."""
     controller: DDTLocalController = application.bot_data["ddt_controller"]
-    prompt_target: Optional[date] = None
-    delivered_chats: set[int] = set()
+    state = application.bot_data.setdefault(
+        "ddt_prompt_delivery_state",
+        PromptDeliveryState(),
+    )
     while True:
         now = datetime.now(VN_TZ)
         target_date = active_approval_target(now)
         if target_date is None:
-            prompt_target = None
-            delivered_chats.clear()
+            state.target_date = None
+            state.delivered_chats.clear()
+            state.failure_notified_chats.clear()
             scheduled = next_prompt_at(now)
             await asyncio.sleep(max(1.0, (scheduled - now).total_seconds()))
             continue
-        if target_date != prompt_target:
-            prompt_target = target_date
-            delivered_chats.clear()
-        missing = set(controller.settings.allowed_chat_ids) - delivered_chats
+        if target_date != state.target_date:
+            state.target_date = target_date
+            state.delivered_chats.clear()
+            state.failure_notified_chats.clear()
+        missing = (
+            set(controller.settings.allowed_chat_ids) - state.delivered_chats
+        )
         if missing:
-            delivered_chats.update(
+            state.delivered_chats.update(
                 await _send_daily_prompts(
                     application,
                     target_date,
                     sorted(missing),
                 )
             )
-        if delivered_chats >= set(controller.settings.allowed_chat_ids):
+        if state.delivered_chats >= set(controller.settings.allowed_chat_ids):
             scheduled = next_prompt_at(datetime.now(VN_TZ))
             await asyncio.sleep(
                 max(1.0, (scheduled - datetime.now(VN_TZ)).total_seconds())
@@ -982,18 +1109,117 @@ async def _awake_guard_loop(application: Application) -> None:
             await awake_leases.release(lease)
 
 
+WorkerFactory = Callable[[Application], Awaitable[None]]
+
+
+async def _supervise_worker(
+    application: Application,
+    worker_name: str,
+    worker_factory: WorkerFactory,
+) -> None:
+    """Restart one scheduler worker after bounded delay until shutdown."""
+    worker_tasks = application.bot_data.setdefault("ddt_worker_tasks", {})
+    while True:
+        worker_task = asyncio.create_task(
+            worker_factory(application),
+            name=f"ddt-worker-{worker_name}",
+        )
+        worker_tasks[worker_name] = worker_task
+        try:
+            await asyncio.wait({worker_task})
+        except asyncio.CancelledError:
+            worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            raise
+        finally:
+            if worker_tasks.get(worker_name) is worker_task:
+                worker_tasks.pop(worker_name, None)
+
+        if worker_task.cancelled():
+            detail = "worker cancelled outside application shutdown"
+        else:
+            exception = worker_task.exception()
+            detail = (
+                f"worker raised: {_safe_reason(exception)}"
+                if exception is not None
+                else "worker returned unexpectedly"
+            )
+        _log_event(
+            "ERROR",
+            "ddt_scheduler_worker_restarting",
+            "DDT scheduler worker stopped; restarting",
+            worker=worker_name,
+            detail=detail,
+            retry_seconds=WORKER_RESTART_SECONDS,
+        )
+        await asyncio.sleep(WORKER_RESTART_SECONDS)
+
+
+def _supervisor_done(
+    application: Application,
+    supervisor_name: str,
+    task: asyncio.Task,
+) -> None:
+    """Stop run_polling when a scheduler supervisor dies unexpectedly."""
+    if application.bot_data.get("ddt_shutting_down"):
+        return
+    if application.bot_data.get("ddt_fatal_stop_requested"):
+        return
+    if task.cancelled():
+        detail = "supervisor cancelled"
+    else:
+        exception = task.exception()
+        detail = (
+            f"supervisor raised: {_safe_reason(exception)}"
+            if exception is not None
+            else "supervisor returned unexpectedly"
+        )
+    application.bot_data["ddt_fatal_stop_requested"] = True
+    _log_event(
+        "CRITICAL",
+        "ddt_scheduler_supervisor_stopped",
+        "DDT scheduler supervisor stopped; terminating application",
+        supervisor=supervisor_name,
+        detail=detail,
+    )
+    if getattr(application, "running", False):
+        application.stop_running()
+    else:
+        asyncio.get_running_loop().stop()
+
+
 async def _post_init(application: Application) -> None:
-    application.bot_data["ddt_prompt_task"] = asyncio.create_task(
-        _daily_prompt_loop(application),
-        name="ddt-daily-prompt",
+    application.bot_data["ddt_shutting_down"] = False
+    application.bot_data["ddt_fatal_stop_requested"] = False
+    application.bot_data.setdefault(
+        "ddt_prompt_delivery_state",
+        PromptDeliveryState(),
     )
-    application.bot_data["ddt_awake_task"] = asyncio.create_task(
-        _awake_guard_loop(application),
-        name="ddt-awake-guard",
+    supervisors = (
+        ("prompt", "ddt_prompt_task", _daily_prompt_loop),
+        ("awake", "ddt_awake_task", _awake_guard_loop),
     )
+    for supervisor_name, storage_key, worker_factory in supervisors:
+        task = asyncio.create_task(
+            _supervise_worker(
+                application,
+                supervisor_name,
+                worker_factory,
+            ),
+            name=f"ddt-supervisor-{supervisor_name}",
+        )
+        task.add_done_callback(
+            lambda completed, name=supervisor_name: _supervisor_done(
+                application,
+                name,
+                completed,
+            )
+        )
+        application.bot_data[storage_key] = task
 
 
 async def _post_shutdown(application: Application) -> None:
+    application.bot_data["ddt_shutting_down"] = True
     tasks = [
         application.bot_data.get("ddt_prompt_task"),
         application.bot_data.get("ddt_awake_task"),
@@ -1003,6 +1229,13 @@ async def _post_shutdown(application: Application) -> None:
         task.cancel()
     if active_tasks:
         await asyncio.gather(*active_tasks, return_exceptions=True)
+    worker_tasks = list(
+        application.bot_data.get("ddt_worker_tasks", {}).values()
+    )
+    for task in worker_tasks:
+        task.cancel()
+    if worker_tasks:
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
     awake_leases: Optional[AwakeLeaseManager] = application.bot_data.get(
         "ddt_awake_leases"
     )
