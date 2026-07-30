@@ -14,6 +14,7 @@ import sys
 import unittest
 import tempfile
 from datetime import date
+from types import SimpleNamespace
 from xml.etree.ElementTree import Element
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,8 @@ from src.scripts.weekly_report import (
     _week_range,
     _format_vnd,
     _analyze,
+    _collect_shadow_predictions,
+    _seven_day_performance,
     _build_xml,
     _build_telegram_message,
     _save_xml,
@@ -193,6 +196,379 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(analysis["crawler"]["total_jobs"], 0)
 
 
+class TestSevenDayPerformance(unittest.TestCase):
+    """Verify canonical daily KPI aggregation for production and shadow scopes."""
+
+    @staticmethod
+    def _ensemble_row(day, region, *, province, matched_pairs):
+        return {
+            "prediction_date": day,
+            "region": region,
+            "province": province,
+            "pair_1": 10,
+            "pair_2": 20,
+            "pair_3": 30,
+            "model_version": "ensemble_test",
+            "matched_pairs": matched_pairs,
+            "hit": len(set(matched_pairs)) >= 2,
+        }
+
+    def test_counts_one_canonical_verdict_per_day_and_ignores_provinces(self):
+        predictions = []
+        for offset in range(7):
+            day = f"2026-07-{20 + offset:02d}"
+            predictions.append(
+                self._ensemble_row(
+                    day,
+                    "XSMB",
+                    province=None,
+                    matched_pairs=[10],
+                )
+            )
+            noncanonical_xsmb = self._ensemble_row(
+                day,
+                "XSMB",
+                province="all",
+                matched_pairs=[10, 20, 30],
+            )
+            noncanonical_xsmb["created_at"] = "9999-12-31T23:59:59"
+            predictions.append(noncanonical_xsmb)
+            predictions.append(
+                self._ensemble_row(
+                    day,
+                    "XSMN",
+                    province="all",
+                    matched_pairs=[10, 20] if offset in {0, 4} else [10],
+                )
+            )
+            predictions.append(
+                self._ensemble_row(
+                    day,
+                    "XSMN",
+                    province="tp-hcm",
+                    matched_pairs=[10, 20, 30],
+                )
+            )
+            stale_metadata = self._ensemble_row(
+                day,
+                "XSMN",
+                province="all",
+                matched_pairs=[10, 20, 30],
+            )
+            stale_metadata["model_version"] = "single_model"
+            stale_metadata["ensemble_method"] = "manual"
+            stale_metadata["created_at"] = "9999-12-31T23:59:59"
+            predictions.append(stale_metadata)
+
+        performance = _seven_day_performance(
+            predictions,
+            [],
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )
+
+        xsmb = performance["scopes"]["xsmb"]
+        xsmn = performance["scopes"]["xsmn_consensus"]
+        self.assertEqual(
+            (xsmb["hit_days"], xsmb["prediction_days"], xsmb["verified_days"]),
+            (0, 7, 7),
+        )
+        self.assertEqual(
+            (xsmn["hit_days"], xsmn["prediction_days"], xsmn["verified_days"]),
+            (2, 7, 7),
+        )
+
+        analysis = _analyze(
+            predictions,
+            [],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )
+        message = _build_telegram_message(analysis)
+        self.assertIn("XSMB: <b>0/7 ngày trúng</b> · verify 7/7", message)
+        self.assertIn(
+            "XSMN đồng thuận: <b>2/7 ngày trúng</b> · verify 7/7",
+            message,
+        )
+
+    def test_shadow_legacy_any_hit_does_not_become_combo_hit(self):
+        shadow_rows = [
+            {
+                "prediction_date": "2026-07-20",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "status": "success",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "hit": True,
+                "hit_count": 99,
+                "matched_pairs": [10],
+            },
+            {
+                "prediction_date": "2026-07-21",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "cmr_shadow",
+                "status": "uncalibrated",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "hit": True,
+                "matched_pairs": [10, 20],
+            },
+        ]
+
+        performance = _seven_day_performance(
+            [],
+            shadow_rows,
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )
+
+        ddt = performance["scopes"]["ddt"]
+        cmr = performance["scopes"]["cmr"]
+        self.assertEqual(
+            (ddt["hit_days"], ddt["prediction_days"], ddt["verified_days"]),
+            (0, 1, 1),
+        )
+        self.assertEqual(
+            (cmr["hit_days"], cmr["prediction_days"], cmr["verified_days"]),
+            (1, 1, 1),
+        )
+
+    def test_shadow_primary_combo_fields_count_two_of_three(self):
+        shadow_rows = [
+            {
+                "prediction_date": "2026-07-20",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "status": "success",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "combo_hit": True,
+            },
+            {
+                "prediction_date": "2026-07-21",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "cmr_shadow",
+                "status": "success",
+                "pair_1": 11,
+                "pair_2": 21,
+                "pair_3": 31,
+                "hit_count": 2,
+            },
+        ]
+
+        performance = _seven_day_performance(
+            [],
+            shadow_rows,
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )
+
+        self.assertEqual(performance["scopes"]["ddt"]["hit_days"], 1)
+        self.assertEqual(performance["scopes"]["cmr"]["hit_days"], 1)
+
+    def test_missing_and_unverified_days_are_coverage_not_misses(self):
+        shadow_rows = [
+            {
+                "prediction_date": "2026-07-20",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "status": "success",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "hit": False,
+                "matched_pairs": [],
+            },
+            {
+                "prediction_date": "2026-07-21",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "status": "success",
+                "pair_1": 11,
+                "pair_2": 21,
+                "pair_3": 31,
+                "hit": None,
+                "matched_pairs": None,
+            },
+            {
+                "prediction_date": "2026-07-22",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "ddt_shadow",
+                "status": "success",
+                "pair_1": 12,
+                "pair_2": 12,
+                "pair_3": 32,
+                "hit": True,
+                "matched_pairs": [12],
+            },
+        ]
+
+        ddt = _seven_day_performance(
+            [],
+            shadow_rows,
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )["scopes"]["ddt"]
+
+        self.assertEqual(ddt["period_days"], 7)
+        self.assertEqual(ddt["prediction_days"], 2)
+        self.assertEqual(ddt["verified_days"], 1)
+        self.assertEqual(ddt["hit_days"], 0)
+
+        analysis = _analyze(
+            [
+                {
+                    "prediction_date": "2026-07-20",
+                    "region": "XSMB",
+                    "province": None,
+                    "model_version": "ensemble_test",
+                    "pair_1": 10,
+                    "pair_2": 20,
+                    "pair_3": 30,
+                    "hit": None,
+                    "matched_pairs": None,
+                }
+            ],
+            [],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+            shadow_rows,
+        )
+        message = _build_telegram_message(analysis)
+        self.assertIn("⚪ XSMB: <b>0/7 ngày trúng</b>", message)
+        self.assertIn("⚪ DDT: <b>0/7 ngày trúng</b>", message)
+
+    def test_duplicate_date_prefers_verified_row_deterministically(self):
+        rows = [
+            {
+                "id": 2,
+                "created_at": "2026-07-20T09:00:00",
+                "prediction_date": "2026-07-20",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "cmr_shadow",
+                "status": "success",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "hit": None,
+                "matched_pairs": None,
+            },
+            {
+                "id": 1,
+                "created_at": "2026-07-20T08:00:00",
+                "prediction_date": "2026-07-20",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "cmr_shadow",
+                "status": "success",
+                "pair_1": 10,
+                "pair_2": 20,
+                "pair_3": 30,
+                "hit": True,
+                "matched_pairs": [10, 20],
+            },
+        ]
+
+        cmr = _seven_day_performance(
+            [],
+            rows,
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )["scopes"]["cmr"]
+
+        self.assertEqual(cmr["prediction_days"], 1)
+        self.assertEqual(cmr["verified_days"], 1)
+        self.assertEqual(cmr["hit_days"], 1)
+
+    def test_shadow_collection_failure_is_non_fatal(self):
+        class FailingSupabase:
+            def table(self, _name):
+                raise RuntimeError("model_predictions unavailable")
+
+        db = type("FakeDB", (), {"supabase": FailingSupabase()})()
+
+        self.assertEqual(
+            _collect_shadow_predictions(
+                db,
+                date(2026, 7, 20),
+                date(2026, 7, 26),
+            ),
+            [],
+        )
+
+    def test_shadow_collection_uses_canonical_filters(self):
+        calls = []
+        expected = [{"model_name": "ddt_shadow"}]
+
+        class Query:
+            def _record(self, method, *args, **kwargs):
+                calls.append((method, args, kwargs))
+                return self
+
+            def select(self, *args, **kwargs):
+                return self._record("select", *args, **kwargs)
+
+            def gte(self, *args, **kwargs):
+                return self._record("gte", *args, **kwargs)
+
+            def lte(self, *args, **kwargs):
+                return self._record("lte", *args, **kwargs)
+
+            def eq(self, *args, **kwargs):
+                return self._record("eq", *args, **kwargs)
+
+            def in_(self, *args, **kwargs):
+                return self._record("in_", *args, **kwargs)
+
+            def order(self, *args, **kwargs):
+                return self._record("order", *args, **kwargs)
+
+            def execute(self):
+                return SimpleNamespace(data=expected)
+
+        class Supabase:
+            def table(self, name):
+                calls.append(("table", (name,), {}))
+                return Query()
+
+        db = type("FakeDB", (), {"supabase": Supabase()})()
+        rows = _collect_shadow_predictions(
+            db,
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+        )
+
+        self.assertEqual(rows, expected)
+        self.assertIn(("eq", ("region", "XSMN"), {}), calls)
+        self.assertIn(("eq", ("province", "all"), {}), calls)
+        self.assertIn(
+            ("in_", ("model_name", ["cmr_shadow", "ddt_shadow"]), {}),
+            calls,
+        )
+        self.assertIn(("gte", ("prediction_date", "2026-07-20"), {}), calls)
+        self.assertIn(("lte", ("prediction_date", "2026-07-26"), {}), calls)
+
+
 class TestBuildXML(unittest.TestCase):
     """Verify XML generation."""
 
@@ -215,14 +591,27 @@ class TestBuildXML(unittest.TestCase):
         self.assertIn("generated_at", root.attrib)
 
     def test_xml_has_all_sections(self):
-        root = _build_xml(self._make_analysis())
+        analysis = self._make_analysis()
+        root = _build_xml(analysis)
         tags = [child.tag for child in root]
         self.assertIn("ReportPeriod", tags)
         self.assertIn("Predictions", tags)
+        self.assertIn("SevenDayPerformance", tags)
         self.assertIn("Profit", tags)
         self.assertIn("Crawler", tags)
         self.assertIn("RetrainAgent", tags)
         self.assertIn("ActiveModels", tags)
+
+        performance = root.find("SevenDayPerformance")
+        self.assertIsNotNone(performance)
+        self.assertEqual(performance.findtext("Criterion"), "at_least_2_of_3")
+        scopes = {
+            scope.attrib["key"]: scope
+            for scope in performance.findall("Scope")
+        }
+        self.assertEqual(set(scopes), {"xsmb", "xsmn_consensus", "ddt", "cmr"})
+        self.assertEqual(scopes["xsmb"].findtext("PeriodDays"), "7")
+        self.assertEqual(scopes["xsmb"].findtext("PredictionDays"), "0")
 
     def test_xml_save(self):
         """XML should save to file successfully."""
@@ -257,7 +646,11 @@ class TestBuildTelegramMessage(unittest.TestCase):
     def test_message_contains_sections(self):
         msg = _build_telegram_message(self._make_analysis())
         self.assertIn("BÁO CÁO TUẦN", msg)
-        self.assertIn("DỰ ĐOÁN", msg)
+        self.assertIn("HIỆU QUẢ 7 NGÀY", msg)
+        self.assertIn("XSMB", msg)
+        self.assertIn("XSMN đồng thuận", msg)
+        self.assertIn("DDT", msg)
+        self.assertIn("CMR", msg)
         self.assertIn("TÀI CHÍNH", msg)
         self.assertIn("CRAWLER", msg)
         self.assertIn("RETRAIN AGENT", msg)
@@ -267,6 +660,37 @@ class TestBuildTelegramMessage(unittest.TestCase):
         """Telegram max message = 4096 chars."""
         msg = _build_telegram_message(self._make_analysis())
         self.assertLess(len(msg), 4096)
+
+    def test_message_uses_fixed_seven_day_denominator_and_coverage(self):
+        analysis = _analyze(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+            [
+                {
+                    "prediction_date": "2026-07-20",
+                    "region": "XSMN",
+                    "province": "all",
+                    "model_name": "ddt_shadow",
+                    "status": "success",
+                    "pair_1": 10,
+                    "pair_2": 20,
+                    "pair_3": 30,
+                    "hit": True,
+                    "matched_pairs": [10],
+                }
+            ],
+        )
+
+        msg = _build_telegram_message(analysis)
+
+        self.assertIn("DDT: <b>0/7 ngày trúng</b> · chạy 1/7 · verify 1/7", msg)
+        self.assertIn("CMR: <b>0/7 ngày trúng</b> · chạy 0/7 · verify 0/7", msg)
 
 
 if __name__ == "__main__":

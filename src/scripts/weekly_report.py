@@ -26,12 +26,23 @@ import asyncio
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
+
+
+SHADOW_MODEL_NAMES = frozenset({"cmr_shadow", "ddt_shadow"})
+SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
+PERFORMANCE_SCOPE_ORDER = (
+    ("xsmb", "XSMB"),
+    ("xsmn_consensus", "XSMN đồng thuận"),
+    ("ddt", "DDT"),
+    ("cmr", "CMR"),
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,6 +81,33 @@ def _collect_predictions(db: LotteryDB, start: date, end: date) -> list[dict]:
         .execute()
         .data
     )
+
+
+def _collect_shadow_predictions(
+    db: LotteryDB,
+    start: date,
+    end: date,
+) -> list[dict]:
+    """Fetch canonical XSMN/all DDT and CMR shadow rows without failing the job."""
+    try:
+        return (
+            db.supabase.table("model_predictions")
+            .select("*")
+            .gte("prediction_date", _iso(start))
+            .lte("prediction_date", _iso(end))
+            .eq("region", "XSMN")
+            .eq("province", "all")
+            .in_("model_name", sorted(SHADOW_MODEL_NAMES))
+            .order("prediction_date")
+            .execute()
+            .data
+        )
+    except Exception as exc:
+        print(
+            "  ⚠️  model_predictions shadow query failed; "
+            f"DDT/CMR weekly coverage will be 0: {exc}"
+        )
+        return []
 
 
 def _collect_profit(db: LotteryDB, start: date, end: date) -> list[dict]:
@@ -146,9 +184,192 @@ def _collect_training_queue(db: LotteryDB, start: date, end: date) -> list[dict]
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
+def _normalize_pair(value) -> Optional[int]:
+    """Return a stored lottery pair as 0-99, rejecting lossy conversions."""
+    if isinstance(value, bool):
+        return None
+    try:
+        pair = int(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    if not 0 <= pair <= 99:
+        return None
+    return pair
+
+
+def _top_three(row: dict) -> Optional[tuple[int, int, int]]:
+    """Return the canonical unique Top 3 or ``None`` for incomplete data."""
+    pairs = tuple(_normalize_pair(row.get(f"pair_{index}")) for index in range(1, 4))
+    if any(pair is None for pair in pairs) or len(set(pairs)) != 3:
+        return None
+    return pairs  # type: ignore[return-value]
+
+
+def _unique_matched_count(row: dict, top_three: tuple[int, int, int]) -> int:
+    """Count unique legacy matches only when they belong to the stored Top 3."""
+    matched = row.get("matched_pairs")
+    if not isinstance(matched, (list, tuple, set)):
+        return 0
+    normalized = {
+        pair
+        for value in matched
+        if (pair := _normalize_pair(value)) is not None and pair in top_three
+    }
+    return len(normalized)
+
+
+def _integer_hit_count(value) -> Optional[int]:
+    """Normalize a non-negative stored hit count without treating booleans as ints."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if 0 <= count <= 3 else None
+
+
+def _has_verdict(row: dict, *, allow_legacy_hit: bool) -> bool:
+    """Return whether a row contains measured verification evidence."""
+    if isinstance(row.get("combo_hit"), bool):
+        return True
+    if _integer_hit_count(row.get("hit_count")) is not None:
+        return True
+    if isinstance(row.get("matched_pairs"), (list, tuple, set)):
+        return True
+    return allow_legacy_hit and isinstance(row.get("hit"), bool)
+
+
+def _is_combo_hit(
+    row: dict,
+    top_three: tuple[int, int, int],
+    *,
+    allow_legacy_hit: bool,
+) -> bool:
+    """Resolve the >=2/3 verdict while keeping legacy ``hit`` production-only."""
+    if row.get("combo_hit") is True:
+        return True
+    hit_count = _integer_hit_count(row.get("hit_count"))
+    if hit_count is not None:
+        return hit_count >= 2
+    if isinstance(row.get("matched_pairs"), (list, tuple, set)):
+        return _unique_matched_count(row, top_three) >= 2
+    return allow_legacy_hit and row.get("hit") is True
+
+
+def _canonical_scope(row: dict, *, shadow: bool) -> Optional[str]:
+    """Classify one row into a canonical weekly ledger scope."""
+    region = str(row.get("region") or "").upper()
+    province = row.get("province")
+    province_name = str(province or "").lower()
+    if shadow:
+        model_name = str(row.get("model_name") or "").lower()
+        status = str(row.get("status") or "").lower()
+        if (
+            region != "XSMN"
+            or province_name != "all"
+            or model_name not in SHADOW_MODEL_NAMES
+            or status not in SHADOW_SUCCESS_STATUSES
+        ):
+            return None
+        return "ddt" if model_name == "ddt_shadow" else "cmr"
+
+    model_version = str(row.get("model_version") or "").lower()
+    if not model_version.startswith("ensemble"):
+        return None
+    if region == "XSMB" and province is None:
+        return "xsmb"
+    if region == "XSMN" and province_name == "all":
+        return "xsmn_consensus"
+    return None
+
+
+def _row_choice_key(row: dict, *, allow_legacy_hit: bool) -> tuple:
+    """Provide a stable preference for verified and most recently stored rows."""
+    row_id = row.get("id")
+    try:
+        numeric_id = int(row_id)
+    except (TypeError, ValueError):
+        numeric_id = -1
+    return (
+        int(_has_verdict(row, allow_legacy_hit=allow_legacy_hit)),
+        str(row.get("created_at") or ""),
+        numeric_id,
+        str(row.get("model_version") or ""),
+        str(row.get("model_name") or ""),
+        tuple(str(row.get(f"pair_{index}")) for index in range(1, 4)),
+    )
+
+
+def _seven_day_performance(
+    predictions: list[dict],
+    shadow_predictions: list[dict],
+    start: date,
+    end: date,
+) -> dict:
+    """Aggregate one deterministic >=2/3 verdict per scope and calendar day."""
+    period_days = max((end - start).days + 1, 0)
+    selected: dict[str, dict[str, tuple[dict, tuple[int, int, int], bool]]] = {
+        key: {} for key, _ in PERFORMANCE_SCOPE_ORDER
+    }
+
+    for rows, shadow in ((predictions, False), (shadow_predictions, True)):
+        for row in rows:
+            scope = _canonical_scope(row, shadow=shadow)
+            top_three = _top_three(row)
+            day = str(row.get("prediction_date") or "")[:10]
+            if scope is None or top_three is None:
+                continue
+            try:
+                prediction_day = date.fromisoformat(day)
+            except ValueError:
+                continue
+            if not start <= prediction_day <= end:
+                continue
+            candidate = (row, top_three, not shadow)
+            current = selected[scope].get(day)
+            if current is None or _row_choice_key(
+                row,
+                allow_legacy_hit=not shadow,
+            ) > _row_choice_key(
+                current[0],
+                allow_legacy_hit=current[2],
+            ):
+                selected[scope][day] = candidate
+
+    scopes = {}
+    for key, label in PERFORMANCE_SCOPE_ORDER:
+        rows = selected[key]
+        verified_days = 0
+        hit_days = 0
+        for row, top_three, allow_legacy_hit in rows.values():
+            if not _has_verdict(row, allow_legacy_hit=allow_legacy_hit):
+                continue
+            verified_days += 1
+            if _is_combo_hit(
+                row,
+                top_three,
+                allow_legacy_hit=allow_legacy_hit,
+            ):
+                hit_days += 1
+        scopes[key] = {
+            "label": label,
+            "hit_days": hit_days,
+            "prediction_days": len(rows),
+            "verified_days": verified_days,
+            "period_days": period_days,
+        }
+    return {"period_days": period_days, "scopes": scopes}
+
+
 def _analyze(predictions, profits, crawler_logs, agent_actions, active_models, training_queue,
-             start: date, end: date) -> dict:
+             start: date, end: date, shadow_predictions=None) -> dict:
     """Produce a structured analysis dict from raw data."""
+    shadow_predictions = shadow_predictions or []
 
     # ── Predictions ─────────────────────────
     total_preds = len(predictions)
@@ -278,6 +499,12 @@ def _analyze(predictions, profits, crawler_logs, agent_actions, active_models, t
             "models": active_models,
         },
         "training_queue": training_queue,
+        "seven_day_performance": _seven_day_performance(
+            predictions,
+            shadow_predictions,
+            start,
+            end,
+        ),
     }
 
 
@@ -321,6 +548,24 @@ def _build_xml(analysis: dict) -> Element:
         SubElement(day_el, "Total").text = str(stats["total"])
         SubElement(day_el, "Hit").text = str(stats["hit"])
         SubElement(day_el, "Miss").text = str(stats["miss"])
+
+    # ── Canonical seven-day performance ledger ──
+    performance = analysis["seven_day_performance"]
+    performance_el = SubElement(root, "SevenDayPerformance")
+    SubElement(performance_el, "PeriodDays").text = str(performance["period_days"])
+    SubElement(performance_el, "Criterion").text = "at_least_2_of_3"
+    for scope_key, label in PERFORMANCE_SCOPE_ORDER:
+        stats = performance["scopes"][scope_key]
+        scope_el = SubElement(
+            performance_el,
+            "Scope",
+            key=scope_key,
+            label=label,
+        )
+        SubElement(scope_el, "HitDays").text = str(stats["hit_days"])
+        SubElement(scope_el, "PredictionDays").text = str(stats["prediction_days"])
+        SubElement(scope_el, "VerifiedDays").text = str(stats["verified_days"])
+        SubElement(scope_el, "PeriodDays").text = str(stats["period_days"])
 
     # ── Profit ──
     profit = analysis["profit"]
@@ -436,34 +681,38 @@ def _build_telegram_message(analysis: dict) -> str:
     """Build concise Telegram summary from analysis."""
     start = analysis["week_start"]
     end = analysis["week_end"]
-    pred = analysis["predictions"]
     profit = analysis["profit"]
     crawler = analysis["crawler"]
     agent = analysis["agent"]
     models = analysis["models"]
+    performance = analysis["seven_day_performance"]
 
     msg = (
         f"📊 <b>BÁO CÁO TUẦN — {_fmt(start)} → {_fmt(end)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    # ── 1. Predictions ──
-    hit_icon = "🟢" if pred["hit_rate"] >= 30 else "🟡" if pred["hit_rate"] >= 20 else "🔴"
-    msg += (
-        f"🎯 <b>DỰ ĐOÁN</b>\n"
-        f"   Tổng: <code>{pred['total']}</code> | "
-        f"Đã verify: <code>{pred['verified']}</code>\n"
-        f"   {hit_icon} Trúng: <b>{pred['hits']}/{pred['verified']}</b> "
-        f"(<code>{pred['hit_rate']:.0f}%</code>)\n"
-    )
-
-    # Region breakdown
-    for region, stats in pred["by_region"].items():
-        v = stats["hit"] + stats["miss"]
-        r = stats["hit"] / v * 100 if v > 0 else 0
-        icon = "✅" if r >= 30 else "❌"
-        msg += f"   {icon} {region}: {stats['hit']}/{v} trúng ({r:.0f}%)\n"
-
+    # ── 1. Canonical daily model performance ──
+    period_days = performance["period_days"]
+    msg += f"🎯 <b>HIỆU QUẢ {period_days} NGÀY — đạt khi ≥2/3</b>\n"
+    for scope_key, label in PERFORMANCE_SCOPE_ORDER:
+        stats = performance["scopes"][scope_key]
+        if stats["verified_days"] == 0:
+            icon = "⚪"
+        elif stats["hit_days"] == 0:
+            icon = "⚪" if scope_key in {"ddt", "cmr"} else "🔴"
+        elif stats["hit_days"] / max(period_days, 1) >= 0.3:
+            icon = "🟢"
+        else:
+            icon = "🟡"
+        line = (
+            f"{icon} {label}: "
+            f"<b>{stats['hit_days']}/{period_days} ngày trúng</b>"
+        )
+        if scope_key in {"ddt", "cmr"} or stats["prediction_days"] != period_days:
+            line += f" · chạy {stats['prediction_days']}/{period_days}"
+        line += f" · verify {stats['verified_days']}/{period_days}\n"
+        msg += line
     msg += "\n"
 
     # ── 2. Profit ──
@@ -552,6 +801,10 @@ async def generate_weekly_report(
     profits = _collect_profit(db, start, end)
     print(f"     → {len(profits)} records")
 
+    print("  📥 Collecting DDT/CMR shadow predictions...")
+    shadow_predictions = _collect_shadow_predictions(db, start, end)
+    print(f"     → {len(shadow_predictions)} records")
+
     print("  📥 Collecting crawler logs...")
     crawler_logs = _collect_crawler_logs(db, start, end)
     print(f"     → {len(crawler_logs)} records")
@@ -572,7 +825,7 @@ async def generate_weekly_report(
     print("  🔍 Analyzing data...")
     analysis = _analyze(
         predictions, profits, crawler_logs, agent_actions,
-        active_models, training_queue, start, end,
+        active_models, training_queue, start, end, shadow_predictions,
     )
 
     # ── Generate XML ──
