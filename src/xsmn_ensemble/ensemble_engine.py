@@ -131,6 +131,8 @@ def _get_region_config(region: Optional[str] = None) -> dict:
         "recency_dampener_decay": 0.7,
         "recent_repeat_penalty_enabled": False,
         "recent_repeat_penalty": -0.25,
+        "max_pairs_per_source": None,
+        "require_distinct_unit_digits": False,
     }
 
     if region and region.upper() == "XSMB":
@@ -232,6 +234,14 @@ def _get_region_config(region: Optional[str] = None) -> dict:
         if xsmn_rr:
             cfg["recent_repeat_penalty_enabled"] = bool(xsmn_rr.get("enabled", False))
             cfg["recent_repeat_penalty"] = float(xsmn_rr.get("penalty", cfg["recent_repeat_penalty"]))
+
+        xsmn_combo = xsmn.get("combo_selector", {})
+        if xsmn_combo:
+            max_pairs = xsmn_combo.get("max_pairs_per_source")
+            cfg["max_pairs_per_source"] = max(1, int(max_pairs)) if max_pairs is not None else None
+            cfg["require_distinct_unit_digits"] = bool(
+                xsmn_combo.get("require_distinct_unit_digits", False)
+            )
 
     return cfg
 
@@ -469,10 +479,22 @@ def _select_best_two_of_three_combo(
     top_n_output: int = 3,
     candidate_pool_size: int = 10,
     history_tail_sets: Optional[list[set[int]]] = None,
+    require_distinct_unit_digits: bool = False,
 ) -> dict:
-    """Pick the 3-number combo with the strongest estimated >=2/3 hit chance."""
+    """Pick the strongest >=2/3 combo, optionally with distinct unit digits."""
     pool = candidates[:candidate_pool_size]
     if len(pool) < top_n_output:
+        if require_distinct_unit_digits:
+            return {
+                "top_pairs": [],
+                "combo_score": 0.0,
+                "candidate_pool": pool,
+                "combo_candidates": [],
+                "history_strength": 0.0,
+                "score_type": "ranking_score_uncalibrated",
+                "selection_status": "insufficient_digit_diversity",
+                "diversity_constraint": "distinct_unit_digits",
+            }
         top_pairs = [
             (int(candidate["pair"]), float(candidate.get("score", 0.0)))
             for candidate in pool
@@ -482,6 +504,8 @@ def _select_best_two_of_three_combo(
             "combo_score": sum(score for _, score in top_pairs),
             "candidate_pool": pool,
             "score_type": "ranking_score_uncalibrated",
+            "selection_status": "success",
+            "diversity_constraint": "none",
         }
 
     scores = [float(candidate.get("score", 0.0)) for candidate in pool]
@@ -503,6 +527,11 @@ def _select_best_two_of_three_combo(
     best_strength = -1.0
 
     for combo in combinations(candidate_by_pair.keys(), top_n_output):
+        if (
+            require_distinct_unit_digits
+            and len({pair % 10 for pair in combo}) != top_n_output
+        ):
+            continue
         combo_score = _score_two_of_three_combo(combo, candidate_by_pair, history_tail_sets)
         combo_strength = sum(
             _candidate_hit_strength(candidate_by_pair[p], max_support=6)
@@ -519,7 +548,19 @@ def _select_best_two_of_three_combo(
             best_score = combo_score
             best_strength = combo_strength
 
-    selected_pairs = list(best_combo or tuple(candidate_by_pair.keys())[:top_n_output])
+    if best_combo is None:
+        return {
+            "top_pairs": [],
+            "combo_score": 0.0,
+            "candidate_pool": normalized_pool,
+            "combo_candidates": [],
+            "history_strength": 0.0,
+            "score_type": "ranking_score_uncalibrated",
+            "selection_status": "insufficient_digit_diversity",
+            "diversity_constraint": "distinct_unit_digits",
+        }
+
+    selected_pairs = list(best_combo)
     selected_pairs.sort(
         key=lambda pair: (
             candidate_by_pair[pair].get("score", 0.0),
@@ -546,7 +587,19 @@ def _select_best_two_of_three_combo(
         ],
         "history_strength": round(_combo_history_strength(tuple(selected_pairs), history_tail_sets), 4),
         "score_type": "ranking_score_uncalibrated",
+        "selection_status": "success",
+        "diversity_constraint": (
+            "distinct_unit_digits" if require_distinct_unit_digits else "none"
+        ),
     }
+
+
+def _source_contribution_pairs(result: Dict, max_pairs_per_source: Optional[int]) -> list:
+    """Return a non-mutating ranking view eligible to vote in aggregation."""
+    top_pairs = result.get("top_pairs", [])
+    if max_pairs_per_source is None:
+        return top_pairs
+    return top_pairs[:max_pairs_per_source]
 
 
 def compute_global_borda(
@@ -600,6 +653,7 @@ def compute_global_borda(
     rd_decay = rcfg["recency_dampener_decay"]
     repeat_penalty_enabled = rcfg["recent_repeat_penalty_enabled"]
     repeat_penalty = rcfg["recent_repeat_penalty"]
+    max_pairs_per_source = rcfg["max_pairs_per_source"]
 
     is_xsmb = region and region.upper() == "XSMB"
     if is_xsmb:
@@ -651,7 +705,8 @@ def compute_global_borda(
         weight = w.get(model_name, 0.15)  # fallback weight
         contributing.append(source)
 
-        for rank_idx, (pair, raw_score) in enumerate(result["top_pairs"]):
+        contribution_pairs = _source_contribution_pairs(result, max_pairs_per_source)
+        for rank_idx, (pair, raw_score) in enumerate(contribution_pairs):
             rank = rank_idx + 1  # 1-indexed
             borda_pts = BORDA_POINTS.get(rank, 0)
 
@@ -801,7 +856,8 @@ def compute_global_borda(
         base_points = 0
         models_hit = []
         for result in valid_results:
-            for r_idx, (p, raw_s) in enumerate(result.get('top_pairs', [])):
+            contribution_pairs = _source_contribution_pairs(result, max_pairs_per_source)
+            for r_idx, (p, raw_s) in enumerate(contribution_pairs):
                 if p == pair:
                     wt = w.get(result['model_name'], 0.15)
                     if use_combsum:
@@ -1267,6 +1323,9 @@ def compute_xsmn_merged_combo_selector_ensemble(
         top_n_output=top_n_output,
         candidate_pool_size=10,
         history_tail_sets=combo_history_tail_sets,
+        require_distinct_unit_digits=_get_region_config("XSMN")[
+            "require_distinct_unit_digits"
+        ],
     )
     top_pairs = merged_combo_output["top_pairs"]
 
@@ -1298,6 +1357,8 @@ def compute_xsmn_merged_combo_selector_ensemble(
         f" | combo [{combo_pairs}]"
         f" | score={merged_combo_output.get('combo_score', 0.0):.4f}"
         f" | history={merged_combo_output.get('history_strength', 0.0):.2f}"
+        f" | diversity={merged_combo_output.get('diversity_constraint', 'none')}"
+        f" | status={merged_combo_output.get('selection_status', 'success')}"
     )
     candidate_lines.append("📌 <b>Top 10 ứng viên merged</b>")
     formatted = ", ".join(
@@ -1345,6 +1406,8 @@ def compute_xsmn_merged_combo_selector_ensemble(
         "selected_province": "all",
         "combo_score": merged_combo_output.get("combo_score", 0.0),
         "combo_score_type": merged_combo_output.get("score_type", "ranking_score_uncalibrated"),
+        "selection_status": merged_combo_output.get("selection_status", "success"),
+        "diversity_constraint": merged_combo_output.get("diversity_constraint", "none"),
         "province_outputs": province_outputs,
         "merged_combo_output": merged_combo_output,
         "province_representatives": representatives,

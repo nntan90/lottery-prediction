@@ -14,6 +14,7 @@ from src.xsmn_ensemble.ensemble_engine import (
     compute_xsmn_province_representative_ensemble,
     compute_xsmn_merged_combo_selector_ensemble,
     _combo_history_strength,
+    _get_region_config,
     _select_best_two_of_three_combo,
     BORDA_POINTS,
 )
@@ -106,6 +107,42 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertIn("Freq/tp-hcm", out["candidate_log"])
         self.assertIn("Freq/dong-thap", out["candidate_log"])
 
+    def test_xsmn_only_top_two_per_source_contribute_without_mutation(self):
+        """Rank 3+ stays auditable but cannot vote in the XSMN aggregation."""
+        result = self._make_result(
+            "frequency", "tp-hcm", [10, 20, 30, 40, 50, 60, 70, 80, 90, 99]
+        )
+        original_pairs = list(result["top_pairs"])
+
+        out = compute_global_borda([result], [], top_n_output=3, region="XSMN")
+        candidate_pairs = {candidate["pair"] for candidate in out["top_candidates"]}
+
+        self.assertEqual(result["top_pairs"], original_pairs)
+        self.assertEqual(len(result["top_pairs"]), 10)
+        self.assertEqual(candidate_pairs, {10, 20})
+        self.assertNotIn(30, out["borda_details"])
+        self.assertNotIn("Top3", out["scoring_log"])
+
+    def test_xsmn_rank_three_cannot_manufacture_consensus(self):
+        """A pair repeated only at rank 3 receives no score or family vote."""
+        results = [
+            self._make_result("frequency", "tp-hcm", [10, 11, 42, 12]),
+            self._make_result("markov", "long-an", [20, 21, 42, 22]),
+        ]
+
+        out = compute_global_borda(results, [], top_n_output=3, region="XSMN")
+
+        self.assertNotIn(42, out["borda_details"])
+        self.assertNotIn(42, out["consensus_pairs"])
+
+    def test_xsmn_short_source_uses_all_available_pairs(self):
+        """A source with fewer than two pairs remains fault tolerant."""
+        result = self._make_result("lstm", "long-an", [64])
+
+        out = compute_global_borda([result], [], top_n_output=3, region="XSMN")
+
+        self.assertIn(64, out["borda_details"])
+
     def test_xsmn_combo_selector_scores_merged_province_pool(self):
         """XSMN picker should choose a 3-number combo from the merged province pool."""
         results = [
@@ -134,6 +171,8 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertEqual(len(reps_by_province["ben-tre"]), 2)
         self.assertEqual(len(reps_by_province["vung-tau"]), 2)
         self.assertEqual(len(out["top_pairs"]), 3)
+        self.assertEqual(len({pair % 10 for pair, _score in out["top_pairs"]}), 3)
+        self.assertEqual(out["selection_status"], "success")
         self.assertEqual(out["selected_province"], "all")
         self.assertGreater(out["combo_score"], 0)
         self.assertTrue(
@@ -192,6 +231,55 @@ class TestComputeGlobalBorda(unittest.TestCase):
         self.assertEqual(out["history_strength"], 0.0)
         self.assertGreater(_combo_history_strength((20, 21, 22), history), 0.0)
         self.assertEqual(out["score_type"], "ranking_score_uncalibrated")
+
+    def test_xsmn_combo_selector_requires_three_distinct_unit_digits(self):
+        """A high-scoring same-suffix trio must lose to a diversified combo."""
+        candidates = [
+            {"pair": 12, "score": 10.0, "support_count": 6, "unique_model_count": 6},
+            {"pair": 22, "score": 9.9, "support_count": 6, "unique_model_count": 6},
+            {"pair": 32, "score": 9.8, "support_count": 6, "unique_model_count": 6},
+            {"pair": 41, "score": 8.0, "support_count": 4, "unique_model_count": 4},
+            {"pair": 50, "score": 7.5, "support_count": 4, "unique_model_count": 4},
+        ]
+
+        out = _select_best_two_of_three_combo(
+            candidates,
+            top_n_output=3,
+            candidate_pool_size=5,
+            require_distinct_unit_digits=True,
+        )
+        pairs = [pair for pair, _score in out["top_pairs"]]
+
+        self.assertEqual(out["selection_status"], "success")
+        self.assertEqual(out["diversity_constraint"], "distinct_unit_digits")
+        self.assertEqual(len({pair % 10 for pair in pairs}), 3)
+        self.assertNotEqual(set(pairs), {12, 22, 32})
+
+    def test_xsmn_combo_selector_abstains_when_digit_diversity_is_impossible(self):
+        """The selector must not pad or relax the approved diversity rule."""
+        candidates = [
+            {"pair": pair, "score": 10.0 - idx, "support_count": 3}
+            for idx, pair in enumerate([12, 22, 32, 42])
+        ]
+
+        out = _select_best_two_of_three_combo(
+            candidates,
+            top_n_output=3,
+            candidate_pool_size=4,
+            require_distinct_unit_digits=True,
+        )
+
+        self.assertEqual(out["top_pairs"], [])
+        self.assertEqual(out["selection_status"], "insufficient_digit_diversity")
+
+    def test_xsmb_global_aggregation_keeps_rank_three_contribution(self):
+        """The XSMN Top-2 guardrail must not alter XSMB aggregation."""
+        result = self._make_result("frequency", "unknown", [10, 20, 30, 40])
+
+        out = compute_global_borda([result], [], top_n_output=3, region="XSMB")
+
+        self.assertIn(30, out["borda_details"])
+        self.assertIsNone(_get_region_config("XSMB")["max_pairs_per_source"])
 
     def test_history_penalty_overdue(self):
         """Pair appearing >=2 times in recent tails should get penalty."""

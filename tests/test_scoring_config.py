@@ -24,6 +24,7 @@ from src.xsmn_ensemble.ensemble_engine import (
     HISTORY_PENALTY_OVERDUE,
     HISTORY_BONUS_SWEETSPOT,
     HISTORY_BONUS_POTENTIAL,
+    _get_region_config,
     _load_scoring_config,
 )
 
@@ -95,6 +96,16 @@ class TestScoringConfigLoader(unittest.TestCase):
             self.assertIn("borda_points", cfg)
             self.assertIn("consensus", cfg)
             self.assertIn("history", cfg)
+
+    def test_xsmn_combo_guardrails_are_exposed_without_affecting_xsmb(self):
+        """XSMN alone limits source votes and requires distinct unit digits."""
+        xsmn = _get_region_config("XSMN")
+        xsmb = _get_region_config("XSMB")
+
+        self.assertEqual(xsmn["max_pairs_per_source"], 2)
+        self.assertTrue(xsmn["require_distinct_unit_digits"])
+        self.assertIsNone(xsmb["max_pairs_per_source"])
+        self.assertFalse(xsmb["require_distinct_unit_digits"])
 
 
 class TestWeightInvariants(unittest.TestCase):

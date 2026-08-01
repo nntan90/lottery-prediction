@@ -301,6 +301,8 @@ xsmn_overrides:
     penalty: -0.25           # Áp dụng cho đài xổ >1 lần/tuần như TP.HCM
 
   combo_selector:
+    max_pairs_per_source: 2  # Only Top-2 from each model@province may vote
+    require_distinct_unit_digits: true  # Final Top-3 must cover 3 unit digits
     history_bonus_weight: 0.30
     history_prior_draws: 30  # Empirical-Bayes shrinkage for sparse pair history
 
