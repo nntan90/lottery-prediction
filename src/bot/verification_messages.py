@@ -26,12 +26,14 @@ MODEL_SHORT_NAMES = {
 SHADOW_LABELS = {
     "cmr_shadow": "CMR",
     "ddt_shadow": "DDT",
+    "relationship": "Relationship",
     "xsmb_combo_shadow": "XSMB Combo v6",
 }
 SHADOW_ORDER = {
     "xsmb_combo_shadow": 0,
     "cmr_shadow": 1,
-    "ddt_shadow": 2,
+    "relationship": 2,
+    "ddt_shadow": 3,
 }
 
 REGION_ORDER = {"XSMB": 0, "XSMN": 1}
@@ -298,6 +300,7 @@ def _shadow_lines(
             status = str(result.get("status") or "error")
             reason = escape(" ".join(str(result.get("reason") or "").split())[:120])
             if status in {
+                "insufficient",
                 "insufficient_evidence",
                 "insufficient_candidates",
                 "insufficient_history",

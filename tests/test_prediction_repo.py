@@ -341,6 +341,108 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertEqual(record["error_message"], "invalid_shadow_top_3")
         self.assertIsNone(record["pair_1"])
 
+    def test_normalize_relationship_keeps_ranking_scores_and_full_audit(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "success",
+                "model_version": "relationship_v1",
+                "score_semantics": "ranking_score_uncalibrated",
+                "data_cutoff": "2026-08-02",
+                "selected_evidence": [
+                    {"pair": 11, "ranking_score_uncalibrated": 0.91},
+                    {"pair": 25, "ranking_score_uncalibrated": 0.72},
+                    {"pair": 3, "ranking_score_uncalibrated": 0.68},
+                ],
+                "run_metadata": {
+                    "selected_anchor": 11,
+                    "selected_combo": {"relationship_score": 0.61},
+                },
+            },
+            model_name="relationship",
+            target_date=date(2026, 8, 2),
+            provinces=["tien-giang", "kien-giang"],
+            execution_source="production_post_save",
+            runtime_ms=321,
+            config_metadata={"top_k_per_source": 5},
+        )
+
+        self.assertEqual(record["model_name"], "relationship")
+        self.assertEqual(
+            [record["pair_1"], record["pair_2"], record["pair_3"]],
+            [11, 25, 3],
+        )
+        self.assertEqual(record["score_1"], 0.91)
+        self.assertEqual(record["model_version"], "relationship_v1")
+        self.assertEqual(record["run_metadata"]["selected_anchor"], 11)
+        self.assertEqual(
+            record["run_metadata"]["selected_combo"]["relationship_score"],
+            0.61,
+        )
+        self.assertEqual(
+            record["run_metadata"]["provinces"],
+            ["tien-giang", "kien-giang"],
+        )
+
+    def test_shadow_status_fits_schema_and_preserves_producer_status(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "insufficient_candidate_diversity",
+                "reason": "no_top_3_with_distinct_unit_digits",
+            },
+            model_name="relationship",
+            target_date="2026-08-02",
+            provinces=["tien-giang", "kien-giang"],
+            execution_source="production_post_save",
+        )
+
+        self.assertEqual(record["status"], "insufficient")
+        self.assertLessEqual(len(record["status"]), 20)
+        self.assertEqual(
+            record["run_metadata"]["producer_status"],
+            "insufficient_candidate_diversity",
+        )
+
+    def test_relationship_persistence_rejects_same_unit_digit_top_three(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "success",
+                "selected_evidence": [
+                    {"pair": 2, "ranking_score_uncalibrated": 0.9},
+                    {"pair": 32, "ranking_score_uncalibrated": 0.8},
+                    {"pair": 42, "ranking_score_uncalibrated": 0.7},
+                ],
+            },
+            model_name="relationship",
+            target_date="2026-08-02",
+            provinces=["tien-giang", "kien-giang"],
+            execution_source="production_post_save",
+        )
+
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(
+            record["error_message"],
+            "invalid_relationship_unit_digits",
+        )
+        self.assertIsNone(record["pair_1"])
+
+    def test_public_reason_sanitizer_redacts_urls_and_tokens(self):
+        from src.database.prediction_repo import sanitize_prediction_reason
+
+        reason = sanitize_prediction_reason(
+            "request failed https://private.example/path token=super-secret"
+        )
+
+        self.assertNotIn("private.example", reason)
+        self.assertNotIn("super-secret", reason)
+        self.assertIn("[redacted-url]", reason)
+        self.assertIn("token=[redacted]", reason)
+
     def test_later_failure_does_not_downgrade_existing_success(self):
         from src.database.prediction_repo import save_shadow_prediction
 

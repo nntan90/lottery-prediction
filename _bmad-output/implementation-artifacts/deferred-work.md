@@ -59,3 +59,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-refactor-xsmb-hybrid-combo-v6.md`
   summary: Bổ sung định danh prize-slot hoặc constraint ingestion để chứng minh một kỳ XSMB có đủ đúng 27 vị trí giải.
   evidence: `tails_2d` chỉ lưu `prize_code` và không có slot index/uniqueness, nên gate đếm 27 rows fail-safe với partial count nhưng không thể phân biệt một slot bị thiếu được thay bằng duplicate cùng giải.
+- source_spec: `_bmad-output/implementation-artifacts/spec-xsmn-relationship-shadow-model.md`
+  summary: Persist immutable per-date Top-5 snapshots with generation cutoff and artifact provenance for Relationship backtests.
+  evidence: `model_predictions` rows are updatable, and `created_at` plus `model_version` cannot prove that candidates existed before a historical draw; fixing this requires a stronger schema and persistence contract outside the approved no-migration V1 scope.

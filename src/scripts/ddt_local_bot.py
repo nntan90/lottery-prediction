@@ -720,7 +720,7 @@ def format_outcome_message(
             "✅ Top 3: " + " | ".join(f"<code>{pair:02d}</code>" for pair in pairs)
         )
         lines.append(f"📐 {semantics}")
-    elif status == "insufficient_evidence":
+    elif status in {"insufficient", "insufficient_evidence"}:
         lines.append(
             f"⏳ Chưa đủ dữ liệu: {escape(_safe_reason(payload.get('reason')))}"
         )

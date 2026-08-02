@@ -216,6 +216,7 @@ def test_production_models_and_engines_do_not_depend_on_ddt() -> None:
 
 def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> None:
     events: list[str] = []
+    rendered: dict = {}
 
     async def model_results(*_args, **_kwargs):
         return [{"status": "success", "model_name": "frequency", "province": "a"}]
@@ -256,6 +257,13 @@ def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> N
     )
     monkeypatch.setattr(
         predict_ensemble,
+        "generate_relationship_shadow",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("relationship unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        predict_ensemble,
         "xsmn_format_ensemble_result",
         lambda *_a, **_k: {"top_pairs": [12, 34, 56]},
     )
@@ -264,28 +272,49 @@ def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> N
         "save_prediction",
         lambda *_a, **_k: events.append("production_saved"),
     )
-    monkeypatch.setattr(
-        predict_ensemble,
-        "save_shadow_prediction",
-        lambda *_a, **_k: events.append("cmr_saved") or True,
-    )
+    def save_shadow(_db, record):
+        events.append(f"{record['model_name']}_saved")
+        return record["model_name"] != "relationship"
+
+    monkeypatch.setattr(predict_ensemble, "save_shadow_prediction", save_shadow)
     monkeypatch.setattr(
         predict_ensemble,
         "get_shadow_prediction",
-        lambda *_a, **_k: None,
+        lambda _db, model_name, *_a, **_k: (
+            {
+                "status": "success",
+                "pair_1": 11,
+                "pair_2": 25,
+                "pair_3": 3,
+                "run_metadata": {
+                    "provinces": ["dong-nai", "can-tho"],
+                    "selected_combo": {"relationship_score": 0.6123},
+                },
+            }
+            if model_name == "relationship"
+            else None
+        ),
     )
 
     def malformed_ddt(*_args, **_kwargs):
-        assert events == ["production_saved", "cmr_saved"]
+        assert events == [
+            "production_saved",
+            "cmr_shadow_saved",
+            "relationship_saved",
+        ]
         events.append("ddt")
         return {"status": "success", "selected_evidence": [{"bad": "payload"}]}
 
     monkeypatch.setattr(predict_ensemble, "_generate_ddt_shadow_safely", malformed_ddt)
     monkeypatch.setattr(predict_ensemble, "get_missing_models", lambda *_a, **_k: [])
+    def format_message(**kwargs):
+        rendered.update(kwargs)
+        return "message"
+
     monkeypatch.setattr(
         predict_ensemble,
         "format_compact_ensemble_message",
-        lambda **_kwargs: "message",
+        format_message,
     )
     monkeypatch.setattr(predict_ensemble, "_send_chunked", send)
 
@@ -300,4 +329,13 @@ def test_real_xsmn_orchestration_persists_before_malformed_ddt(monkeypatch) -> N
         )
     )
 
-    assert events == ["production_saved", "cmr_saved", "ddt", "telegram"]
+    assert events == [
+        "production_saved",
+        "cmr_shadow_saved",
+        "relationship_saved",
+        "ddt",
+        "telegram",
+    ]
+    relationship_row = rendered["additional_shadows"][0]
+    assert tuple(relationship_row.numbers) == (11, 25, 3)
+    assert relationship_row.aggregate_score == pytest.approx(0.6123)

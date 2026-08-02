@@ -45,6 +45,10 @@ from src.crawler.xsmn_crawler import XSMNCrawler
 
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces, get_dow_label
 from src.xsmn_coupled import CMRConfig, generate_shadow_prediction
+from src.xsmn_relationship import (
+    RelationshipConfig,
+    generate_relationship_shadow,
+)
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -89,6 +93,7 @@ from src.database.prediction_repo import (
     get_shadow_prediction,
     normalize_shadow_prediction,
     normalize_xsmb_combo_shadow,
+    sanitize_prediction_reason,
     save_model_prediction,
     save_prediction,
     save_shadow_prediction,
@@ -228,6 +233,73 @@ def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
             status += f": {reason[:120]}"
         return ShadowRow(label="DDT shadow", status=status)
     return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
+
+
+def _relationship_shadow_row(result: Optional[dict]) -> ShadowRow:
+    """Render relationship as one combo score, never as a probability."""
+    if result and result.get("status") == "success":
+        try:
+            raw_numbers = result.get("top_3") or [
+                result.get(f"pair_{index}") for index in range(1, 4)
+            ]
+            numbers = tuple(int(pair) for pair in raw_numbers)
+            if (
+                len(numbers) != 3
+                or len(set(numbers)) != 3
+                or len({pair % 10 for pair in numbers}) != 3
+            ):
+                raise ValueError("invalid relationship Top 3")
+            metadata = result.get("run_metadata")
+            selected_combo = (
+                metadata.get("selected_combo")
+                if isinstance(metadata, dict)
+                else None
+            )
+            aggregate_score = result.get("relationship_score")
+            if aggregate_score is None and isinstance(selected_combo, dict):
+                aggregate_score = selected_combo.get("relationship_score")
+            return ShadowRow(
+                label="Relationship shadow",
+                numbers=numbers,
+                aggregate_score=float(aggregate_score),
+                aggregate_label="điểm bộ chưa calibration",
+                status="không thay production",
+            )
+        except (KeyError, TypeError, ValueError):
+            return ShadowRow(
+                label="Relationship shadow",
+                status="Tạm không khả dụng",
+            )
+    status = str(result.get("status") or "") if result else ""
+    labels = {
+        "insufficient_active_models": "Chưa đủ model hoạt động",
+        "insufficient_recent_history": "Chưa đủ 2 kỳ gần nhất",
+        "insufficient_matched_draws": "Chưa đủ lịch sử matched",
+        "no_eligible_anchor": "Không có anchor hợp lệ",
+        "insufficient_candidate_diversity": "Chưa đủ đa dạng hàng đơn vị",
+        "insufficient": "Chưa đủ dữ liệu",
+        "error": "Tạm không khả dụng",
+    }
+    text = labels.get(status, "Tạm không khả dụng")
+    reason = (
+        sanitize_prediction_reason(
+            result.get("error_message") or result.get("reason")
+        )
+        if result
+        else ""
+    ) or ""
+    if status == "error" and reason:
+        text += f": {reason[:120]}"
+    return ShadowRow(label="Relationship shadow", status=text)
+
+
+def _relationship_scope_matches(result: Optional[dict], provinces: list) -> bool:
+    """Accept a stored relationship row only for the exact scheduled scope."""
+    if not result:
+        return False
+    metadata = result.get("run_metadata")
+    stored = metadata.get("provinces") if isinstance(metadata, dict) else None
+    return isinstance(stored, list) and stored == list(provinces)
 
 
 def _xsmb_combo_shadow_row(result) -> Optional[ShadowRow]:
@@ -1100,6 +1172,97 @@ async def run_xsmn_ensemble(
                 f"production preserved: {reason}"
             )
 
+    relationship_started_at = time.perf_counter()
+    relationship_config = RelationshipConfig()
+    try:
+        relationship_result = generate_relationship_shadow(
+            db,
+            all_model_results,
+            provs_to_run,
+            target_date,
+            relationship_config,
+            family_weights=xsmn_weights,
+        )
+        if relationship_result.get("status") == "success":
+            print(
+                "     🧪 Relationship shadow Top 3: "
+                f"{relationship_result['top_3']} "
+                f"(score={relationship_result['relationship_score']:.4f})"
+            )
+        else:
+            print(
+                "     🧪 Relationship shadow: "
+                f"{relationship_result.get('status', 'error')} — "
+                f"{relationship_result.get('reason', 'insufficient evidence')}"
+            )
+    except Exception as exc:
+        safe_detail = (
+            sanitize_prediction_reason(exc) or "relationship_execution_failed"
+        )
+        relationship_result = {
+            "status": "error",
+            "reason": "relationship_execution_failed",
+            "model_version": "relationship_v1",
+            "score_semantics": "ranking_score_uncalibrated",
+            "data_cutoff": target_date.isoformat(),
+        }
+        print(
+            "     ⚠️ Relationship shadow failed without affecting ensemble: "
+            f"{safe_detail}"
+        )
+
+    relationship_runtime_ms = int(
+        (time.perf_counter() - relationship_started_at) * 1000
+    )
+    relationship_display_result = relationship_result
+    if not dry_run:
+        try:
+            relationship_record = normalize_shadow_prediction(
+                relationship_result,
+                model_name="relationship",
+                target_date=target_date,
+                provinces=provs_to_run,
+                execution_source="production_post_save",
+                runtime_ms=relationship_runtime_ms,
+                config_metadata=asdict(relationship_config),
+            )
+            relationship_saved = save_shadow_prediction(db, relationship_record)
+            if relationship_saved:
+                relationship_display_result = relationship_record
+            else:
+                stored_relationship = get_shadow_prediction(
+                    db,
+                    "relationship",
+                    target_date,
+                )
+                if _relationship_scope_matches(
+                    stored_relationship,
+                    provs_to_run,
+                ):
+                    relationship_display_result = stored_relationship
+                    print(
+                        "     ℹ️ Relationship giữ nguyên bản ghi canonical "
+                        "đã lưu trước đó"
+                    )
+                else:
+                    relationship_display_result = {
+                        "status": "error",
+                        "reason": "relationship_ledger_unavailable",
+                    }
+        except Exception as exc:
+            safe_detail = (
+                sanitize_prediction_reason(exc) or "relationship_persistence_failed"
+            )
+            relationship_display_result = {
+                "status": "error",
+                "reason": "relationship_persistence_failed",
+            }
+            print(
+                "     ⚠️ Relationship persistence failed; "
+                f"production preserved: {safe_detail}"
+            )
+    relationship_row = _relationship_shadow_row(relationship_display_result)
+
     # DDT is owned by the local Telegram worker. Production only reads its row.
     ddt_result = _generate_ddt_shadow_safely(db, provs_to_run, target_date)
     ddt_row = _ddt_shadow_row(ddt_result)
@@ -1166,7 +1329,7 @@ async def run_xsmn_ensemble(
             missing_by_scope=missing_by_province,
             shadow_top_pairs=cmr_top_pairs,
             shadow_status=cmr_status,
-            additional_shadows=(ddt_row,),
+            additional_shadows=(relationship_row, ddt_row),
         )
 
         if not dry_run:

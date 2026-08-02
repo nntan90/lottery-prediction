@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import sys
 import os
+from collections import Counter
 from datetime import date, datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -39,6 +40,9 @@ from src.xsmb_combo.metrics import (
     evaluate_combo,
 )
 from src.xsmn_ensemble.resolve_provinces import get_target_provinces
+from src.xsmn_digit_transition.domain import (
+    EXPECTED_PRIZE_COUNTS as XSMN_EXPECTED_PRIZE_COUNTS,
+)
 
 # Constants for Profit Calculation (Đá vòng 3 số)
 COST_DA_VONG = DEFAULT_COMBO_COST
@@ -143,6 +147,28 @@ def _shadow_provinces(prediction: dict, target_date: date) -> list[str]:
             if len(normalized) == 2 and len(set(normalized)) == 2:
                 return normalized
     return get_target_provinces(target_date)
+
+
+def _is_complete_xsmn_shadow_scope(
+    rows: list[dict],
+    provinces: tuple[str, ...],
+) -> bool:
+    """Require every expected prize row for every stored shadow province."""
+    counts: dict[str, Counter[str]] = {
+        province: Counter() for province in provinces
+    }
+    for row in rows:
+        province = str(row.get("province") or "")
+        prize_code = str(row.get("prize_code") or "")
+        if province in counts and prize_code in XSMN_EXPECTED_PRIZE_COUNTS:
+            counts[province][prize_code] += 1
+    return all(
+        all(
+            counts[province][code] == expected
+            for code, expected in XSMN_EXPECTED_PRIZE_COUNTS.items()
+        )
+        for province in provinces
+    )
 
 
 def _update_shadow_verification(
@@ -368,7 +394,7 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             # Lấy tail_set từ cache (nếu đã lấy cho prediction_results)
             # Hoặc query bổ sung nếu chưa có (ví dụ prediction_results thiếu đài nhưng model_predictions có)
             if cache_key not in tail_set_cache:
-                t_query = db.supabase.table("tails_2d").select("province,tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
+                t_query = db.supabase.table("tails_2d").select("province,prize_code,tail_2d").eq("region", region).eq("draw_date", target_date.isoformat())
                 if province and province != "all":
                     t_query = t_query.eq("province", province)
                 elif region.upper() == "XSMN":
@@ -381,13 +407,15 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
                         t_query = t_query.in_("province", target_provs)
                 t_rows = t_query.execute().data
                 complete_scope = True
-                if is_shadow and province_scope:
-                    returned_provinces = {
-                        str(row.get("province"))
-                        for row in t_rows
-                        if row.get("province")
-                    }
-                    complete_scope = set(province_scope).issubset(returned_provinces)
+                if (
+                    is_shadow
+                    and region.upper() == "XSMN"
+                    and province_scope
+                ):
+                    complete_scope = _is_complete_xsmn_shadow_scope(
+                        t_rows,
+                        province_scope,
+                    )
                 if is_shadow and region.upper() == "XSMB":
                     # XSMB has exactly 27 prize rows.  Do not finalize a
                     # shadow verdict while the crawler is still ingesting a

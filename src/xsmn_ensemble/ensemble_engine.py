@@ -1499,6 +1499,7 @@ def format_model_prediction_log(
         "region": region,
         "province": province,
         "model_name": model_name,
+        "model_version": model_result.get("model_version"),
         "model_type": model_type,
         "pair_1": top[0][0] if top[0][0] is not None else None,
         "pair_2": top[1][0] if top[1][0] is not None else None,

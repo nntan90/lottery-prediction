@@ -24,6 +24,7 @@ ENSEMBLE_AUDIT_FIELDS = (
 SHADOW_MODEL_NAMES = frozenset({
     "cmr_shadow",
     "ddt_shadow",
+    "relationship",
     "xsmb_combo_shadow",
 })
 SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
@@ -182,17 +183,32 @@ def _safe_reason(value: object) -> Optional[str]:
     return text[:240] or None
 
 
+def sanitize_prediction_reason(value: object) -> Optional[str]:
+    """Expose the shared credential-redacting reason sanitizer to orchestrators."""
+    return _safe_reason(value)
+
+
+def _canonical_shadow_status(status: str) -> str:
+    """Fit producer statuses into ``model_predictions.status VARCHAR(20)``."""
+    if len(status) <= 20:
+        return status
+    if status.startswith("insufficient_"):
+        return "insufficient"
+    return "error"
+
+
 def _shadow_pairs_and_scores(payload: dict, model_name: str) -> tuple[list[int], list[float]]:
     """Extract a valid unique Top 3 from either canonical shadow payload."""
     pairs: list[int] = []
     scores: list[float] = []
     evidence = payload.get("selected_evidence") or []
     pair_key = "number" if model_name == "cmr_shadow" else "pair"
-    score_keys = (
-        ("estimated_hit_likelihood_uncalibrated",)
-        if model_name == "cmr_shadow"
-        else ("probability", "estimated_likelihood_uncalibrated")
-    )
+    if model_name == "cmr_shadow":
+        score_keys = ("estimated_hit_likelihood_uncalibrated",)
+    elif model_name == "relationship":
+        score_keys = ("ranking_score_uncalibrated", "score")
+    else:
+        score_keys = ("probability", "estimated_likelihood_uncalibrated")
     for item in evidence:
         try:
             pair = int(item[pair_key])
@@ -217,16 +233,25 @@ def normalize_shadow_prediction(
     runtime_ms: Optional[int] = None,
     config_metadata: Optional[dict] = None,
 ) -> dict:
-    """Normalize CMR/DDT output to the canonical model_predictions contract."""
+    """Normalize an XSMN shadow output to the model_predictions contract."""
     if model_name not in SHADOW_MODEL_NAMES:
         raise ValueError(f"unsupported shadow model: {model_name}")
-    status = str(payload.get("status") or "error")
+    producer_status = str(payload.get("status") or "error")
+    status = producer_status
     pairs, scores = _shadow_pairs_and_scores(payload, model_name)
     if status in SHADOW_SUCCESS_STATUSES and len(pairs) != 3:
         status, pairs, scores = "error", [], []
         reason = "invalid_shadow_top_3"
+    elif (
+        model_name == "relationship"
+        and status in SHADOW_SUCCESS_STATUSES
+        and len({pair % 10 for pair in pairs}) != 3
+    ):
+        status, pairs, scores = "error", [], []
+        reason = "invalid_relationship_unit_digits"
     else:
         reason = payload.get("reason")
+    status = _canonical_shadow_status(status)
     semantics = payload.get("score_semantics") or (
         "estimated_hit_likelihood_uncalibrated"
     )
@@ -234,6 +259,25 @@ def normalize_shadow_prediction(
     for index in range(5):
         slots[f"pair_{index + 1}"] = pairs[index] if index < len(pairs) else None
         slots[f"score_{index + 1}"] = scores[index] if index < len(scores) else None
+    payload_metadata = payload.get("run_metadata")
+    run_metadata = (
+        dict(payload_metadata) if isinstance(payload_metadata, dict) else {}
+    )
+    existing_config = run_metadata.get("config")
+    run_metadata.update({
+        "provinces": list(provinces),
+        "data_cutoff": payload.get("data_cutoff"),
+        "execution_source": execution_source,
+        "runtime_ms": runtime_ms,
+        "producer_status": producer_status,
+        "config": (
+            config_metadata
+            if config_metadata is not None
+            else existing_config if isinstance(existing_config, dict)
+            else payload.get("config") if isinstance(payload.get("config"), dict)
+            else {}
+        ),
+    })
     return {
         "prediction_date": (
             target_date.isoformat() if isinstance(target_date, date) else str(target_date)
@@ -253,13 +297,7 @@ def normalize_shadow_prediction(
             or model_name
         ),
         "score_semantics": str(semantics),
-        "run_metadata": {
-            "provinces": list(provinces),
-            "data_cutoff": payload.get("data_cutoff"),
-            "execution_source": execution_source,
-            "runtime_ms": runtime_ms,
-            "config": config_metadata or {},
-        },
+        "run_metadata": run_metadata,
         "hit": None,
         "matched_pairs": None,
         "hit_count": None,

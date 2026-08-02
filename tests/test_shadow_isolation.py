@@ -19,6 +19,13 @@ def test_shadow_models_never_enter_xsmn_auto_weights(monkeypatch) -> None:
             "pair_2": 21,
             "pair_3": 22,
         },
+        {
+            "prediction_date": "2026-07-26",
+            "model_name": "relationship",
+            "pair_1": 11,
+            "pair_2": 25,
+            "pair_3": 3,
+        },
     ]
     monkeypatch.setattr(
         auto_weight,

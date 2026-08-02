@@ -15,6 +15,31 @@ from src.bot.verification_messages import (
     summarize_multi_results,
 )
 from src.scripts.verify_v3 import _evaluate_prediction_pairs, verify_date
+from src.xsmn_digit_transition.domain import EXPECTED_PRIZE_COUNTS
+
+
+def _complete_xsmn_tail_rows(
+    draw_date: str,
+    province: str,
+    highlighted_pairs: list[int],
+) -> list[dict]:
+    """Build one complete 18-row station draw with controlled tail matches."""
+    prize_codes = [
+        code
+        for code, count in EXPECTED_PRIZE_COUNTS.items()
+        for _ in range(count)
+    ]
+    tails = [*highlighted_pairs, *([99] * len(prize_codes))][: len(prize_codes)]
+    return [
+        {
+            "region": "XSMN",
+            "draw_date": draw_date,
+            "province": province,
+            "prize_code": prize_code,
+            "tail_2d": tail,
+        }
+        for prize_code, tail in zip(prize_codes, tails)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -205,11 +230,21 @@ def test_formatter_keeps_unverified_shadow_out_of_multi_denominator() -> None:
                 "reason": "not enough folds",
                 "verification_status": "no_prediction",
             },
+            {
+                "model_name": "relationship",
+                "status": "success",
+                "pairs": [11, 25, 3],
+                "matched": [11],
+                "hit_count": 1,
+                "combo_hit": False,
+                "verification_status": "verified",
+            },
         ],
     )
 
     assert "CMR: chờ kết quả xổ số" in message
     assert "DDT: chưa đủ dữ liệu · not enough folds" in message
+    assert "Relationship: 11 | 25 | 03 → 11 (1/3 · chưa đạt shadow)" in message
     assert "Multi-Model đạt ≥2/3: 1/1 (100%)" in message
 
 
@@ -463,17 +498,12 @@ def test_verify_date_tracks_shadow_combo_without_changing_multi_headline() -> No
             }
         ],
         "tails_2d": [
-            {
-                "region": "XSMN",
-                "draw_date": "2026-07-25",
-                "province": province,
-                "tail_2d": pair,
-            }
-            for province, pair in (
-                ("tp-hcm", 7),
-                ("tp-hcm", 60),
-                ("long-an", 1),
-            )
+            *_complete_xsmn_tail_rows(
+                "2026-07-25", "tp-hcm", [7, 60]
+            ),
+            *_complete_xsmn_tail_rows(
+                "2026-07-25", "long-an", [1]
+            ),
         ],
         "model_predictions": [
             {
@@ -506,6 +536,21 @@ def test_verify_date_tracks_shadow_combo_without_changing_multi_headline() -> No
                 "pair_5": None,
                 "run_metadata": {"provinces": ["tp-hcm", "long-an"]},
             },
+            {
+                "id": 4,
+                "prediction_date": "2026-07-25",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "relationship",
+                "prediction_mode": "shadow",
+                "status": "success",
+                "pair_1": 7,
+                "pair_2": 1,
+                "pair_3": 61,
+                "pair_4": None,
+                "pair_5": None,
+                "run_metadata": {"provinces": ["tp-hcm", "long-an"]},
+            },
         ],
         "profit_tracking": [],
     }
@@ -514,7 +559,7 @@ def test_verify_date_tracks_shadow_combo_without_changing_multi_headline() -> No
 
     asyncio.run(verify_date(db, notifier, date(2026, 7, 25)))
 
-    cmr, ddt = store["model_predictions"]
+    cmr, ddt, relationship = store["model_predictions"]
     assert cmr["hit"] is True
     assert cmr["hit_count"] == 2
     assert cmr["combo_hit"] is True
@@ -524,10 +569,15 @@ def test_verify_date_tracks_shadow_combo_without_changing_multi_headline() -> No
     assert ddt["hit"] is True
     assert ddt["hit_count"] == 1
     assert ddt["combo_hit"] is False
+    assert relationship["hit"] is True
+    assert relationship["hit_count"] == 2
+    assert relationship["combo_hit"] is True
+    assert relationship["matched_pairs"] == [7, 1]
     message = notifier.send_message.await_args.args[0]
     assert "SHADOW — ĐỐI CHIẾU" in message
     assert "CMR: 07 | 60 | 61 → 07, 60 (2/3 · đạt shadow)" in message
     assert "DDT: 01 | 02 | 03 → 01 (1/3 · chưa đạt shadow)" in message
+    assert "Relationship: 07 | 01 | 61 → 07, 01 (2/3 · đạt shadow)" in message
     assert "Multi-Model đạt ≥2/3: 0/1 (0%)" in message
 
 
@@ -552,8 +602,16 @@ def test_shadow_waits_until_both_target_provinces_have_results() -> None:
                 "region": "XSMN",
                 "draw_date": "2026-07-26",
                 "province": "tien-giang",
+                "prize_code": "DB",
                 "tail_2d": 7,
-            }
+            },
+            {
+                "region": "XSMN",
+                "draw_date": "2026-07-26",
+                "province": "kien-giang",
+                "prize_code": "DB",
+                "tail_2d": 60,
+            },
         ],
         "model_predictions": [shadow],
     }

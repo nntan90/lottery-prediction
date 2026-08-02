@@ -87,6 +87,7 @@ class TestFormatModelPredictionLog(unittest.TestCase):
     def _make_model_result(self, name, pairs, status="success"):
         return {
             "model_name": name,
+            "model_version": f"{name}_v-test",
             "province": "tp-hcm",
             "top_pairs": [(p, float(5 - i)) for i, p in enumerate(pairs)],
             "status": status,
@@ -104,6 +105,7 @@ class TestFormatModelPredictionLog(unittest.TestCase):
         self.assertEqual(log["pair_5"], 50)
         self.assertAlmostEqual(log["score_1"], 5.0)
         self.assertEqual(log["status"], "success")
+        self.assertEqual(log["model_version"], "freq_gap_v-test")
 
     def test_model_type_rule_based(self):
         """frequency, gap_overdue, freq_gap, and markov should be classified as rule_based."""

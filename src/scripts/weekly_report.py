@@ -35,13 +35,15 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 
 
-SHADOW_MODEL_NAMES = frozenset({"cmr_shadow", "ddt_shadow"})
+SHADOW_MODEL_NAMES = frozenset({"cmr_shadow", "ddt_shadow", "relationship"})
 SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
+SHADOW_SCOPE_KEYS = frozenset({"ddt", "cmr", "relationship"})
 PERFORMANCE_SCOPE_ORDER = (
     ("xsmb", "XSMB"),
     ("xsmn_consensus", "XSMN đồng thuận"),
     ("ddt", "DDT"),
     ("cmr", "CMR"),
+    ("relationship", "Relationship"),
 )
 
 
@@ -88,7 +90,7 @@ def _collect_shadow_predictions(
     start: date,
     end: date,
 ) -> list[dict]:
-    """Fetch canonical XSMN/all DDT and CMR shadow rows without failing the job."""
+    """Fetch canonical XSMN/all shadow rows without failing the weekly job."""
     try:
         return (
             db.supabase.table("model_predictions")
@@ -105,7 +107,7 @@ def _collect_shadow_predictions(
     except Exception as exc:
         print(
             "  ⚠️  model_predictions shadow query failed; "
-            f"DDT/CMR weekly coverage will be 0: {exc}"
+            f"DDT/CMR/Relationship weekly coverage will be 0: {exc}"
         )
         return []
 
@@ -276,7 +278,11 @@ def _canonical_scope(row: dict, *, shadow: bool) -> Optional[str]:
             or status not in SHADOW_SUCCESS_STATUSES
         ):
             return None
-        return "ddt" if model_name == "ddt_shadow" else "cmr"
+        return {
+            "ddt_shadow": "ddt",
+            "cmr_shadow": "cmr",
+            "relationship": "relationship",
+        }[model_name]
 
     model_version = str(row.get("model_version") or "").lower()
     if not model_version.startswith("ensemble"):
@@ -700,7 +706,7 @@ def _build_telegram_message(analysis: dict) -> str:
         if stats["verified_days"] == 0:
             icon = "⚪"
         elif stats["hit_days"] == 0:
-            icon = "⚪" if scope_key in {"ddt", "cmr"} else "🔴"
+            icon = "⚪" if scope_key in SHADOW_SCOPE_KEYS else "🔴"
         elif stats["hit_days"] / max(period_days, 1) >= 0.3:
             icon = "🟢"
         else:
@@ -709,7 +715,7 @@ def _build_telegram_message(analysis: dict) -> str:
             f"{icon} {label}: "
             f"<b>{stats['hit_days']}/{period_days} ngày trúng</b>"
         )
-        if scope_key in {"ddt", "cmr"} or stats["prediction_days"] != period_days:
+        if scope_key in SHADOW_SCOPE_KEYS or stats["prediction_days"] != period_days:
             line += f" · chạy {stats['prediction_days']}/{period_days}"
         line += f" · verify {stats['verified_days']}/{period_days}\n"
         msg += line
