@@ -26,7 +26,10 @@ from datetime import date, datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.supabase_client import LotteryDB
-from src.database.prediction_repo import SHADOW_MODEL_NAMES
+from src.database.prediction_repo import (
+    OPTIONAL_SHADOW_MODEL_NAMES,
+    SHADOW_MODEL_NAMES,
+)
 from src.bot.telegram_bot import LotteryNotifier
 from src.bot.verification_messages import (
     format_verification_message,
@@ -518,7 +521,10 @@ async def verify_date(db: LotteryDB, notifier: LotteryNotifier, target_date: dat
             str(result.get("model_name"))
             for result in shadow_results
         }
-        for model_name in sorted(SHADOW_MODEL_NAMES):
+        required_shadow_names = SHADOW_MODEL_NAMES - OPTIONAL_SHADOW_MODEL_NAMES
+        if os.getenv("LLM_GEN_MODE", "off").strip().lower() == "shadow":
+            required_shadow_names = required_shadow_names | {"llm_gen"}
+        for model_name in sorted(required_shadow_names):
             if model_name in present_shadows:
                 continue
             shadow_results.append({

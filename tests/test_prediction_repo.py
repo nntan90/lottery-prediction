@@ -31,6 +31,7 @@ class MockQueryChain:
     def eq(self, *a, **kw): return self
     def neq(self, *a, **kw): return self
     def is_(self, *a, **kw): return self
+    def limit(self, *a, **kw): return self
     def insert(self, payload, *a, **kw):
         self._action = "insert"
         self._payload = payload
@@ -431,6 +432,67 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         )
         self.assertIsNone(record["pair_1"])
 
+    def test_normalize_llm_gen_keeps_uncalibrated_scores_and_audit(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "success",
+                "model_version": "llm_gen_v1",
+                "score_semantics": "ranking_score_uncalibrated",
+                "data_cutoff": "2026-08-04",
+                "selected_evidence": [
+                    {"pair": 11, "ranking_score_uncalibrated": 0.91},
+                    {"pair": 25, "ranking_score_uncalibrated": 0.72},
+                    {"pair": 3, "ranking_score_uncalibrated": 0.68},
+                ],
+                "run_metadata": {
+                    "provider": "openai",
+                    "provider_model": "gpt-5.6-sol",
+                    "prompt_version": "llm_gen_prompt_v1",
+                    "schema_version": "llm_gen_response_v1",
+                    "input_hash": "abc123",
+                },
+            },
+            model_name="llm_gen",
+            target_date=date(2026, 8, 4),
+            provinces=["vung-tau", "ben-tre"],
+            execution_source="production_post_save",
+            runtime_ms=432,
+        )
+
+        self.assertEqual(record["model_name"], "llm_gen")
+        self.assertEqual(record["model_version"], "llm_gen_v1")
+        self.assertEqual(record["score_semantics"], "ranking_score_uncalibrated")
+        self.assertEqual(
+            [record["pair_1"], record["pair_2"], record["pair_3"]],
+            [11, 25, 3],
+        )
+        self.assertEqual(record["run_metadata"]["provider"], "openai")
+        self.assertEqual(record["run_metadata"]["input_hash"], "abc123")
+
+    def test_llm_gen_persistence_rejects_same_unit_digit_top_three(self):
+        from src.database.prediction_repo import normalize_shadow_prediction
+
+        record = normalize_shadow_prediction(
+            {
+                "status": "success",
+                "selected_evidence": [
+                    {"pair": 2, "ranking_score_uncalibrated": 0.9},
+                    {"pair": 32, "ranking_score_uncalibrated": 0.8},
+                    {"pair": 42, "ranking_score_uncalibrated": 0.7},
+                ],
+            },
+            model_name="llm_gen",
+            target_date="2026-08-04",
+            provinces=["vung-tau", "ben-tre"],
+            execution_source="production_post_save",
+        )
+
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["error_message"], "invalid_llm_gen_unit_digits")
+        self.assertIsNone(record["pair_1"])
+
     def test_public_reason_sanitizer_redacts_urls_and_tokens(self):
         from src.database.prediction_repo import sanitize_prediction_reason
 
@@ -442,6 +504,47 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertNotIn("super-secret", reason)
         self.assertIn("[redacted-url]", reason)
         self.assertIn("token=[redacted]", reason)
+
+    def test_public_reason_sanitizer_redacts_provider_headers_and_env_keys(self):
+        from src.database.prediction_repo import sanitize_prediction_reason
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "openai-secret",
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+            },
+        ):
+            reason = sanitize_prediction_reason(
+                "Authorization: Bearer openai-secret x-api-key=anthropic-secret"
+            )
+
+        self.assertNotIn("openai-secret", reason)
+        self.assertNotIn("anthropic-secret", reason)
+        self.assertGreaterEqual(reason.count("[redacted]"), 2)
+
+    def test_public_reason_sanitizer_does_not_read_provider_key_environment(self):
+        from src.database.prediction_repo import sanitize_prediction_reason
+
+        reads = []
+
+        def tracked_getenv(key, default=""):
+            reads.append(key)
+            return default
+
+        with patch("src.database.prediction_repo.os.getenv", side_effect=tracked_getenv):
+            reason = sanitize_prediction_reason(
+                "OPENAI_API_KEY=secret Authorization: Bearer another-secret"
+            )
+
+        self.assertNotIn("secret", reason)
+        self.assertNotIn("OPENAI_API_KEY", reads)
+        self.assertNotIn("ANTHROPIC_API_KEY", reads)
+
+    def test_shadow_tracking_schema_preflight_detects_available_columns(self):
+        from src.database.prediction_repo import shadow_tracking_schema_ready
+
+        self.assertTrue(shadow_tracking_schema_ready(MockDB({"model_predictions": []})))
 
     def test_later_failure_does_not_downgrade_existing_success(self):
         from src.database.prediction_repo import save_shadow_prediction
@@ -503,6 +606,205 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertEqual(inserted["pair_1"], 3)
         self.assertNotIn("prediction_mode", inserted)
         self.assertNotIn("run_metadata", inserted)
+
+    def test_llm_gen_never_falls_back_to_legacy_columns(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        class LegacyQuery(MockQueryChain):
+            def execute(self):
+                if self._payload and "prediction_mode" in self._payload:
+                    raise Exception(
+                        "Could not find the 'prediction_mode' column of "
+                        "'model_predictions' in the schema cache PGRST204"
+                    )
+                return super().execute()
+
+        class LegacyDB(MockDB):
+            def _mock_table(self, name):
+                self._calls.append(name)
+                return LegacyQuery(self, name, self._responses.get(name, []))
+
+        db = LegacyDB({"model_predictions": []})
+        record = {
+            "prediction_date": "2026-08-04",
+            "region": "XSMN",
+            "province": "all",
+            "model_name": "llm_gen",
+            "model_type": "shadow",
+            "pair_1": 11,
+            "pair_2": 25,
+            "pair_3": 3,
+            "status": "success",
+            "prediction_mode": "shadow",
+            "run_metadata": {"input_hash": "abc123"},
+        }
+
+        self.assertFalse(save_shadow_prediction(db, record))
+        self.assertNotIn("model_predictions", db.inserted)
+
+    def test_llm_gen_existing_success_rejects_different_run_identity(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "llm_gen",
+            "pair_1": 11,
+            "pair_2": 25,
+            "pair_3": 3,
+            "run_metadata": {
+                "provider": "openai",
+                "provider_model": "gpt-5.6-sol",
+                "prompt_version": "llm_gen_prompt_v1",
+                "schema_version": "llm_gen_response_v1",
+                "input_hash": "old-hash",
+                "provinces": ["a", "b"],
+            },
+        }
+        db = MockDB({"model_predictions": [existing]})
+        incoming = {
+            **existing,
+            "prediction_date": "2026-08-04",
+            "region": "XSMN",
+            "province": "all",
+            "pair_1": 12,
+            "pair_2": 26,
+            "pair_3": 4,
+            "run_metadata": {**existing["run_metadata"], "input_hash": "new-hash"},
+        }
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertNotIn("model_predictions", db.updated)
+
+    def test_llm_gen_existing_success_rejects_changed_config(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        config = {
+            "mode": "shadow",
+            "provider": "openai",
+            "provider_model": "gpt-5.6-sol",
+            "max_output_tokens": 2000,
+        }
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "llm_gen",
+            "model_version": "llm_gen_v1",
+            "pair_1": 11,
+            "pair_2": 25,
+            "pair_3": 3,
+            "score_1": 0.9,
+            "score_2": 0.8,
+            "score_3": 0.7,
+            "run_metadata": {
+                "provider": "openai",
+                "provider_model": "gpt-5.6-sol",
+                "prompt_version": "llm_gen_prompt_v1",
+                "schema_version": "llm_gen_response_v1",
+                "input_hash": "same-hash",
+                "provinces": ["a", "b"],
+                "config": config,
+            },
+        }
+        db = MockDB({"model_predictions": [existing]})
+        incoming = {
+            **existing,
+            "prediction_date": "2026-08-04",
+            "region": "XSMN",
+            "province": "all",
+            "run_metadata": {
+                **existing["run_metadata"],
+                "config": {**config, "max_output_tokens": 1000},
+            },
+        }
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertNotIn("model_predictions", db.updated)
+
+    def test_llm_gen_unique_insert_race_never_overwrites_first_success(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        config = {
+            "mode": "shadow",
+            "provider": "openai",
+            "provider_model": "gpt-5.6-sol",
+            "max_output_tokens": 2000,
+        }
+        raced = {
+            "id": 10,
+            "status": "success",
+            "model_name": "llm_gen",
+            "model_version": "llm_gen_v1",
+            "pair_1": 11,
+            "pair_2": 25,
+            "pair_3": 3,
+            "score_1": 0.91,
+            "score_2": 0.82,
+            "score_3": 0.73,
+            "run_metadata": {
+                "provider": "openai",
+                "provider_model": "gpt-5.6-sol",
+                "prompt_version": "llm_gen_prompt_v1",
+                "schema_version": "llm_gen_response_v1",
+                "input_hash": "same-hash",
+                "provinces": ["a", "b"],
+                "config": config,
+            },
+        }
+
+        class RaceQuery:
+            def __init__(self, database):
+                self.database = database
+                self.action = "select"
+
+            def select(self, *_args, **_kwargs): return self
+            def eq(self, *_args, **_kwargs): return self
+            def neq(self, *_args, **_kwargs): return self
+            def is_(self, *_args, **_kwargs): return self
+            def limit(self, *_args, **_kwargs): return self
+
+            def insert(self, _payload, *_args, **_kwargs):
+                self.action = "insert"
+                return self
+
+            def update(self, _payload, *_args, **_kwargs):
+                self.database.update_attempted = True
+                self.action = "update"
+                return self
+
+            def execute(self):
+                if self.action == "insert":
+                    raise Exception("duplicate key violates unique constraint 23505")
+                if self.action == "update":
+                    raise AssertionError("concurrent canonical row must not be updated")
+                self.database.select_count += 1
+                data = [] if self.database.select_count == 1 else [raced]
+                return type("Response", (), {"data": data})()
+
+        class RaceDB:
+            def __init__(self):
+                self.select_count = 0
+                self.update_attempted = False
+                self.supabase = type(
+                    "Supabase",
+                    (),
+                    {"table": lambda _self, _name: RaceQuery(self)},
+                )()
+
+        incoming = {
+            **raced,
+            "prediction_date": "2026-08-04",
+            "region": "XSMN",
+            "province": "all",
+            "score_1": 0.89,
+            "score_2": 0.80,
+            "score_3": 0.70,
+        }
+        incoming.pop("id")
+        db = RaceDB()
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertFalse(db.update_attempted)
 
     def test_same_success_retry_preserves_existing_verification(self):
         from src.database.prediction_repo import save_shadow_prediction

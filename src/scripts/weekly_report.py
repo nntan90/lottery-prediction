@@ -35,15 +35,21 @@ from src.database.supabase_client import LotteryDB
 from src.bot.telegram_bot import LotteryNotifier
 
 
-SHADOW_MODEL_NAMES = frozenset({"cmr_shadow", "ddt_shadow", "relationship"})
+SHADOW_MODEL_NAMES = frozenset({
+    "cmr_shadow",
+    "ddt_shadow",
+    "llm_gen",
+    "relationship",
+})
 SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
-SHADOW_SCOPE_KEYS = frozenset({"ddt", "cmr", "relationship"})
+SHADOW_SCOPE_KEYS = frozenset({"ddt", "cmr", "llm_gen", "relationship"})
 PERFORMANCE_SCOPE_ORDER = (
     ("xsmb", "XSMB"),
     ("xsmn_consensus", "XSMN đồng thuận"),
     ("ddt", "DDT"),
     ("cmr", "CMR"),
     ("relationship", "Relationship"),
+    ("llm_gen", "LLM_Gen"),
 )
 
 
@@ -107,7 +113,7 @@ def _collect_shadow_predictions(
     except Exception as exc:
         print(
             "  ⚠️  model_predictions shadow query failed; "
-            f"DDT/CMR/Relationship weekly coverage will be 0: {exc}"
+            f"weekly shadow coverage will be 0: {exc}"
         )
         return []
 
@@ -281,6 +287,7 @@ def _canonical_scope(row: dict, *, shadow: bool) -> Optional[str]:
         return {
             "ddt_shadow": "ddt",
             "cmr_shadow": "cmr",
+            "llm_gen": "llm_gen",
             "relationship": "relationship",
         }[model_name]
 
@@ -703,6 +710,12 @@ def _build_telegram_message(analysis: dict) -> str:
     msg += f"🎯 <b>HIỆU QUẢ {period_days} NGÀY — đạt khi ≥2/3</b>\n"
     for scope_key, label in PERFORMANCE_SCOPE_ORDER:
         stats = performance["scopes"][scope_key]
+        if (
+            scope_key == "llm_gen"
+            and stats["prediction_days"] == 0
+            and os.getenv("LLM_GEN_MODE", "off").strip().lower() != "shadow"
+        ):
+            continue
         if stats["verified_days"] == 0:
             icon = "⚪"
         elif stats["hit_days"] == 0:
@@ -807,7 +820,7 @@ async def generate_weekly_report(
     profits = _collect_profit(db, start, end)
     print(f"     → {len(profits)} records")
 
-    print("  📥 Collecting DDT/CMR shadow predictions...")
+    print("  📥 Collecting XSMN shadow predictions...")
     shadow_predictions = _collect_shadow_predictions(db, start, end)
     print(f"     → {len(shadow_predictions)} records")
 

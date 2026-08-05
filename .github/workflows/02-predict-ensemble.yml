@@ -7,6 +7,10 @@ on:
     - cron: '14 0 * * *'  # 7:14 GMT+7 (00:14 UTC) hằng ngày
   workflow_dispatch:         # Cho phép chạy thủ công
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   predict-ensemble:
     name: Multi-Model Ensemble Prediction
@@ -36,6 +40,10 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          LLM_GEN_MODE:        ${{ vars.LLM_GEN_MODE }}
+          LLM_GEN_PROVIDER:    ${{ vars.LLM_GEN_PROVIDER }}
+          OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
           PYTHONPATH: .
           XSMB_COMBO_SELECTOR_MODE: shadow
           # TARGET_PROVINCES: Auto-resolved by resolve_provinces.py based on DOW

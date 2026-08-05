@@ -49,6 +49,13 @@ from src.xsmn_relationship import (
     RelationshipConfig,
     generate_relationship_shadow,
 )
+from src.xsmn_llm_gen import (
+    LLMGenConfigError,
+    build_evidence_packet,
+    compute_input_hash,
+    load_llm_gen_config,
+    run_llm_gen,
+)
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -97,6 +104,7 @@ from src.database.prediction_repo import (
     save_model_prediction,
     save_prediction,
     save_shadow_prediction,
+    shadow_tracking_schema_ready,
 )
 
 
@@ -291,6 +299,252 @@ def _relationship_shadow_row(result: Optional[dict]) -> ShadowRow:
     if status == "error" and reason:
         text += f": {reason[:120]}"
     return ShadowRow(label="Relationship shadow", status=text)
+
+
+def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
+    """Render one provider-labelled LLM_Gen row without changing production."""
+    if result is None:
+        return None
+    metadata = result.get("run_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    provider_model = str(
+        metadata.get("provider_model") or result.get("provider_model") or ""
+    )
+    provider_labels = {
+        "gpt-5.6-sol": "GPT-5.6 Sol",
+        "claude-opus-4-8": "Claude Opus 4.8",
+    }
+    label = "LLM_Gen"
+    if provider_model:
+        label += f" [{provider_labels.get(provider_model, provider_model)}]"
+
+    if str(result.get("status") or "") == "success":
+        top_pairs = []
+        for item in result.get("selected_evidence") or []:
+            try:
+                pair = int(item["pair"])
+                score = float(item["ranking_score_uncalibrated"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= pair <= 99 and pair not in {value for value, _ in top_pairs}:
+                top_pairs.append((pair, score))
+        if len(top_pairs) == 3 and len({pair % 10 for pair, _ in top_pairs}) == 3:
+            status = "điểm xếp hạng chưa calibration"
+            if metadata.get("reused"):
+                status += " · reuse canonical"
+            return ShadowRow(label=label, top_pairs=tuple(top_pairs), status=status)
+
+    reason = str(result.get("reason") or result.get("status") or "error")
+    status_map = {
+        "canonical_conflict": "Đã có kết quả canonical khác",
+        "insufficient_candidate_diversity": "Chưa đủ đa dạng hàng đơn vị",
+        "insufficient_candidates": "Chưa đủ candidate hợp lệ",
+        "missing_api_key": "Thiếu API key của provider đã chọn",
+        "schema_not_ready": "Database audit chưa sẵn sàng",
+    }
+    status = status_map.get(reason, "Tạm không khả dụng")
+    return ShadowRow(label=label, status=status)
+
+
+def _run_llm_gen_shadow_safely(
+    db: LotteryDB,
+    model_results: list[dict],
+    provinces: list[str],
+    target_date: date,
+    *,
+    ensemble_output: dict,
+    recent_tails_by_province: dict[str, list[int]],
+    recent_province_tails: dict[str, set[int]],
+    combo_history_tail_sets: list[set[int]],
+) -> Optional[dict]:
+    """Run/persist the optional LLM shadow without risking production.
+
+    Migration 12 is checked before config reads the selected API key, and an
+    existing canonical success is handed to the service before any provider
+    adapter is created.
+    """
+    raw_mode = (os.getenv("LLM_GEN_MODE", "off") or "off").strip().lower()
+    if raw_mode == "off":
+        return None
+
+    try:
+        if not shadow_tracking_schema_ready(db):
+            return {
+                "status": "schema_not_ready",
+                "reason": "schema_not_ready",
+                "model_name": "llm_gen",
+                "model_version": "llm_gen_v1",
+                "score_semantics": "ranking_score_uncalibrated",
+                "data_cutoff": target_date.isoformat(),
+                "run_metadata": {
+                    "provider": os.getenv("LLM_GEN_PROVIDER", "").strip().lower(),
+                    "data_cutoff": target_date.isoformat(),
+                    "provinces": list(provinces),
+                },
+            }
+    except Exception as exc:
+        safe_detail = sanitize_prediction_reason(exc) or "schema_preflight_failed"
+        print(f"     ⚠️ LLM_Gen schema preflight failed; provider skipped: {safe_detail}")
+        return {
+            "status": "schema_not_ready",
+            "reason": "schema_not_ready",
+            "model_name": "llm_gen",
+            "model_version": "llm_gen_v1",
+            "score_semantics": "ranking_score_uncalibrated",
+            "data_cutoff": target_date.isoformat(),
+            "run_metadata": {
+                "data_cutoff": target_date.isoformat(),
+                "provinces": list(provinces),
+            },
+        }
+
+    try:
+        config = load_llm_gen_config()
+    except LLMGenConfigError as exc:
+        raw_provider = os.getenv("LLM_GEN_PROVIDER", "").strip().lower()
+        model_by_provider = {
+            "openai": "gpt-5.6-sol",
+            "anthropic": "claude-opus-4-8",
+        }
+        try:
+            packet = build_evidence_packet(
+                model_results,
+                provinces,
+                target_date,
+                effective_weights=ensemble_output.get("effective_weights", {}),
+                production_top_pairs=ensemble_output.get("top_pairs", []),
+                recent_tails_by_province=recent_tails_by_province,
+                recent_province_tails=recent_province_tails,
+                combo_history_tail_sets=combo_history_tail_sets,
+            )
+            input_hash = compute_input_hash(packet)
+        except Exception:
+            input_hash = None
+        result = {
+            "status": "error",
+            "reason": exc.reason,
+            "model_name": "llm_gen",
+            "model_version": "llm_gen_v1",
+            "score_semantics": "ranking_score_uncalibrated",
+            "data_cutoff": target_date.isoformat(),
+            "selected_evidence": [],
+            "run_metadata": {
+                "provider": raw_provider,
+                "provider_model": model_by_provider.get(raw_provider),
+                "prompt_version": "llm_gen_prompt_v1",
+                "schema_version": "llm_gen_response_v1",
+                "model_version": "llm_gen_v1",
+                "input_hash": input_hash,
+                "data_cutoff": target_date.isoformat(),
+                "provinces": list(provinces),
+                "usage": {},
+                "latency_ms": 0,
+                "config": {
+                    "mode": raw_mode,
+                    "provider": raw_provider,
+                    "provider_model": model_by_provider.get(raw_provider),
+                },
+            },
+        }
+        try:
+            record = normalize_shadow_prediction(
+                result,
+                model_name="llm_gen",
+                target_date=target_date,
+                provinces=provinces,
+                execution_source="production_post_save",
+            )
+            save_shadow_prediction(db, record)
+        except Exception as persist_exc:
+            detail = sanitize_prediction_reason(persist_exc) or "llm_gen_config_error_persistence_failed"
+            print(f"     ⚠️ LLM_Gen config error not persisted: {detail}")
+        return result
+
+    try:
+        existing = get_shadow_prediction(db, "llm_gen", target_date)
+
+        result = run_llm_gen(
+            config,
+            model_results,
+            provinces,
+            target_date,
+            effective_weights=ensemble_output.get("effective_weights", {}),
+            production_top_pairs=ensemble_output.get("top_pairs", []),
+            recent_tails_by_province=recent_tails_by_province,
+            recent_province_tails=recent_province_tails,
+            combo_history_tail_sets=combo_history_tail_sets,
+            lookup_success=(
+                (lambda _input_hash, _config: existing)
+                if existing and existing.get("status") in {"success", "uncalibrated"}
+                else None
+            ),
+        )
+        if result is None:
+            return None
+        if result.get("status") == "canonical_conflict":
+            return result
+        metadata = result.get("run_metadata")
+        if isinstance(metadata, dict) and metadata.get("reused"):
+            return result
+
+        runtime_ms = (
+            int(metadata.get("latency_ms", 0))
+            if isinstance(metadata, dict)
+            else None
+        )
+        record = normalize_shadow_prediction(
+            result,
+            model_name="llm_gen",
+            target_date=target_date,
+            provinces=provinces,
+            execution_source="production_post_save",
+            runtime_ms=runtime_ms,
+            config_metadata=config.public_metadata(),
+        )
+        saved = save_shadow_prediction(db, record)
+        if saved:
+            return result
+
+        raced = get_shadow_prediction(db, "llm_gen", target_date)
+        if raced and raced.get("status") in {"success", "uncalibrated"}:
+            return run_llm_gen(
+                config,
+                model_results,
+                provinces,
+                target_date,
+                effective_weights=ensemble_output.get("effective_weights", {}),
+                production_top_pairs=ensemble_output.get("top_pairs", []),
+                recent_tails_by_province=recent_tails_by_province,
+                recent_province_tails=recent_province_tails,
+                combo_history_tail_sets=combo_history_tail_sets,
+                lookup_success=lambda _input_hash, _config: raced,
+            )
+        return {
+            **result,
+            "status": "error",
+            "reason": "llm_gen_ledger_unavailable",
+            "selected_evidence": [],
+        }
+    except Exception as exc:
+        safe_detail = sanitize_prediction_reason(exc) or "llm_gen_execution_failed"
+        print(f"     ⚠️ LLM_Gen failed without affecting ensemble: {safe_detail}")
+        return {
+            "status": "error",
+            "reason": "llm_gen_execution_failed",
+            "model_name": "llm_gen",
+            "model_version": "llm_gen_v1",
+            "score_semantics": "ranking_score_uncalibrated",
+            "data_cutoff": target_date.isoformat(),
+            "selected_evidence": [],
+            "run_metadata": {
+                "provider": config.provider,
+                "provider_model": config.provider_model,
+                "prompt_version": config.prompt_version,
+                "schema_version": config.schema_version,
+                "data_cutoff": target_date.isoformat(),
+                "provinces": list(provinces),
+            },
+        }
 
 
 def _relationship_scope_matches(result: Optional[dict], provinces: list) -> bool:
@@ -1263,6 +1517,30 @@ async def run_xsmn_ensemble(
             )
     relationship_row = _relationship_shadow_row(relationship_display_result)
 
+    # A dry run must not create billable external side effects.
+    llm_gen_result = None if dry_run else _run_llm_gen_shadow_safely(
+        db,
+        all_model_results,
+        provs_to_run,
+        target_date,
+        ensemble_output=ensemble_output,
+        recent_tails_by_province=recent_tails_by_province,
+        recent_province_tails=recent_province_tails,
+        combo_history_tail_sets=combo_history_tail_sets,
+    )
+    llm_gen_row = _llm_gen_shadow_row(llm_gen_result)
+    if llm_gen_row is not None:
+        if llm_gen_row.top_pairs:
+            print(
+                "     🧠 LLM_Gen shadow Top 3: "
+                f"{[f'{pair:02d}' for pair, _ in llm_gen_row.top_pairs]}"
+            )
+        else:
+            print(
+                "     🧠 LLM_Gen shadow: "
+                f"{llm_gen_row.status or 'Tạm không khả dụng'}"
+            )
+
     # DDT is owned by the local Telegram worker. Production only reads its row.
     ddt_result = _generate_ddt_shadow_safely(db, provs_to_run, target_date)
     ddt_row = _ddt_shadow_row(ddt_result)
@@ -1312,6 +1590,11 @@ async def run_xsmn_ensemble(
             cmr_status = "Chưa đủ dữ liệu"
         elif cmr_result:
             cmr_status = "Tạm không khả dụng"
+        additional_shadow_rows = [relationship_row]
+        if llm_gen_row is not None:
+            additional_shadow_rows.append(llm_gen_row)
+        additional_shadow_rows.append(ddt_row)
+
         msg = format_compact_ensemble_message(
             region="XSMN",
             target_date=target_date,
@@ -1329,7 +1612,7 @@ async def run_xsmn_ensemble(
             missing_by_scope=missing_by_province,
             shadow_top_pairs=cmr_top_pairs,
             shadow_status=cmr_status,
-            additional_shadows=(relationship_row, ddt_row),
+            additional_shadows=tuple(additional_shadow_rows),
         )
 
         if not dry_run:

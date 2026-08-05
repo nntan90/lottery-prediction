@@ -24,9 +24,11 @@ ENSEMBLE_AUDIT_FIELDS = (
 SHADOW_MODEL_NAMES = frozenset({
     "cmr_shadow",
     "ddt_shadow",
+    "llm_gen",
     "relationship",
     "xsmb_combo_shadow",
 })
+OPTIONAL_SHADOW_MODEL_NAMES = frozenset({"llm_gen"})
 SHADOW_SUCCESS_STATUSES = frozenset({"success", "uncalibrated"})
 SHADOW_TRACKING_FIELDS = (
     "prediction_mode",
@@ -167,7 +169,10 @@ def _safe_reason(value: object) -> Optional[str]:
     text = " ".join(str(value).split())
     text = re.sub(r"https?://\S+", "[redacted-url]", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"(?i)\b(bearer|token|authorization|apikey|api_key)\s*[:=]?\s*\S+",
+        (
+            r"(?i)\b(authorization|x-api-key|api-key|api[ _]?key|bearer|token)"
+            r"\b\s*[:=]?\s*(?:bearer\s+)?\S+"
+        ),
         r"\1=[redacted]",
         text,
     )
@@ -180,6 +185,11 @@ def _safe_reason(value: object) -> Optional[str]:
         secret = os.getenv(key, "")
         if secret:
             text = text.replace(secret, "[redacted]")
+    text = re.sub(
+        r"(?i)\b(OPENAI_API_KEY|ANTHROPIC_API_KEY)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        text,
+    )
     return text[:240] or None
 
 
@@ -205,7 +215,7 @@ def _shadow_pairs_and_scores(payload: dict, model_name: str) -> tuple[list[int],
     pair_key = "number" if model_name == "cmr_shadow" else "pair"
     if model_name == "cmr_shadow":
         score_keys = ("estimated_hit_likelihood_uncalibrated",)
-    elif model_name == "relationship":
+    elif model_name in {"relationship", "llm_gen"}:
         score_keys = ("ranking_score_uncalibrated", "score")
     else:
         score_keys = ("probability", "estimated_likelihood_uncalibrated")
@@ -243,12 +253,12 @@ def normalize_shadow_prediction(
         status, pairs, scores = "error", [], []
         reason = "invalid_shadow_top_3"
     elif (
-        model_name == "relationship"
+        model_name in {"relationship", "llm_gen"}
         and status in SHADOW_SUCCESS_STATUSES
         and len({pair % 10 for pair in pairs}) != 3
     ):
         status, pairs, scores = "error", [], []
-        reason = "invalid_relationship_unit_digits"
+        reason = f"invalid_{model_name}_unit_digits"
     else:
         reason = payload.get("reason")
     status = _canonical_shadow_status(status)
@@ -333,6 +343,32 @@ def get_shadow_prediction(
         raise
 
 
+def shadow_tracking_schema_ready(db: LotteryDB) -> bool:
+    """Return whether migration 12 audit columns are queryable.
+
+    ``llm_gen`` must never spend an external API call when its provider/model,
+    input hash and usage metadata cannot be persisted. Unknown database errors
+    are raised so callers can isolate and report them without misclassifying a
+    connectivity incident as a schema migration issue.
+    """
+    fields = ",".join(SHADOW_TRACKING_FIELDS)
+    try:
+        db.supabase.table("model_predictions").select(fields).limit(1).execute()
+        return True
+    except Exception as exc:
+        error = str(exc).lower()
+        missing_schema = (
+            "pgrst204" in error
+            or "pgrst205" in error
+            or "42p01" in error
+            or "schema cache" in error
+            or any(field in error for field in SHADOW_TRACKING_FIELDS)
+        )
+        if missing_schema:
+            return False
+        raise
+
+
 def _same_shadow_prediction(existing: dict, incoming: dict) -> bool:
     """Return whether a retry keeps the canonical Top 3 and province scope."""
     existing_pairs = {
@@ -370,6 +406,49 @@ def _prepare_shadow_retry(existing: Optional[dict], incoming: dict) -> dict:
     return prepared
 
 
+def _same_llm_gen_identity(existing: dict, incoming: dict) -> bool:
+    """Compare the immutable audit identity of two ``llm_gen`` runs."""
+    old_metadata = existing.get("run_metadata")
+    new_metadata = incoming.get("run_metadata")
+    if not isinstance(old_metadata, dict) or not isinstance(new_metadata, dict):
+        return False
+    identity_fields = (
+        "provider",
+        "provider_model",
+        "prompt_version",
+        "schema_version",
+        "input_hash",
+    )
+    if not all(
+        old_metadata.get(field) is not None
+        and old_metadata.get(field) == new_metadata.get(field)
+        for field in identity_fields
+    ):
+        return False
+    if existing.get("model_version") != incoming.get("model_version"):
+        return False
+    old_config = old_metadata.get("config")
+    new_config = new_metadata.get("config")
+    return (
+        isinstance(old_config, dict)
+        and isinstance(new_config, dict)
+        and old_config == new_config
+    )
+
+
+def _same_llm_gen_prediction(existing: dict, incoming: dict) -> bool:
+    """Require the canonical LLM ranking order and province scope to match."""
+    existing_pairs = tuple(existing.get(f"pair_{index}") for index in range(1, 4))
+    incoming_pairs = tuple(incoming.get(f"pair_{index}") for index in range(1, 4))
+    existing_scores = tuple(existing.get(f"score_{index}") for index in range(1, 4))
+    incoming_scores = tuple(incoming.get(f"score_{index}") for index in range(1, 4))
+    return (
+        existing_pairs == incoming_pairs
+        and existing_scores == incoming_scores
+        and _same_shadow_prediction(existing, incoming)
+    )
+
+
 def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
     """Persist a shadow row idempotently; a failure never downgrades success."""
     region = str(record.get("region") or "XSMN")
@@ -381,6 +460,18 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
         region=region,
         province=province,
     )
+    if (
+        record.get("model_name") == "llm_gen"
+        and existing
+        and existing.get("status") in SHADOW_SUCCESS_STATUSES
+    ):
+        # The first successful provider result is the canonical ledger row for
+        # the day. Same-input races reuse it; a different config/input/output
+        # must never silently replace it.
+        return bool(
+            _same_llm_gen_identity(existing, record)
+            and _same_llm_gen_prediction(existing, record)
+        )
     if (
         existing
         and existing.get("status") in SHADOW_SUCCESS_STATUSES
@@ -457,6 +548,16 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                 return False
             if not raced:
                 raise
+            if (
+                value.get("model_name") == "llm_gen"
+                and raced.get("status") in SHADOW_SUCCESS_STATUSES
+            ):
+                # A concurrent winner owns the immutable canonical row. Never
+                # enter the generic update path after a unique-key race.
+                return bool(
+                    _same_llm_gen_identity(raced, value)
+                    and _same_llm_gen_prediction(raced, value)
+                )
             return write(_prepare_shadow_retry(raced, value), raced)
 
     try:
@@ -468,6 +569,12 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                 print("  ⚠️  model_predictions missing; shadow result was not saved")
                 return False
             raise
+        if record.get("model_name") == "llm_gen":
+            print(
+                "  ⚠️  Shadow tracking migration pending; "
+                "LLM_Gen audit row was not saved"
+            )
+            return False
         print("  ⚠️  Shadow tracking migration pending; saving legacy-compatible row")
         legacy_record = _strip_fields(
             _prepare_shadow_retry(existing, record),

@@ -377,6 +377,17 @@ class TestSevenDayPerformance(unittest.TestCase):
                 "pair_3": 3,
                 "hit_count": 2,
             },
+            {
+                "prediction_date": "2026-07-23",
+                "region": "XSMN",
+                "province": "all",
+                "model_name": "llm_gen",
+                "status": "success",
+                "pair_1": 12,
+                "pair_2": 25,
+                "pair_3": 38,
+                "hit_count": 2,
+            },
         ]
 
         performance = _seven_day_performance(
@@ -389,6 +400,7 @@ class TestSevenDayPerformance(unittest.TestCase):
         self.assertEqual(performance["scopes"]["ddt"]["hit_days"], 1)
         self.assertEqual(performance["scopes"]["cmr"]["hit_days"], 1)
         self.assertEqual(performance["scopes"]["relationship"]["hit_days"], 1)
+        self.assertEqual(performance["scopes"]["llm_gen"]["hit_days"], 1)
 
     def test_missing_and_unverified_days_are_coverage_not_misses(self):
         shadow_rows = [
@@ -576,7 +588,10 @@ class TestSevenDayPerformance(unittest.TestCase):
         self.assertIn(
             (
                 "in_",
-                ("model_name", ["cmr_shadow", "ddt_shadow", "relationship"]),
+                (
+                    "model_name",
+                    ["cmr_shadow", "ddt_shadow", "llm_gen", "relationship"],
+                ),
                 {},
             ),
             calls,
@@ -627,7 +642,14 @@ class TestBuildXML(unittest.TestCase):
         }
         self.assertEqual(
             set(scopes),
-            {"xsmb", "xsmn_consensus", "ddt", "cmr", "relationship"},
+            {
+                "xsmb",
+                "xsmn_consensus",
+                "ddt",
+                "cmr",
+                "relationship",
+                "llm_gen",
+            },
         )
         self.assertEqual(scopes["xsmb"].findtext("PeriodDays"), "7")
         self.assertEqual(scopes["xsmb"].findtext("PredictionDays"), "0")
@@ -671,6 +693,7 @@ class TestBuildTelegramMessage(unittest.TestCase):
         self.assertIn("DDT", msg)
         self.assertIn("CMR", msg)
         self.assertIn("Relationship", msg)
+        self.assertNotIn("LLM_Gen", msg)
         self.assertIn("TÀI CHÍNH", msg)
         self.assertIn("CRAWLER", msg)
         self.assertIn("RETRAIN AGENT", msg)
@@ -713,6 +736,39 @@ class TestBuildTelegramMessage(unittest.TestCase):
         self.assertIn("CMR: <b>0/7 ngày trúng</b> · chạy 0/7 · verify 0/7", msg)
         self.assertIn(
             "Relationship: <b>0/7 ngày trúng</b> · chạy 0/7 · verify 0/7",
+            msg,
+        )
+
+    def test_message_reports_llm_gen_coverage_when_it_has_predictions(self):
+        analysis = _analyze(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 7, 20),
+            date(2026, 7, 26),
+            [
+                {
+                    "prediction_date": "2026-07-20",
+                    "region": "XSMN",
+                    "province": "all",
+                    "model_name": "llm_gen",
+                    "status": "success",
+                    "pair_1": 11,
+                    "pair_2": 25,
+                    "pair_3": 3,
+                    "hit_count": 2,
+                    "combo_hit": True,
+                }
+            ],
+        )
+
+        msg = _build_telegram_message(analysis)
+
+        self.assertIn(
+            "LLM_Gen: <b>1/7 ngày trúng</b> · chạy 1/7 · verify 1/7",
             msg,
         )
 

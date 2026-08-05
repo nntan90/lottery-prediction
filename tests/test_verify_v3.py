@@ -239,12 +239,22 @@ def test_formatter_keeps_unverified_shadow_out_of_multi_denominator() -> None:
                 "combo_hit": False,
                 "verification_status": "verified",
             },
+            {
+                "model_name": "llm_gen",
+                "status": "success",
+                "pairs": [12, 25, 38],
+                "matched": [12, 25],
+                "hit_count": 2,
+                "combo_hit": True,
+                "verification_status": "verified",
+            },
         ],
     )
 
     assert "CMR: chờ kết quả xổ số" in message
     assert "DDT: chưa đủ dữ liệu · not enough folds" in message
     assert "Relationship: 11 | 25 | 03 → 11 (1/3 · chưa đạt shadow)" in message
+    assert "LLM_Gen: 12 | 25 | 38 → 12, 25 (2/3 · đạt shadow)" in message
     assert "Multi-Model đạt ≥2/3: 1/1 (100%)" in message
 
 
@@ -625,6 +635,22 @@ def test_shadow_waits_until_both_target_provinces_have_results() -> None:
     message = notifier.send_message.await_args.args[0]
     assert "DDT: chờ kết quả xổ số" in message
     assert "CMR: không có Top 3 hợp lệ" in message
+
+
+def test_enabled_llm_gen_is_reported_when_prediction_row_is_missing(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_GEN_MODE", "shadow")
+    store = {
+        "prediction_results": [],
+        "tails_2d": [],
+        "model_predictions": [],
+    }
+    db = SimpleNamespace(supabase=_FakeSupabase(store))
+    notifier = SimpleNamespace(send_message=AsyncMock(return_value=True))
+
+    asyncio.run(verify_date(db, notifier, date(2026, 8, 4)))
+
+    message = notifier.send_message.await_args.args[0]
+    assert "LLM_Gen: không có Top 3 hợp lệ" in message
 
 
 def test_insufficient_xsmb_shadow_is_not_mislabeled_pending_results() -> None:

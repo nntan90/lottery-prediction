@@ -26,6 +26,7 @@ MODEL_SHORT_NAMES = {
 SHADOW_LABELS = {
     "cmr_shadow": "CMR",
     "ddt_shadow": "DDT",
+    "llm_gen": "LLM_Gen",
     "relationship": "Relationship",
     "xsmb_combo_shadow": "XSMB Combo v6",
 }
@@ -33,7 +34,8 @@ SHADOW_ORDER = {
     "xsmb_combo_shadow": 0,
     "cmr_shadow": 1,
     "relationship": 2,
-    "ddt_shadow": 3,
+    "llm_gen": 3,
+    "ddt_shadow": 4,
 }
 
 REGION_ORDER = {"XSMB": 0, "XSMN": 1}

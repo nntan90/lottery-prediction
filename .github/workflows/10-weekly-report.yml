@@ -37,6 +37,7 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LLM_GEN_MODE: ${{ vars.LLM_GEN_MODE }}
           PYTHONPATH: .
         run: |
           if [ -n "${{ inputs.week_end }}" ]; then
