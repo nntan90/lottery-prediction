@@ -1,0 +1,43 @@
+name: 12 - LLM_Gen OpenAI Smoke Test
+
+# Manual diagnostic only. It does not read/write Supabase or send Telegram.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-gen-openai-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    name: Call OpenAI through LLM_Gen adapter
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install minimal dependency
+        run: pip install 'requests==2.32.5'
+
+      - name: Call OpenAI Responses API
+        env:
+          LLM_GEN_MODE: shadow
+          LLM_GEN_PROVIDER: openai
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONPATH: .
+        run: python src/scripts/smoke_test_llm_gen_openai.py
