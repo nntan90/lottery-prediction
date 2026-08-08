@@ -185,8 +185,25 @@ def _safe_reason(value: object) -> Optional[str]:
         secret = os.getenv(key, "")
         if secret:
             text = text.replace(secret, "[redacted]")
+    if (os.getenv("LLM_GEN_MODE", "off") or "off").strip().lower() == "shadow":
+        provider = (os.getenv("LLM_GEN_PROVIDER", "") or "").strip().lower()
+        key_name: Optional[str] = None
+        if provider == "openai":
+            backend = os.getenv("LLM_GEN_OPENAI_BACKEND", "official") or "official"
+            key_name = {
+                "official": "OPENAI_API_KEY",
+                "agentrouter": "AGENTROUTER_API_KEY",
+            }.get(backend)
+        elif provider == "anthropic":
+            key_name = "ANTHROPIC_API_KEY"
+        selected_secret = os.getenv(key_name, "") if key_name else ""
+        if selected_secret:
+            text = text.replace(selected_secret, "[redacted]")
     text = re.sub(
-        r"(?i)\b(OPENAI_API_KEY|ANTHROPIC_API_KEY)\s*[:=]\s*\S+",
+        (
+            r"(?i)\b(OPENAI_API_KEY|AGENTROUTER_API_KEY|ANTHROPIC_API_KEY)"
+            r"\s*[:=]\s*\S+"
+        ),
         r"\1=[redacted]",
         text,
     )
@@ -415,6 +432,8 @@ def _same_llm_gen_identity(existing: dict, incoming: dict) -> bool:
     identity_fields = (
         "provider",
         "provider_model",
+        "api_backend",
+        "wire_api",
         "prompt_version",
         "schema_version",
         "input_hash",

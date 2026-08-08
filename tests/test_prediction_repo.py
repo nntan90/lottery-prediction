@@ -541,6 +541,34 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", reads)
         self.assertNotIn("ANTHROPIC_API_KEY", reads)
 
+    def test_reason_sanitizer_reads_only_selected_agentrouter_key_value(self):
+        from src.database.prediction_repo import sanitize_prediction_reason
+
+        values = {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            "AGENTROUTER_API_KEY": "raw-router-secret",
+            "OPENAI_API_KEY": "unselected-official-secret",
+            "ANTHROPIC_API_KEY": "unselected-anthropic-secret",
+        }
+        reads = []
+
+        def tracked_getenv(key, default=""):
+            reads.append(key)
+            return values.get(key, default)
+
+        with patch("src.database.prediction_repo.os.getenv", side_effect=tracked_getenv):
+            reason = sanitize_prediction_reason(
+                "unexpected transport failure raw-router-secret"
+            )
+
+        self.assertNotIn("raw-router-secret", reason)
+        self.assertIn("[redacted]", reason)
+        self.assertIn("AGENTROUTER_API_KEY", reads)
+        self.assertNotIn("OPENAI_API_KEY", reads)
+        self.assertNotIn("ANTHROPIC_API_KEY", reads)
+
     def test_shadow_tracking_schema_preflight_detects_available_columns(self):
         from src.database.prediction_repo import shadow_tracking_schema_ready
 
@@ -720,6 +748,43 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
 
         self.assertFalse(save_shadow_prediction(db, incoming))
         self.assertNotIn("model_predictions", db.updated)
+
+    def test_llm_gen_identity_rejects_changed_backend_and_wire(self):
+        from src.database.prediction_repo import _same_llm_gen_identity
+
+        base = {
+            "model_version": "llm_gen_v1",
+            "run_metadata": {
+                "provider": "openai",
+                "provider_model": "gpt-5.6-sol",
+                "api_backend": "official",
+                "wire_api": "responses",
+                "prompt_version": "llm_gen_prompt_v1",
+                "schema_version": "llm_gen_response_v1",
+                "input_hash": "same-hash",
+                "config": {
+                    "provider": "openai",
+                    "provider_model": "gpt-5.6-sol",
+                    "api_backend": "official",
+                    "wire_api": "responses",
+                },
+            },
+        }
+        agentrouter = {
+            **base,
+            "run_metadata": {
+                **base["run_metadata"],
+                "api_backend": "agentrouter",
+                "wire_api": "chat_completions",
+                "config": {
+                    **base["run_metadata"]["config"],
+                    "api_backend": "agentrouter",
+                    "wire_api": "chat_completions",
+                },
+            },
+        }
+
+        self.assertFalse(_same_llm_gen_identity(base, agentrouter))
 
     def test_llm_gen_unique_insert_race_never_overwrites_first_success(self):
         from src.database.prediction_repo import save_shadow_prediction

@@ -11,6 +11,7 @@ from .providers import (
     OpenAIAdapter,
     ProviderError,
     create_provider_adapter,
+    ensure_agentrouter_model_available,
 )
 from .service import run_llm_gen, validate_ranked_candidates
 
@@ -23,6 +24,7 @@ __all__ = [
     "build_evidence_packet",
     "compute_input_hash",
     "create_provider_adapter",
+    "ensure_agentrouter_model_available",
     "load_llm_gen_config",
     "run_llm_gen",
     "validate_ranked_candidates",

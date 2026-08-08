@@ -42,8 +42,17 @@ jobs:
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           LLM_GEN_MODE:        ${{ vars.LLM_GEN_MODE }}
           LLM_GEN_PROVIDER:    ${{ vars.LLM_GEN_PROVIDER }}
-          OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          LLM_GEN_OPENAI_BACKEND: ${{ vars.LLM_GEN_OPENAI_BACKEND }}
+          OPENAI_API_KEY: >-
+            ${{ vars.LLM_GEN_MODE == 'shadow' && vars.LLM_GEN_PROVIDER == 'openai' &&
+                (vars.LLM_GEN_OPENAI_BACKEND == '' || vars.LLM_GEN_OPENAI_BACKEND == 'official') &&
+                secrets.OPENAI_API_KEY || '' }}
+          AGENTROUTER_API_KEY: >-
+            ${{ vars.LLM_GEN_MODE == 'shadow' && vars.LLM_GEN_PROVIDER == 'openai' &&
+                vars.LLM_GEN_OPENAI_BACKEND == 'agentrouter' && secrets.AGENTROUTER_API_KEY || '' }}
+          ANTHROPIC_API_KEY: >-
+            ${{ vars.LLM_GEN_MODE == 'shadow' && vars.LLM_GEN_PROVIDER == 'anthropic' &&
+                secrets.ANTHROPIC_API_KEY || '' }}
           PYTHONPATH: .
           XSMB_COMBO_SELECTOR_MODE: shadow
           # TARGET_PROVINCES: Auto-resolved by resolve_provinces.py based on DOW

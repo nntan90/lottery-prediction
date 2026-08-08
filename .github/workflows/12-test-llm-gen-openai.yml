@@ -1,4 +1,4 @@
-name: 12 - LLM_Gen OpenAI Smoke Test
+name: 12 - LLM_Gen AgentRouter Smoke Test
 
 # Manual diagnostic only. It does not read/write Supabase or send Telegram.
 on:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   smoke-test:
-    name: Call OpenAI through LLM_Gen adapter
+    name: Check model and call AgentRouter through LLM_Gen
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -34,10 +34,11 @@ jobs:
       - name: Install minimal dependency
         run: pip install 'requests==2.32.5'
 
-      - name: Call OpenAI Responses API
+      - name: Check AgentRouter model and call Chat Completions
         env:
           LLM_GEN_MODE: shadow
           LLM_GEN_PROVIDER: openai
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_GEN_OPENAI_BACKEND: agentrouter
+          AGENTROUTER_API_KEY: ${{ secrets.AGENTROUTER_API_KEY }}
           PYTHONPATH: .
         run: python src/scripts/smoke_test_llm_gen_openai.py

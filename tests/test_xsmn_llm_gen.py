@@ -18,6 +18,7 @@ from src.xsmn_llm_gen import (
     build_evidence_packet,
     compute_input_hash,
     create_provider_adapter,
+    ensure_agentrouter_model_available,
     load_llm_gen_config,
     run_llm_gen,
     validate_ranked_candidates,
@@ -103,13 +104,14 @@ def _provider_payload() -> dict:
     }
 
 
-def _config(provider: str) -> LLMGenConfig:
+def _config(provider: str, *, backend: str = "official") -> LLMGenConfig:
     model = "gpt-5.6-sol" if provider == "openai" else "claude-opus-4-8"
     return LLMGenConfig(
         mode="shadow",
         provider=provider,
         provider_model=model,
-        api_key=f"{provider}-secret",
+        api_backend=backend if provider == "openai" else None,
+        api_key=f"{provider}-{backend}-secret",
     )
 
 
@@ -139,16 +141,26 @@ def test_empty_workflow_mode_defaults_to_off() -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider", "key_name", "unselected_key", "model"),
+    ("provider", "key_name", "unselected_keys", "model"),
     [
-        ("openai", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "gpt-5.6-sol"),
-        ("anthropic", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "claude-opus-4-8"),
+        (
+            "openai",
+            "OPENAI_API_KEY",
+            ("AGENTROUTER_API_KEY", "ANTHROPIC_API_KEY"),
+            "gpt-5.6-sol",
+        ),
+        (
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            ("OPENAI_API_KEY", "AGENTROUTER_API_KEY"),
+            "claude-opus-4-8",
+        ),
     ],
 )
 def test_config_reads_only_selected_provider_key(
     provider: str,
     key_name: str,
-    unselected_key: str,
+    unselected_keys: tuple[str, ...],
     model: str,
 ) -> None:
     env = TrackingEnv(
@@ -156,6 +168,7 @@ def test_config_reads_only_selected_provider_key(
             "LLM_GEN_MODE": "shadow",
             "LLM_GEN_PROVIDER": provider,
             "OPENAI_API_KEY": "openai-secret",
+            "AGENTROUTER_API_KEY": "agentrouter-secret",
             "ANTHROPIC_API_KEY": "anthropic-secret",
         }
     )
@@ -164,17 +177,91 @@ def test_config_reads_only_selected_provider_key(
 
     assert config.provider_model == model
     assert key_name in env.reads
-    assert unselected_key not in env.reads
+    assert all(key not in env.reads for key in unselected_keys)
     assert "secret" not in repr(config)
     assert "api_key" not in config.public_metadata()
+
+
+def test_agentrouter_config_reads_only_its_key_and_audits_wire_identity() -> None:
+    env = TrackingEnv(
+        {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            "OPENAI_API_KEY": "official-secret",
+            "AGENTROUTER_API_KEY": "router-secret",
+            "ANTHROPIC_API_KEY": "anthropic-secret",
+        }
+    )
+
+    config = load_llm_gen_config(env)
+
+    assert config.provider == "openai"
+    assert config.provider_model == "gpt-5.6-sol"
+    assert config.api_backend == "agentrouter"
+    assert config.wire_api == "chat_completions"
+    assert "AGENTROUTER_API_KEY" in env.reads
+    assert "OPENAI_API_KEY" not in env.reads
+    assert "ANTHROPIC_API_KEY" not in env.reads
+    assert config.public_metadata()["api_backend"] == "agentrouter"
+    assert config.public_metadata()["wire_api"] == "chat_completions"
+    assert "router-secret" not in repr(config.public_metadata())
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ("https://untrusted.example/v1", "AgentRouter", " agentrouter "),
+)
+def test_invalid_openai_backend_fails_before_reading_any_key(
+    backend: str,
+) -> None:
+    env = TrackingEnv(
+        {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": backend,
+            "OPENAI_API_KEY": "official-secret",
+            "AGENTROUTER_API_KEY": "router-secret",
+        }
+    )
+
+    with pytest.raises(LLMGenConfigError, match="invalid_openai_backend"):
+        load_llm_gen_config(env)
+
+    assert "OPENAI_API_KEY" not in env.reads
+    assert "AGENTROUTER_API_KEY" not in env.reads
 
 
 @pytest.mark.parametrize(
     "values,reason",
     [
         ({"LLM_GEN_MODE": "invalid"}, "invalid_mode"),
+        (
+            {
+                "LLM_GEN_MODE": " Shadow ",
+                "LLM_GEN_PROVIDER": "openai",
+                "OPENAI_API_KEY": "secret",
+            },
+            "invalid_mode",
+        ),
         ({"LLM_GEN_MODE": "shadow", "LLM_GEN_PROVIDER": "other"}, "invalid_provider"),
+        (
+            {
+                "LLM_GEN_MODE": "shadow",
+                "LLM_GEN_PROVIDER": "OpenAI",
+                "OPENAI_API_KEY": "secret",
+            },
+            "invalid_provider",
+        ),
         ({"LLM_GEN_MODE": "shadow", "LLM_GEN_PROVIDER": "openai"}, "missing_api_key"),
+        (
+            {
+                "LLM_GEN_MODE": "shadow",
+                "LLM_GEN_PROVIDER": "openai",
+                "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            },
+            "missing_api_key",
+        ),
     ],
 )
 def test_invalid_config_fails_closed(values: dict, reason: str) -> None:
@@ -305,10 +392,231 @@ def test_openai_adapter_calls_only_responses_endpoint_and_fixed_model() -> None:
     assert calls[0][1]["json"]["model"] == "gpt-5.6-sol"
     assert calls[0][1]["json"]["max_output_tokens"] == 2000
     assert calls[0][1]["json"]["store"] is False
+    assert calls[0][1]["allow_redirects"] is False
     assert "Authorization" in calls[0][1]["headers"]
     assert "x-api-key" not in calls[0][1]["headers"]
     assert result.payload == _provider_payload()
     assert result.usage["input_tokens"] == 100
+
+
+def test_agentrouter_adapter_uses_exact_chat_wire_and_normalizes_usage() -> None:
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(_provider_payload()),
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 101,
+                    "completion_tokens": 21,
+                    "total_tokens": 122,
+                },
+            },
+        )
+
+    result = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=transport,
+    ).rank({"candidate_pool": []})
+
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == "https://co.agentrouter.org/v1/chat/completions"
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["headers"]["Authorization"] == (
+        "Bearer openai-agentrouter-secret"
+    )
+    payload = kwargs["json"]
+    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][1]["role"] == "user"
+    assert payload["max_tokens"] == 2000
+    assert payload["n"] == 1
+    assert payload["response_format"]["type"] == "json_schema"
+    assert "input" not in payload
+    assert "text" not in payload
+    assert result.payload == _provider_payload()
+    assert result.usage == {
+        "input_tokens": 101,
+        "output_tokens": 21,
+        "total_tokens": 122,
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ({}, "agentrouter_invalid_choice_count"),
+        ({"choices": []}, "agentrouter_invalid_choice_count"),
+        (
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{}"}},
+                    {"finish_reason": "stop", "message": {"content": "{}"}},
+                ]
+            },
+            "agentrouter_invalid_choice_count",
+        ),
+        (
+            {"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]},
+            "agentrouter_truncated",
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "content_filter",
+                        "message": {"content": "{}"},
+                    }
+                ]
+            },
+            "agentrouter_refusal",
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "", "refusal": "blocked"},
+                    }
+                ]
+            },
+            "agentrouter_refusal",
+        ),
+        (
+            {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+            "agentrouter_empty_content",
+        ),
+        (
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "not-json"}}
+                ]
+            },
+            "invalid_provider_json",
+        ),
+    ],
+)
+def test_agentrouter_chat_response_fails_closed(body: dict, reason: str) -> None:
+    adapter = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=lambda *_a, **_k: FakeResponse(200, body),
+    )
+
+    with pytest.raises(ProviderError, match=reason):
+        adapter.rank({})
+
+
+@pytest.mark.parametrize("status", [301, 401, 403])
+def test_agentrouter_never_follows_redirect_or_retries_permanent_errors(
+    status: int,
+) -> None:
+    calls = []
+
+    def transport(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(status, {})
+
+    adapter = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=transport,
+    )
+    expected = f"agentrouter_http_{status}"
+    with pytest.raises(ProviderError, match=expected):
+        adapter.rank({})
+
+    assert len(calls) == 1
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_adapter_rejects_unmapped_endpoint_before_sending_credential() -> None:
+    calls = []
+    adapter = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ProviderError, match="endpoint_not_allowed"):
+        adapter._post(
+            endpoint="https://untrusted.example/v1/chat/completions",
+            headers={"Authorization": "Bearer openai-agentrouter-secret"},
+            payload={},
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (404, {}, "agentrouter_http_404"),
+        (
+            404,
+            {"error": {"type": "model_not_found"}},
+            "agentrouter_model_unavailable",
+        ),
+        (
+            400,
+            {"error": {"code": "model_not_available"}},
+            "agentrouter_model_unavailable",
+        ),
+    ],
+)
+def test_agentrouter_model_errors_require_explicit_error_code(
+    status: int,
+    body: dict,
+    reason: str,
+) -> None:
+    adapter = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=lambda *_a, **_k: FakeResponse(status, body),
+    )
+
+    with pytest.raises(ProviderError, match=reason):
+        adapter.rank({})
+
+
+def test_agentrouter_retries_429_once_on_same_endpoint() -> None:
+    responses = [
+        FakeResponse(429, {}),
+        FakeResponse(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": json.dumps(_provider_payload())},
+                    }
+                ]
+            },
+        ),
+    ]
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    result = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=transport,
+    ).rank({})
+
+    assert result.payload == _provider_payload()
+    assert [call[0] for call in calls] == [
+        "https://co.agentrouter.org/v1/chat/completions",
+        "https://co.agentrouter.org/v1/chat/completions",
+    ]
 
 
 def test_anthropic_adapter_calls_only_messages_endpoint_and_fixed_model() -> None:
@@ -397,6 +705,63 @@ def test_timeout_retries_same_provider_once_without_fallback() -> None:
     ]
 
 
+def test_agentrouter_model_preflight_uses_exact_endpoint_without_exposing_list() -> None:
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(
+            200,
+            {"data": [{"id": "other-model"}, {"id": "gpt-5.6-sol"}]},
+        )
+
+    result = ensure_agentrouter_model_available(
+        _config("openai", backend="agentrouter"),
+        transport=transport,
+    )
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0][0] == "https://co.agentrouter.org/v1/models"
+    assert calls[0][1]["allow_redirects"] is False
+    assert calls[0][1]["headers"]["Authorization"] == (
+        "Bearer openai-agentrouter-secret"
+    )
+
+
+def test_agentrouter_model_preflight_fails_closed_when_model_is_missing() -> None:
+    with pytest.raises(ProviderError, match="agentrouter_model_unavailable"):
+        ensure_agentrouter_model_available(
+            _config("openai", backend="agentrouter"),
+            transport=lambda *_a, **_k: FakeResponse(
+                200,
+                {"data": [{"id": "another-model"}]},
+            ),
+        )
+
+
+def test_agentrouter_model_preflight_retries_only_transient_failure() -> None:
+    responses = [
+        FakeResponse(500, {}),
+        FakeResponse(200, {"data": [{"id": "gpt-5.6-sol"}]}),
+    ]
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    ensure_agentrouter_model_available(
+        _config("openai", backend="agentrouter"),
+        transport=transport,
+    )
+
+    assert [call[0] for call in calls] == [
+        "https://co.agentrouter.org/v1/models",
+        "https://co.agentrouter.org/v1/models",
+    ]
+
+
 def test_service_reuses_same_hash_before_provider_call() -> None:
     config = _config("openai")
     packet = build_evidence_packet(_model_results(), ["a", "b"], date(2026, 8, 4))
@@ -413,6 +778,8 @@ def test_service_reuses_same_hash_before_provider_call() -> None:
         "run_metadata": {
             "provider": "openai",
             "provider_model": "gpt-5.6-sol",
+            "api_backend": "official",
+            "wire_api": "responses",
             "prompt_version": config.prompt_version,
             "schema_version": config.schema_version,
             "model_version": config.model_version,
@@ -437,6 +804,50 @@ def test_service_reuses_same_hash_before_provider_call() -> None:
     assert result["status"] == "success"
     assert result["run_metadata"]["reused"] is True
     assert result["top_3"] == ["11", "25", "38"]
+
+
+def test_service_never_reuses_same_input_across_openai_backends() -> None:
+    official = _config("openai")
+    agentrouter = _config("openai", backend="agentrouter")
+    packet = build_evidence_packet(_model_results(), ["a", "b"], date(2026, 8, 4))
+    existing = {
+        "status": "success",
+        "model_version": official.model_version,
+        "pair_1": 11,
+        "pair_2": 25,
+        "pair_3": 38,
+        "score_1": 0.91,
+        "score_2": 0.82,
+        "score_3": 0.73,
+        "run_metadata": {
+            "provider": "openai",
+            "provider_model": "gpt-5.6-sol",
+            "api_backend": "official",
+            "wire_api": "responses",
+            "prompt_version": official.prompt_version,
+            "schema_version": official.schema_version,
+            "model_version": official.model_version,
+            "input_hash": compute_input_hash(packet),
+            "provinces": ["a", "b"],
+            "config": official.public_metadata(),
+        },
+    }
+
+    result = run_llm_gen(
+        agentrouter,
+        _model_results(),
+        ["a", "b"],
+        date(2026, 8, 4),
+        lookup_success=lambda *_args: existing,
+        transport=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("provider must not run on canonical conflict")
+        ),
+    )
+
+    assert result["status"] == "canonical_conflict"
+    assert result["reason"] == "canonical_conflict"
+    assert result["run_metadata"]["api_backend"] == "agentrouter"
+    assert result["run_metadata"]["wire_api"] == "chat_completions"
 
 
 def test_existing_success_conflicts_before_insufficient_rerun_checks() -> None:
@@ -539,6 +950,8 @@ def test_service_calls_one_selected_provider_and_returns_auditable_top_three() -
     assert result["score_semantics"] == "ranking_score_uncalibrated"
     assert result["run_metadata"]["provider"] == "openai"
     assert result["run_metadata"]["provider_model"] == "gpt-5.6-sol"
+    assert result["run_metadata"]["api_backend"] == "official"
+    assert result["run_metadata"]["wire_api"] == "responses"
     assert result["run_metadata"]["input_hash"]
     assert result["run_metadata"]["usage"]["input_tokens"] == 100
     assert calls == ["https://api.openai.com/v1/responses"]
@@ -629,6 +1042,8 @@ def test_orchestration_config_error_persists_complete_non_secret_audit(monkeypat
     assert metadata["input_hash"]
     assert metadata["usage"] == {}
     assert metadata["latency_ms"] == 0
+    assert metadata["api_backend"] == "official"
+    assert metadata["wire_api"] == "responses"
     assert "api_key" not in str(metadata).lower()
 
 
@@ -710,6 +1125,39 @@ def test_prediction_shadow_row_displays_selected_provider() -> None:
     assert row.status == "điểm xếp hạng chưa calibration"
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("agentrouter_http_401", "AgentRouter từ chối API key (401)"),
+        ("agentrouter_http_403", "AgentRouter không cấp quyền model (403)"),
+        ("agentrouter_model_unavailable", "AgentRouter chưa cấp GPT-5.6 Sol"),
+        ("agentrouter_timeout", "AgentRouter hết thời gian chờ"),
+    ],
+)
+def test_prediction_shadow_row_shows_safe_agentrouter_reason(
+    reason: str,
+    expected: str,
+) -> None:
+    from src.scripts.predict_ensemble import _llm_gen_shadow_row
+
+    row = _llm_gen_shadow_row(
+        {
+            "status": "error",
+            "reason": reason,
+            "run_metadata": {
+                "provider": "openai",
+                "provider_model": "gpt-5.6-sol",
+                "api_backend": "agentrouter",
+                "wire_api": "chat_completions",
+            },
+        }
+    )
+
+    assert row.label == "LLM_Gen [AgentRouter · GPT-5.6 Sol]"
+    assert row.status == expected
+    assert "secret" not in row.status.lower()
+
+
 def test_workflows_propagate_mode_and_serialize_prediction_runs() -> None:
     from pathlib import Path
 
@@ -719,5 +1167,8 @@ def test_workflows_propagate_mode_and_serialize_prediction_runs() -> None:
     weekly = (root / ".github/workflows/10-weekly-report.yml").read_text()
 
     assert "cancel-in-progress: false" in predict
+    assert "LLM_GEN_OPENAI_BACKEND: ${{ vars.LLM_GEN_OPENAI_BACKEND }}" in predict
+    assert "secrets.AGENTROUTER_API_KEY" in predict
+    assert "vars.LLM_GEN_OPENAI_BACKEND == 'agentrouter'" in predict
     assert "LLM_GEN_MODE: ${{ vars.LLM_GEN_MODE }}" in verify
     assert "LLM_GEN_MODE: ${{ vars.LLM_GEN_MODE }}" in weekly

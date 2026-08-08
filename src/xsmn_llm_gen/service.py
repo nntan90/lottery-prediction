@@ -181,6 +181,8 @@ def _base_result(
         "run_metadata": {
             "provider": config.provider,
             "provider_model": config.provider_model,
+            "api_backend": config.api_backend,
+            "wire_api": config.wire_api,
             "prompt_version": config.prompt_version,
             "schema_version": config.schema_version,
             "model_version": config.model_version,
@@ -212,6 +214,8 @@ def _reuse_or_conflict(
     identity_fields = (
         "provider",
         "provider_model",
+        "api_backend",
+        "wire_api",
         "prompt_version",
         "schema_version",
         "input_hash",

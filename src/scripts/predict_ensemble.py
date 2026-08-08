@@ -56,6 +56,7 @@ from src.xsmn_llm_gen import (
     load_llm_gen_config,
     run_llm_gen,
 )
+from src.xsmn_llm_gen.config import OPENAI_BACKEND_WIRE_APIS, PROVIDER_MODELS
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -301,6 +302,29 @@ def _relationship_shadow_row(result: Optional[dict]) -> ShadowRow:
     return ShadowRow(label="Relationship shadow", status=text)
 
 
+def _llm_gen_public_env_identity() -> dict[str, Optional[str]]:
+    """Return allowlisted LLM identity fields without reading any credential."""
+    provider = (os.getenv("LLM_GEN_PROVIDER", "") or "").strip().lower()
+    api_backend: Optional[str]
+    wire_api: Optional[str]
+    if provider == "openai":
+        candidate = os.getenv("LLM_GEN_OPENAI_BACKEND", "official") or "official"
+        api_backend = candidate if candidate in OPENAI_BACKEND_WIRE_APIS else None
+        wire_api = OPENAI_BACKEND_WIRE_APIS.get(candidate)
+    elif provider == "anthropic":
+        api_backend = "anthropic"
+        wire_api = "messages"
+    else:
+        api_backend = None
+        wire_api = None
+    return {
+        "provider": provider or None,
+        "provider_model": PROVIDER_MODELS.get(provider),
+        "api_backend": api_backend,
+        "wire_api": wire_api,
+    }
+
+
 def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
     """Render one provider-labelled LLM_Gen row without changing production."""
     if result is None:
@@ -310,13 +334,18 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
     provider_model = str(
         metadata.get("provider_model") or result.get("provider_model") or ""
     )
+    api_backend = str(metadata.get("api_backend") or "")
     provider_labels = {
         "gpt-5.6-sol": "GPT-5.6 Sol",
         "claude-opus-4-8": "Claude Opus 4.8",
     }
     label = "LLM_Gen"
     if provider_model:
-        label += f" [{provider_labels.get(provider_model, provider_model)}]"
+        model_label = provider_labels.get(provider_model, provider_model)
+        if api_backend == "agentrouter":
+            label += f" [AgentRouter · {model_label}]"
+        else:
+            label += f" [{model_label}]"
 
     if str(result.get("status") or "") == "success":
         top_pairs = []
@@ -340,9 +369,30 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
         "insufficient_candidate_diversity": "Chưa đủ đa dạng hàng đơn vị",
         "insufficient_candidates": "Chưa đủ candidate hợp lệ",
         "missing_api_key": "Thiếu API key của provider đã chọn",
+        "invalid_openai_backend": "Backend OpenAI không hợp lệ",
         "schema_not_ready": "Database audit chưa sẵn sàng",
+        "agentrouter_http_401": "AgentRouter từ chối API key (401)",
+        "agentrouter_http_403": "AgentRouter không cấp quyền model (403)",
+        "agentrouter_http_429": "AgentRouter đang giới hạn tần suất (429)",
+        "agentrouter_model_unavailable": "AgentRouter chưa cấp GPT-5.6 Sol",
+        "agentrouter_timeout": "AgentRouter hết thời gian chờ",
+        "agentrouter_request_failed": "Không kết nối được AgentRouter",
+        "agentrouter_invalid_choice_count": "AgentRouter trả số choice không hợp lệ",
+        "agentrouter_invalid_choice": "AgentRouter trả choice không hợp lệ",
+        "agentrouter_empty_content": "AgentRouter trả nội dung rỗng",
+        "agentrouter_refusal": "AgentRouter từ chối tạo kết quả",
+        "agentrouter_truncated": "AgentRouter cắt ngắn kết quả",
+        "agentrouter_invalid_finish_reason": "AgentRouter chưa hoàn tất kết quả",
+        "agentrouter_invalid_models_response": "Không đọc được danh sách model AgentRouter",
+        "invalid_provider_json": "Provider trả JSON không hợp lệ",
+        "invalid_provider_schema": "Provider trả schema không hợp lệ",
+        "endpoint_not_allowed": "Endpoint provider không nằm trong allowlist",
     }
-    status = status_map.get(reason, "Tạm không khả dụng")
+    status = status_map.get(reason)
+    if status is None and reason.startswith("agentrouter_http_"):
+        http_status = reason.removeprefix("agentrouter_http_")
+        status = f"AgentRouter trả lỗi HTTP {http_status}"
+    status = status or "Tạm không khả dụng"
     return ShadowRow(label=label, status=status)
 
 
@@ -366,6 +416,7 @@ def _run_llm_gen_shadow_safely(
     raw_mode = (os.getenv("LLM_GEN_MODE", "off") or "off").strip().lower()
     if raw_mode == "off":
         return None
+    public_identity = _llm_gen_public_env_identity()
 
     try:
         if not shadow_tracking_schema_ready(db):
@@ -377,7 +428,7 @@ def _run_llm_gen_shadow_safely(
                 "score_semantics": "ranking_score_uncalibrated",
                 "data_cutoff": target_date.isoformat(),
                 "run_metadata": {
-                    "provider": os.getenv("LLM_GEN_PROVIDER", "").strip().lower(),
+                    **public_identity,
                     "data_cutoff": target_date.isoformat(),
                     "provinces": list(provinces),
                 },
@@ -393,6 +444,7 @@ def _run_llm_gen_shadow_safely(
             "score_semantics": "ranking_score_uncalibrated",
             "data_cutoff": target_date.isoformat(),
             "run_metadata": {
+                **public_identity,
                 "data_cutoff": target_date.isoformat(),
                 "provinces": list(provinces),
             },
@@ -401,11 +453,6 @@ def _run_llm_gen_shadow_safely(
     try:
         config = load_llm_gen_config()
     except LLMGenConfigError as exc:
-        raw_provider = os.getenv("LLM_GEN_PROVIDER", "").strip().lower()
-        model_by_provider = {
-            "openai": "gpt-5.6-sol",
-            "anthropic": "claude-opus-4-8",
-        }
         try:
             packet = build_evidence_packet(
                 model_results,
@@ -429,8 +476,7 @@ def _run_llm_gen_shadow_safely(
             "data_cutoff": target_date.isoformat(),
             "selected_evidence": [],
             "run_metadata": {
-                "provider": raw_provider,
-                "provider_model": model_by_provider.get(raw_provider),
+                **public_identity,
                 "prompt_version": "llm_gen_prompt_v1",
                 "schema_version": "llm_gen_response_v1",
                 "model_version": "llm_gen_v1",
@@ -441,8 +487,7 @@ def _run_llm_gen_shadow_safely(
                 "latency_ms": 0,
                 "config": {
                     "mode": raw_mode,
-                    "provider": raw_provider,
-                    "provider_model": model_by_provider.get(raw_provider),
+                    **public_identity,
                 },
             },
         }
@@ -539,6 +584,8 @@ def _run_llm_gen_shadow_safely(
             "run_metadata": {
                 "provider": config.provider,
                 "provider_model": config.provider_model,
+                "api_backend": config.api_backend,
+                "wire_api": config.wire_api,
                 "prompt_version": config.prompt_version,
                 "schema_version": config.schema_version,
                 "data_cutoff": target_date.isoformat(),

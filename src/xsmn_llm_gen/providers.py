@@ -13,6 +13,10 @@ from .config import LLMGenConfig
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+AGENTROUTER_CHAT_COMPLETIONS_URL = (
+    "https://co.agentrouter.org/v1/chat/completions"
+)
+AGENTROUTER_MODELS_URL = "https://co.agentrouter.org/v1/models"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
 SYSTEM_PROMPT = """You rank only the supplied XSMN candidate pool.
@@ -84,6 +88,7 @@ class ProviderResult:
 
 
 Transport = Callable[..., Any]
+ModelTransport = Callable[..., Any]
 
 
 def _parse_json_object(text: object) -> dict[str, object]:
@@ -113,6 +118,49 @@ def _usage(body: Mapping[str, object]) -> dict[str, int]:
         if number >= 0:
             result[str(key)] = number
     return result
+
+
+def _chat_usage(body: Mapping[str, object]) -> dict[str, int]:
+    """Normalize Chat Completions token names to the existing audit contract."""
+    raw = body.get("usage")
+    if not isinstance(raw, Mapping):
+        return {}
+    aliases = {
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "total_tokens": "total_tokens",
+    }
+    result: dict[str, int] = {}
+    for source, target in aliases.items():
+        value = raw.get(source)
+        if isinstance(value, bool):
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0:
+            result[target] = number
+    return result
+
+
+def _agentrouter_http_reason(status: int, response: object) -> str:
+    """Map only known AgentRouter error signals without exposing its body."""
+    if status in {401, 403}:
+        return f"agentrouter_http_{status}"
+    try:
+        body = response.json()  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        body = None
+    error = body.get("error") if isinstance(body, Mapping) else None
+    error_code = (
+        str(error.get("code") or error.get("type") or "").strip().lower()
+        if isinstance(error, Mapping)
+        else ""
+    )
+    if error_code in {"invalid_model", "model_not_available", "model_not_found"}:
+        return "agentrouter_model_unavailable"
+    return f"agentrouter_http_{status or 'invalid'}"
 
 
 def _validate_provider_payload(payload: Mapping[str, object]) -> dict[str, object]:
@@ -175,30 +223,66 @@ class _BaseAdapter:
         self.config = config
         self._transport = transport or requests.post
 
-    def _post(self, *, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+    @property
+    def error_namespace(self) -> str:
+        """Return the stable public namespace for transport failures."""
+        if self.provider == "openai" and self.config.api_backend == "agentrouter":
+            return "agentrouter"
+        return self.provider
+
+    @property
+    def allowed_endpoints(self) -> frozenset[str]:
+        """Return the fixed destination set for the selected credential."""
+        if self.provider == "openai":
+            endpoint = {
+                "official": OPENAI_RESPONSES_URL,
+                "agentrouter": AGENTROUTER_CHAT_COMPLETIONS_URL,
+            }.get(self.config.api_backend)
+            return frozenset({endpoint}) if endpoint else frozenset()
+        if self.provider == "anthropic":
+            return frozenset({ANTHROPIC_MESSAGES_URL})
+        return frozenset()
+
+    def _post(
+        self,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        endpoint: Optional[str] = None,
+    ) -> Mapping[str, object]:
+        url = endpoint or self.endpoint
+        if url not in self.allowed_endpoints:
+            raise ProviderError("endpoint_not_allowed")
+        namespace = self.error_namespace
         attempts = self.config.max_retries + 1
         for attempt in range(attempts):
             try:
                 response = self._transport(
-                    self.endpoint,
+                    url,
                     headers=headers,
                     json=payload,
                     timeout=self.config.timeout_seconds,
+                    allow_redirects=False,
                 )
             except requests.Timeout as exc:
                 if attempt + 1 < attempts:
                     continue
-                raise ProviderError(f"{self.provider}_timeout") from exc
+                raise ProviderError(f"{namespace}_timeout") from exc
             except requests.RequestException as exc:
-                raise ProviderError(f"{self.provider}_request_failed") from exc
+                raise ProviderError(f"{namespace}_request_failed") from exc
 
             status = int(getattr(response, "status_code", 0) or 0)
             if status == 429 or 500 <= status <= 599:
                 if attempt + 1 < attempts:
                     continue
-                raise ProviderError(f"{self.provider}_http_{status}")
+                raise ProviderError(f"{namespace}_http_{status}")
             if not 200 <= status <= 299:
-                raise ProviderError(f"{self.provider}_http_{status or 'invalid'}")
+                reason = (
+                    _agentrouter_http_reason(status, response)
+                    if namespace == "agentrouter"
+                    else f"{namespace}_http_{status or 'invalid'}"
+                )
+                raise ProviderError(reason)
             try:
                 body = response.json()
             except (TypeError, ValueError) as exc:
@@ -206,19 +290,25 @@ class _BaseAdapter:
             if not isinstance(body, Mapping):
                 raise ProviderError("invalid_provider_schema")
             return body
-        raise ProviderError(f"{self.provider}_request_failed")
+        raise ProviderError(f"{namespace}_request_failed")
 
     def rank(self, packet: Mapping[str, object]) -> ProviderResult:
         raise NotImplementedError
 
 
 class OpenAIAdapter(_BaseAdapter):
-    """OpenAI Responses API adapter fixed to ``gpt-5.6-sol``."""
+    """Fixed-model adapter for official and AgentRouter OpenAI wires."""
 
     provider = "openai"
     endpoint = OPENAI_RESPONSES_URL
 
     def rank(self, packet: Mapping[str, object]) -> ProviderResult:
+        if self.config.api_backend == "agentrouter":
+            return self._rank_agentrouter(packet)
+        return self._rank_official(packet)
+
+    def _rank_official(self, packet: Mapping[str, object]) -> ProviderResult:
+        """Preserve the official OpenAI Responses request and parser."""
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -272,6 +362,132 @@ class OpenAIAdapter(_BaseAdapter):
             parsed = _parse_json_object(output_text)
         parsed = _validate_provider_payload(parsed)
         return ProviderResult(payload=parsed, usage=_usage(body))
+
+    def _rank_agentrouter(self, packet: Mapping[str, object]) -> ProviderResult:
+        """Call AgentRouter with the exact Chat Completions wire contract."""
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.config.provider_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        packet,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                },
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "llm_gen_response",
+                    "strict": True,
+                    "schema": RESPONSE_SCHEMA,
+                },
+            },
+            "max_tokens": self.config.max_output_tokens,
+            "n": 1,
+            "temperature": 0,
+        }
+        body = self._post(
+            endpoint=AGENTROUTER_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            payload=payload,
+        )
+        choices = body.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ProviderError("agentrouter_invalid_choice_count")
+        choice = choices[0]
+        if not isinstance(choice, Mapping):
+            raise ProviderError("agentrouter_invalid_choice")
+        finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+        if finish_reason == "length":
+            raise ProviderError("agentrouter_truncated")
+        if finish_reason in {"content_filter", "safety", "blocked"}:
+            raise ProviderError("agentrouter_refusal")
+        if finish_reason != "stop":
+            raise ProviderError("agentrouter_invalid_finish_reason")
+        message = choice.get("message")
+        if not isinstance(message, Mapping):
+            raise ProviderError("agentrouter_invalid_choice")
+        if message.get("refusal"):
+            raise ProviderError("agentrouter_refusal")
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError("agentrouter_empty_content")
+        parsed = _validate_provider_payload(_parse_json_object(content))
+        return ProviderResult(payload=parsed, usage=_chat_usage(body))
+
+
+def ensure_agentrouter_model_available(
+    config: LLMGenConfig,
+    *,
+    transport: Optional[ModelTransport] = None,
+) -> None:
+    """Fail closed unless the selected AgentRouter key exposes the fixed model.
+
+    The model list is inspected in memory only. It is never returned, logged, or
+    persisted, and redirects are disabled so the bearer credential cannot leave
+    the fixed AgentRouter origin.
+    """
+    if (
+        config.mode != "shadow"
+        or config.provider != "openai"
+        or config.api_backend != "agentrouter"
+        or config.wire_api != "chat_completions"
+    ):
+        raise ProviderError("agentrouter_preflight_config_mismatch")
+
+    request = transport or requests.get
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Accept": "application/json",
+    }
+    attempts = config.max_retries + 1
+    for attempt in range(attempts):
+        try:
+            response = request(
+                AGENTROUTER_MODELS_URL,
+                headers=headers,
+                timeout=config.timeout_seconds,
+                allow_redirects=False,
+            )
+        except requests.Timeout as exc:
+            if attempt + 1 < attempts:
+                continue
+            raise ProviderError("agentrouter_timeout") from exc
+        except requests.RequestException as exc:
+            raise ProviderError("agentrouter_request_failed") from exc
+
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status == 429 or 500 <= status <= 599:
+            if attempt + 1 < attempts:
+                continue
+            raise ProviderError(f"agentrouter_http_{status}")
+        if not 200 <= status <= 299:
+            raise ProviderError(_agentrouter_http_reason(status, response))
+        try:
+            body = response.json()
+        except (TypeError, ValueError) as exc:
+            raise ProviderError("agentrouter_invalid_models_response") from exc
+        data = body.get("data") if isinstance(body, Mapping) else None
+        if not isinstance(data, list):
+            raise ProviderError("agentrouter_invalid_models_response")
+        available = {
+            str(item.get("id") or "")
+            for item in data
+            if isinstance(item, Mapping) and item.get("id") is not None
+        }
+        if config.provider_model not in available:
+            raise ProviderError("agentrouter_model_unavailable")
+        return
+    raise ProviderError("agentrouter_request_failed")
 
 
 class AnthropicAdapter(_BaseAdapter):

@@ -11,6 +11,7 @@ import yaml
 
 from src.scripts import smoke_test_llm_gen_openai
 from src.scripts.smoke_test_llm_gen_openai import execute_smoke_test
+from src.xsmn_llm_gen import ProviderError
 
 
 def _success_result() -> dict[str, object]:
@@ -131,6 +132,80 @@ def test_execute_smoke_test_rejects_non_openai_provider() -> None:
     assert summary["reason"] == "smoke_test_requires_openai"
 
 
+def test_agentrouter_smoke_preflights_model_before_generation() -> None:
+    events = []
+
+    def preflight(config):
+        events.append(("preflight", config.api_backend, config.provider_model))
+
+    def runner(config, *_args, **_kwargs):
+        events.append(("generation", config.wire_api, config.provider_model))
+        return _success_result()
+
+    exit_code, summary = execute_smoke_test(
+        {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            "AGENTROUTER_API_KEY": "router-key-must-not-appear",
+        },
+        model_preflight=preflight,
+        runner=runner,
+        target_date=date(2026, 8, 8),
+    )
+
+    assert exit_code == 0
+    assert events == [
+        ("preflight", "agentrouter", "gpt-5.6-sol"),
+        ("generation", "chat_completions", "gpt-5.6-sol"),
+    ]
+    assert summary["api_backend"] == "agentrouter"
+    assert summary["wire_api"] == "chat_completions"
+    assert summary["model_available"] is True
+    assert "router-key-must-not-appear" not in json.dumps(summary)
+
+
+def test_agentrouter_smoke_stops_before_generation_when_model_unavailable() -> None:
+    exit_code, summary = execute_smoke_test(
+        {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            "AGENTROUTER_API_KEY": "router-secret",
+        },
+        model_preflight=lambda _config: (_ for _ in ()).throw(
+            ProviderError("agentrouter_model_unavailable")
+        ),
+        runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generation must not run")
+        ),
+    )
+
+    assert exit_code == 1
+    assert summary["ok"] is False
+    assert summary["reason"] == "agentrouter_model_unavailable"
+    assert summary["model_available"] is False
+
+
+def test_agentrouter_smoke_requires_the_separate_selected_key() -> None:
+    exit_code, summary = execute_smoke_test(
+        {
+            "LLM_GEN_MODE": "shadow",
+            "LLM_GEN_PROVIDER": "openai",
+            "LLM_GEN_OPENAI_BACKEND": "agentrouter",
+            "OPENAI_API_KEY": "official-key-must-not-be-used",
+        },
+        runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generation must not run")
+        ),
+    )
+
+    assert exit_code == 2
+    assert summary["reason"] == "missing_api_key"
+    assert summary["api_backend"] == "agentrouter"
+    assert summary["wire_api"] == "chat_completions"
+
+
 def test_summary_allowlists_reason_and_usage_fields() -> None:
     result = _success_result()
     result["status"] = "error"
@@ -208,7 +283,9 @@ def test_workflow_is_manual_and_has_no_database_or_telegram_secrets() -> None:
     assert checkout["with"]["ref"] == "main"
     assert checkout["with"]["persist-credentials"] == "false"
     assert parsed["concurrency"]["cancel-in-progress"] == "true"
-    assert "secrets.OPENAI_API_KEY" in workflow
+    assert "secrets.AGENTROUTER_API_KEY" in workflow
+    assert "LLM_GEN_OPENAI_BACKEND: agentrouter" in workflow
+    assert "secrets.OPENAI_API_KEY" not in workflow
     assert "actions/checkout@v4" not in workflow
     assert "actions/setup-python@v5" not in workflow
     assert "SUPABASE" not in workflow

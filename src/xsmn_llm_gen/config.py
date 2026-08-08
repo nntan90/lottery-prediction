@@ -9,14 +9,19 @@ from typing import Mapping, Optional
 
 MODE_ENV_VAR = "LLM_GEN_MODE"
 PROVIDER_ENV_VAR = "LLM_GEN_PROVIDER"
+OPENAI_BACKEND_ENV_VAR = "LLM_GEN_OPENAI_BACKEND"
 VALID_MODES = frozenset({"off", "shadow"})
 PROVIDER_MODELS = {
     "openai": "gpt-5.6-sol",
     "anthropic": "claude-opus-4-8",
 }
-PROVIDER_KEY_ENV = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
+OPENAI_BACKEND_WIRE_APIS = {
+    "official": "responses",
+    "agentrouter": "chat_completions",
+}
+OPENAI_BACKEND_KEY_ENV = {
+    "official": "OPENAI_API_KEY",
+    "agentrouter": "AGENTROUTER_API_KEY",
 }
 
 
@@ -39,6 +44,8 @@ class LLMGenConfig:
     mode: str = "off"
     provider: Optional[str] = None
     provider_model: Optional[str] = None
+    api_backend: Optional[str] = None
+    wire_api: Optional[str] = None
     api_key: Optional[str] = field(default=None, repr=False, compare=False)
     timeout_seconds: float = 45.0
     max_retries: int = 1
@@ -55,7 +62,13 @@ class LLMGenConfig:
             raise LLMGenConfigError("invalid_mode")
         object.__setattr__(self, "mode", mode)
         if mode == "off":
-            if self.provider is not None or self.provider_model is not None or self.api_key:
+            if (
+                self.provider is not None
+                or self.provider_model is not None
+                or self.api_backend is not None
+                or self.wire_api is not None
+                or self.api_key
+            ):
                 raise LLMGenConfigError("off_mode_must_not_configure_provider")
             return
 
@@ -66,6 +79,21 @@ class LLMGenConfig:
             raise LLMGenConfigError("provider_model_mismatch")
         if not str(self.api_key or "").strip():
             raise LLMGenConfigError("missing_api_key")
+
+        if provider == "openai":
+            api_backend = str(self.api_backend or "official")
+            if api_backend not in OPENAI_BACKEND_WIRE_APIS:
+                raise LLMGenConfigError("invalid_openai_backend")
+            expected_wire_api = OPENAI_BACKEND_WIRE_APIS[api_backend]
+        else:
+            api_backend = str(self.api_backend or "anthropic")
+            if api_backend != "anthropic":
+                raise LLMGenConfigError("provider_backend_mismatch")
+            expected_wire_api = "messages"
+        wire_api = str(self.wire_api or expected_wire_api)
+        if wire_api != expected_wire_api:
+            raise LLMGenConfigError("wire_api_mismatch")
+
         if self.timeout_seconds <= 0:
             raise LLMGenConfigError("invalid_timeout")
         if self.max_retries not in {0, 1}:
@@ -77,6 +105,8 @@ class LLMGenConfig:
         if self.top_pairs_per_source != 2:
             raise LLMGenConfigError("top_pairs_per_source_must_equal_two")
         object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "api_backend", api_backend)
+        object.__setattr__(self, "wire_api", wire_api)
 
     def public_metadata(self) -> dict[str, object]:
         """Return a JSON-safe config snapshot that never includes the key."""
@@ -84,6 +114,8 @@ class LLMGenConfig:
             "mode": self.mode,
             "provider": self.provider,
             "provider_model": self.provider_model,
+            "api_backend": self.api_backend,
+            "wire_api": self.wire_api,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "max_output_tokens": self.max_output_tokens,
@@ -104,21 +136,39 @@ def load_llm_gen_config(
     read. In ``shadow`` mode only the selected provider's key is accessed.
     """
     env = environ if environ is not None else os.environ
-    mode = str(env.get(MODE_ENV_VAR, "off") or "off").strip().lower()
+    raw_mode = str(env.get(MODE_ENV_VAR, "off") or "off")
+    mode = raw_mode.strip().lower()
+    if raw_mode != mode:
+        raise LLMGenConfigError("invalid_mode")
     if mode not in VALID_MODES:
         raise LLMGenConfigError("invalid_mode")
     if mode == "off":
         return LLMGenConfig(mode="off")
 
-    provider = str(env.get(PROVIDER_ENV_VAR, "") or "").strip().lower()
+    raw_provider = str(env.get(PROVIDER_ENV_VAR, "") or "")
+    provider = raw_provider.strip().lower()
+    if raw_provider != provider:
+        raise LLMGenConfigError("invalid_provider")
     if provider not in PROVIDER_MODELS:
         raise LLMGenConfigError("invalid_provider")
-    key = str(env.get(PROVIDER_KEY_ENV[provider], "") or "").strip()
+    if provider == "openai":
+        api_backend = str(env.get(OPENAI_BACKEND_ENV_VAR, "official") or "official")
+        if api_backend not in OPENAI_BACKEND_WIRE_APIS:
+            raise LLMGenConfigError("invalid_openai_backend")
+        wire_api = OPENAI_BACKEND_WIRE_APIS[api_backend]
+        key_env_var = OPENAI_BACKEND_KEY_ENV[api_backend]
+    else:
+        api_backend = "anthropic"
+        wire_api = "messages"
+        key_env_var = "ANTHROPIC_API_KEY"
+    key = str(env.get(key_env_var, "") or "").strip()
     if not key:
         raise LLMGenConfigError("missing_api_key")
     return LLMGenConfig(
         mode="shadow",
         provider=provider,
         provider_model=PROVIDER_MODELS[provider],
+        api_backend=api_backend,
+        wire_api=wire_api,
         api_key=key,
     )

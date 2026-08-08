@@ -1,4 +1,4 @@
-"""Run a manual, side-effect-free OpenAI smoke test for ``LLM_Gen``.
+"""Run a manual, data-side-effect-free OpenAI smoke test for ``LLM_Gen``.
 
 The diagnostic uses the production provider adapter and structured-output
 contract with a small synthetic evidence packet.  It never reads Supabase,
@@ -17,12 +17,15 @@ from zoneinfo import ZoneInfo
 from src.xsmn_llm_gen import (
     LLMGenConfig,
     LLMGenConfigError,
+    ProviderError,
+    ensure_agentrouter_model_available,
     load_llm_gen_config,
     run_llm_gen,
 )
 
 
 Runner = Callable[..., Optional[dict[str, object]]]
+ModelPreflight = Callable[[LLMGenConfig], None]
 SMOKE_PROVINCES = ("smoke-province-a", "smoke-province-b")
 SAFE_USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens")
 
@@ -35,6 +38,40 @@ def _safe_reason(value: object) -> Optional[str]:
     if text and len(text) <= 80 and all(char.isalnum() or char == "_" for char in text):
         return text
     return "unsafe_or_unknown_error"
+
+
+def _safe_config_error_identity(
+    environ: Mapping[str, str],
+) -> dict[str, Optional[str]]:
+    """Expose only recognized non-secret identity after config rejection."""
+    provider = str(environ.get("LLM_GEN_PROVIDER", "") or "").strip().lower()
+    if provider == "openai":
+        candidate = str(
+            environ.get("LLM_GEN_OPENAI_BACKEND", "official") or "official"
+        )
+        backend_wires = {
+            "official": "responses",
+            "agentrouter": "chat_completions",
+        }
+        return {
+            "provider": provider,
+            "provider_model": "gpt-5.6-sol",
+            "api_backend": candidate if candidate in backend_wires else None,
+            "wire_api": backend_wires.get(candidate),
+        }
+    if provider == "anthropic":
+        return {
+            "provider": provider,
+            "provider_model": "claude-opus-4-8",
+            "api_backend": "anthropic",
+            "wire_api": "messages",
+        }
+    return {
+        "provider": None,
+        "provider_model": None,
+        "api_backend": None,
+        "wire_api": None,
+    }
 
 
 def _safe_nonnegative_int(value: object) -> int:
@@ -109,6 +146,8 @@ def _smoke_model_results() -> list[dict[str, object]]:
 def _safe_summary(
     result: Optional[Mapping[str, object]],
     config: Optional[LLMGenConfig],
+    *,
+    model_available: Optional[bool] = None,
 ) -> dict[str, object]:
     """Build the only payload allowed in CI logs; credentials are excluded."""
     value = result if isinstance(result, Mapping) else {}
@@ -132,6 +171,9 @@ def _safe_summary(
         "reason": _safe_reason(reason),
         "provider": config.provider if config else None,
         "provider_model": config.provider_model if config else None,
+        "api_backend": config.api_backend if config else None,
+        "wire_api": config.wire_api if config else None,
+        "model_available": model_available,
         "top_3": top_3,
         "score_semantics": (
             "ranking_score_uncalibrated"
@@ -147,19 +189,21 @@ def execute_smoke_test(
     environ: Optional[Mapping[str, str]] = None,
     *,
     runner: Runner = run_llm_gen,
+    model_preflight: ModelPreflight = ensure_agentrouter_model_available,
     target_date: Optional[date] = None,
 ) -> tuple[int, dict[str, object]]:
-    """Call OpenAI once through the production adapter and return a safe result."""
+    """Exercise one backend with its configured retry policy and safe output."""
     env = environ if environ is not None else os.environ
     try:
         config = load_llm_gen_config(env)
     except LLMGenConfigError as exc:
+        public_identity = _safe_config_error_identity(env)
         return 2, {
             "ok": False,
             "status": "error",
             "reason": exc.reason,
-            "provider": str(env.get("LLM_GEN_PROVIDER", "") or "").lower() or None,
-            "provider_model": None,
+            **public_identity,
+            "model_available": None,
             "top_3": [],
             "score_semantics": None,
             "latency_ms": 0,
@@ -173,11 +217,39 @@ def execute_smoke_test(
             "reason": "smoke_test_requires_openai",
             "provider": config.provider,
             "provider_model": config.provider_model,
+            "api_backend": config.api_backend,
+            "wire_api": config.wire_api,
+            "model_available": None,
             "top_3": [],
             "score_semantics": None,
             "latency_ms": 0,
             "usage": {},
         }
+
+    model_available: Optional[bool] = None
+    if config.api_backend == "agentrouter":
+        try:
+            model_preflight(config)
+            model_available = True
+        except ProviderError as exc:
+            return 1, _safe_summary(
+                {"status": "error", "reason": exc.reason},
+                config,
+                model_available=(
+                    False
+                    if exc.reason == "agentrouter_model_unavailable"
+                    else None
+                ),
+            )
+        except Exception:
+            return 1, _safe_summary(
+                {
+                    "status": "error",
+                    "reason": "agentrouter_model_preflight_failed",
+                },
+                config,
+                model_available=None,
+            )
 
     try:
         result = runner(
@@ -209,12 +281,19 @@ def execute_smoke_test(
             "reason": "smoke_runner_failed",
             "provider": config.provider,
             "provider_model": config.provider_model,
+            "api_backend": config.api_backend,
+            "wire_api": config.wire_api,
+            "model_available": model_available,
             "top_3": [],
             "score_semantics": None,
             "latency_ms": 0,
             "usage": {},
         }
-    summary = _safe_summary(result, config)
+    summary = _safe_summary(
+        result,
+        config,
+        model_available=model_available,
+    )
     return (0 if summary["ok"] else 1), summary
 
 
