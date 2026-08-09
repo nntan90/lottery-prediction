@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -90,6 +90,34 @@ def test_window_helpers_require_aware_time_and_resolve_next_boundaries() -> None
     assert ddt_local_bot.next_power_guard_at(_vn(2026, 7, 27, 20, 54)) == _vn(
         2026, 7, 27, 20, 55
     )
+
+
+def test_wait_until_wall_clock_preserves_deadline_with_bounded_sleeps(
+    monkeypatch,
+) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 9, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    sleep_delays: list[float] = []
+
+    async def advance_wall_clock(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        FrozenDateTime.current += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(asyncio, "sleep", advance_wall_clock)
+
+    asyncio.run(
+        ddt_local_bot._wait_until_wall_clock(_vn(2026, 7, 28, 9, 1))
+    )
+
+    assert sleep_delays == [15.0, 15.0, 15.0, 15.0]
+    assert FrozenDateTime.current == _vn(2026, 7, 28, 9, 1)
+    assert max(sleep_delays) <= ddt_local_bot.SCHEDULER_MAX_SLEEP_SECONDS
 
 
 def test_settings_use_private_chat_as_user_allowlist_fallback(monkeypatch) -> None:
@@ -727,12 +755,12 @@ def test_prompt_loop_catches_up_only_inside_active_window(
 
 
 def test_prompt_loop_retries_transient_delivery_failure(monkeypatch) -> None:
-    frozen_now = _vn(2026, 7, 28, 9, 0)
-
     class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 9, 0)
+
         @classmethod
         def now(cls, tz=None):
-            return frozen_now
+            return cls.current
 
     attempts = 0
 
@@ -741,13 +769,13 @@ def test_prompt_loop_retries_transient_delivery_failure(monkeypatch) -> None:
         attempts += 1
         return set() if attempts == 1 else {100}
 
-    sleep_calls = 0
+    sleep_delays: list[float] = []
 
-    async def allow_one_retry(_seconds):
-        nonlocal sleep_calls
-        sleep_calls += 1
-        if sleep_calls >= 2:
+    async def allow_one_retry(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) > 4:
             raise asyncio.CancelledError
+        FrozenDateTime.current += timedelta(seconds=seconds)
 
     controller = ddt_local_bot.DDTLocalController(object(), _settings())
     application = type(
@@ -763,6 +791,136 @@ def test_prompt_loop_retries_transient_delivery_failure(monkeypatch) -> None:
         asyncio.run(ddt_local_bot._daily_prompt_loop(application))
 
     assert attempts == 2
+    assert sleep_delays[:4] == [15.0, 15.0, 15.0, 15.0]
+    assert FrozenDateTime.current == _vn(2026, 7, 28, 9, 1)
+
+
+def test_prompt_retry_catches_up_after_suspend(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 9, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    attempts: list[datetime] = []
+
+    async def send(_application, _target_date, _chat_ids=None):
+        attempts.append(FrozenDateTime.current)
+        return set() if len(attempts) == 1 else {100}
+
+    sleep_delays: list[float] = []
+
+    async def resume_after_retry_deadline(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 28, 9, 5)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    application = SimpleNamespace(bot_data={"ddt_controller": controller})
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_send_daily_prompts", send)
+    monkeypatch.setattr(asyncio, "sleep", resume_after_retry_deadline)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._daily_prompt_loop(application))
+
+    assert attempts == [
+        _vn(2026, 7, 28, 9, 0),
+        _vn(2026, 7, 28, 9, 5),
+    ]
+    assert sleep_delays == [15.0, 15.0]
+
+
+def test_prompt_loop_catches_wall_clock_jump_across_21(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 27, 20, 59, 50)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    sent: list[date] = []
+
+    async def send(_application, target_date, _chat_ids=None):
+        sent.append(target_date)
+        return {100}
+
+    sleep_delays: list[float] = []
+
+    async def jump_across_prompt(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 27, 21, 0)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    application = SimpleNamespace(bot_data={"ddt_controller": controller})
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_send_daily_prompts", send)
+    monkeypatch.setattr(asyncio, "sleep", jump_across_prompt)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._daily_prompt_loop(application))
+
+    assert sent == [date(2026, 7, 28)]
+    assert sleep_delays == [10.0, 15.0]
+    assert max(sleep_delays) <= ddt_local_bot.SCHEDULER_MAX_SLEEP_SECONDS
+
+
+def test_prompt_loop_preserves_delivery_state_during_clock_rollback(
+    monkeypatch,
+) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 27, 20, 59, 50)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    sends = 0
+
+    async def send(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        return {100}
+
+    sleep_delays: list[float] = []
+
+    async def recross_prompt(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 27, 21, 0)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    state = ddt_local_bot.PromptDeliveryState(
+        target_date=date(2026, 7, 28),
+        delivered_chats={100},
+        failure_notified_chats={100},
+    )
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_controller": controller,
+            "ddt_prompt_delivery_state": state,
+        }
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_send_daily_prompts", send)
+    monkeypatch.setattr(asyncio, "sleep", recross_prompt)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._daily_prompt_loop(application))
+
+    assert sends == 0
+    assert state.target_date == date(2026, 7, 28)
+    assert state.delivered_chats == {100}
+    assert state.failure_notified_chats == {100}
+    assert sleep_delays == [10.0, 15.0]
 
 
 def test_prompt_delivery_failure_is_timestamped_redacted_and_retryable(
@@ -1210,15 +1368,125 @@ def test_awake_guard_catches_up_only_inside_power_window(
     assert leases.calls == expected_calls
 
 
+def test_awake_guard_catches_wall_clock_jump_across_2055(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 27, 20, 54, 50)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class FakeLeases:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def acquire(self, lease: str) -> None:
+            self.calls.append(("acquire", lease))
+
+        async def release(self, lease: str) -> None:
+            self.calls.append(("release", lease))
+
+    checked_targets: list[date] = []
+
+    async def no_success(_controller, target_date):
+        checked_targets.append(target_date)
+        return False
+
+    sleep_delays: list[float] = []
+
+    async def jump_across_power_guard(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 27, 20, 55)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    leases = FakeLeases()
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_awake_leases": leases,
+            "ddt_controller": controller,
+        }
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_has_persisted_success", no_success)
+    monkeypatch.setattr(asyncio, "sleep", jump_across_power_guard)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._awake_guard_loop(application))
+
+    assert checked_targets == [date(2026, 7, 28)]
+    assert leases.calls == [
+        ("acquire", "approval_window"),
+        ("release", "approval_window"),
+    ]
+    assert sleep_delays == [10.0, 15.0]
+
+
+def test_awake_guard_releases_after_wall_clock_jumps_to_noon(
+    monkeypatch,
+) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 11, 59, 50)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class FakeLeases:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def acquire(self, lease: str) -> None:
+            self.calls.append(("acquire", lease))
+
+        async def release(self, lease: str) -> None:
+            self.calls.append(("release", lease))
+
+    async def no_success(_controller, _target_date):
+        return False
+
+    sleep_delays: list[float] = []
+
+    async def jump_to_noon(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 28, 12, 0)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    leases = FakeLeases()
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_awake_leases": leases,
+            "ddt_controller": controller,
+        }
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_has_persisted_success", no_success)
+    monkeypatch.setattr(asyncio, "sleep", jump_to_noon)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._awake_guard_loop(application))
+
+    assert leases.calls == [
+        ("acquire", "approval_window"),
+        ("release", "approval_window"),
+    ]
+    assert sleep_delays == [10.0, 15.0]
+
+
 def test_awake_guard_rechecks_caffeinate_health_during_window(
     monkeypatch,
 ) -> None:
-    frozen_now = _vn(2026, 7, 28, 9, 0)
-
     class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 9, 0)
+
         @classmethod
         def now(cls, tz=None):
-            return frozen_now
+            return cls.current
 
     class FakeLeases:
         def __init__(self) -> None:
@@ -1242,13 +1510,13 @@ def test_awake_guard_rechecks_caffeinate_health_during_window(
             }
         },
     )()
-    sleep_calls = 0
+    sleep_delays: list[float] = []
 
-    async def allow_one_healthcheck(_seconds):
-        nonlocal sleep_calls
-        sleep_calls += 1
-        if sleep_calls >= 2:
+    async def allow_one_healthcheck(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) > 4:
             raise asyncio.CancelledError
+        FrozenDateTime.current += timedelta(seconds=seconds)
 
     async def no_success(_controller, _target_date):
         return False
@@ -1265,6 +1533,61 @@ def test_awake_guard_rechecks_caffeinate_health_during_window(
         ("acquire", "approval_window"),
         ("release", "approval_window"),
     ]
+    assert sleep_delays[:4] == [15.0, 15.0, 15.0, 15.0]
+    assert FrozenDateTime.current == _vn(2026, 7, 28, 9, 1)
+
+
+def test_awake_guard_healthcheck_catches_up_after_suspend(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        current = _vn(2026, 7, 28, 9, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class FakeLeases:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def acquire(self, lease: str) -> None:
+            self.calls.append(("acquire", lease))
+
+        async def release(self, lease: str) -> None:
+            self.calls.append(("release", lease))
+
+    async def no_success(_controller, _target_date):
+        return False
+
+    sleep_delays: list[float] = []
+
+    async def resume_after_healthcheck_deadline(seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) == 1:
+            FrozenDateTime.current = _vn(2026, 7, 28, 9, 5)
+            return
+        raise asyncio.CancelledError
+
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    leases = FakeLeases()
+    application = SimpleNamespace(
+        bot_data={
+            "ddt_awake_leases": leases,
+            "ddt_controller": controller,
+        }
+    )
+    monkeypatch.setattr(ddt_local_bot, "datetime", FrozenDateTime)
+    monkeypatch.setattr(ddt_local_bot, "_has_persisted_success", no_success)
+    monkeypatch.setattr(asyncio, "sleep", resume_after_healthcheck_deadline)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ddt_local_bot._awake_guard_loop(application))
+
+    assert leases.calls == [
+        ("acquire", "approval_window"),
+        ("acquire", "approval_window"),
+        ("release", "approval_window"),
+    ]
+    assert sleep_delays == [15.0, 15.0]
 
 
 def test_awake_guard_skips_lease_when_target_already_succeeded(

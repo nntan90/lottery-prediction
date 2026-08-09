@@ -52,6 +52,7 @@ CAFFEINATE_STOP_TIMEOUT_SECONDS = 2.0
 AWAKE_HEALTHCHECK_SECONDS = 60.0
 PROMPT_RETRY_SECONDS = 60.0
 WORKER_RESTART_SECONDS = 5.0
+SCHEDULER_MAX_SLEEP_SECONDS = 15.0
 ASYNC_DB_TIMEOUT_SECONDS = 5.0
 VALID_EXIT_CODES = {
     "success": 0,
@@ -230,6 +231,22 @@ def next_power_guard_at(value: datetime) -> datetime:
         tzinfo=VN_TZ,
     )
     return scheduled if current < scheduled else scheduled + timedelta(days=1)
+
+
+async def _wait_until_wall_clock(deadline: datetime) -> None:
+    """Wait for one fixed wall-clock deadline via suspend-safe short sleeps.
+
+    Python's macOS asyncio timer is monotonic and can pause while the machine
+    sleeps. Re-reading Vietnam wall time at most every 15 seconds catches up
+    promptly after resume. The caller computes ``deadline`` once so a logical
+    60-second retry or health-check is not restarted on every short sleep.
+    """
+    fixed_deadline = _as_vietnam_time(deadline)
+    while True:
+        remaining = (fixed_deadline - datetime.now(VN_TZ)).total_seconds()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(SCHEDULER_MAX_SLEEP_SECONDS, remaining))
 
 
 @dataclass(frozen=True)
@@ -1037,11 +1054,8 @@ async def _daily_prompt_loop(application: Application) -> None:
         now = datetime.now(VN_TZ)
         target_date = active_approval_target(now)
         if target_date is None:
-            state.target_date = None
-            state.delivered_chats.clear()
-            state.failure_notified_chats.clear()
             scheduled = next_prompt_at(now)
-            await asyncio.sleep(max(1.0, (scheduled - now).total_seconds()))
+            await _wait_until_wall_clock(scheduled)
             continue
         if target_date != state.target_date:
             state.target_date = target_date
@@ -1059,18 +1073,17 @@ async def _daily_prompt_loop(application: Application) -> None:
                 )
             )
         if state.delivered_chats >= set(controller.settings.allowed_chat_ids):
-            scheduled = next_prompt_at(datetime.now(VN_TZ))
-            await asyncio.sleep(
-                max(1.0, (scheduled - datetime.now(VN_TZ)).total_seconds())
-            )
+            schedule_now = datetime.now(VN_TZ)
+            scheduled = next_prompt_at(schedule_now)
+            await _wait_until_wall_clock(scheduled)
             continue
         closes_at = approval_window(target_date)[1]
         retry_now = datetime.now(VN_TZ)
-        retry_delay = min(
-            PROMPT_RETRY_SECONDS,
-            max(1.0, (closes_at - retry_now).total_seconds()),
+        retry_deadline = min(
+            closes_at,
+            retry_now + timedelta(seconds=PROMPT_RETRY_SECONDS),
         )
-        await asyncio.sleep(retry_delay)
+        await _wait_until_wall_clock(retry_deadline)
 
 
 async def _awake_guard_loop(application: Application) -> None:
@@ -1092,18 +1105,17 @@ async def _awake_guard_loop(application: Application) -> None:
                 lease_active = True
                 assert target_date is not None
                 closes_at = power_guard_window(target_date)[1]
-                await asyncio.sleep(
-                    min(
-                        AWAKE_HEALTHCHECK_SECONDS,
-                        max(1.0, (closes_at - now).total_seconds()),
-                    )
+                healthcheck_deadline = min(
+                    closes_at,
+                    now + timedelta(seconds=AWAKE_HEALTHCHECK_SECONDS),
                 )
+                await _wait_until_wall_clock(healthcheck_deadline)
                 continue
             if lease_active:
                 await awake_leases.release(lease)
                 lease_active = False
             starts_at = next_power_guard_at(now)
-            await asyncio.sleep(max(1.0, (starts_at - now).total_seconds()))
+            await _wait_until_wall_clock(starts_at)
     finally:
         if lease_active:
             await awake_leases.release(lease)
