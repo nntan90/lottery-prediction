@@ -22,6 +22,11 @@ from src.xsmn_llm_gen import (
     load_llm_gen_config,
     run_llm_gen,
 )
+from src.xsmn_llm_gen.config import (
+    OPENAI_BACKEND_MODELS,
+    OPENAI_BACKEND_WIRE_APIS,
+    PROVIDER_MODELS,
+)
 
 
 Runner = Callable[..., Optional[dict[str, object]]]
@@ -49,20 +54,18 @@ def _safe_config_error_identity(
         candidate = str(
             environ.get("LLM_GEN_OPENAI_BACKEND", "official") or "official"
         )
-        backend_wires = {
-            "official": "responses",
-            "agentrouter": "chat_completions",
-        }
         return {
             "provider": provider,
-            "provider_model": "gpt-5.6-sol",
-            "api_backend": candidate if candidate in backend_wires else None,
-            "wire_api": backend_wires.get(candidate),
+            "provider_model": OPENAI_BACKEND_MODELS.get(candidate),
+            "api_backend": (
+                candidate if candidate in OPENAI_BACKEND_WIRE_APIS else None
+            ),
+            "wire_api": OPENAI_BACKEND_WIRE_APIS.get(candidate),
         }
     if provider == "anthropic":
         return {
             "provider": provider,
-            "provider_model": "claude-opus-4-8",
+            "provider_model": PROVIDER_MODELS[provider],
             "api_backend": "anthropic",
             "wire_api": "messages",
         }

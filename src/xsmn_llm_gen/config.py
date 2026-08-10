@@ -15,9 +15,13 @@ PROVIDER_MODELS = {
     "openai": "gpt-5.6-sol",
     "anthropic": "claude-opus-4-8",
 }
+OPENAI_BACKEND_MODELS = {
+    "official": PROVIDER_MODELS["openai"],
+    "agentrouter": "gpt-5.6",
+}
 OPENAI_BACKEND_WIRE_APIS = {
     "official": "responses",
-    "agentrouter": "chat_completions",
+    "agentrouter": "responses",
 }
 OPENAI_BACKEND_KEY_ENV = {
     "official": "OPENAI_API_KEY",
@@ -75,18 +79,26 @@ class LLMGenConfig:
         provider = str(self.provider or "").strip().lower()
         if provider not in PROVIDER_MODELS:
             raise LLMGenConfigError("invalid_provider")
-        if self.provider_model != PROVIDER_MODELS[provider]:
+
+        if provider == "openai":
+            api_backend = str(self.api_backend or "official")
+            expected_model = OPENAI_BACKEND_MODELS.get(
+                api_backend,
+                PROVIDER_MODELS[provider],
+            )
+        else:
+            api_backend = str(self.api_backend or "anthropic")
+            expected_model = PROVIDER_MODELS[provider]
+        if self.provider_model != expected_model:
             raise LLMGenConfigError("provider_model_mismatch")
         if not str(self.api_key or "").strip():
             raise LLMGenConfigError("missing_api_key")
 
         if provider == "openai":
-            api_backend = str(self.api_backend or "official")
             if api_backend not in OPENAI_BACKEND_WIRE_APIS:
                 raise LLMGenConfigError("invalid_openai_backend")
             expected_wire_api = OPENAI_BACKEND_WIRE_APIS[api_backend]
         else:
-            api_backend = str(self.api_backend or "anthropic")
             if api_backend != "anthropic":
                 raise LLMGenConfigError("provider_backend_mismatch")
             expected_wire_api = "messages"
@@ -155,10 +167,12 @@ def load_llm_gen_config(
         api_backend = str(env.get(OPENAI_BACKEND_ENV_VAR, "official") or "official")
         if api_backend not in OPENAI_BACKEND_WIRE_APIS:
             raise LLMGenConfigError("invalid_openai_backend")
+        provider_model = OPENAI_BACKEND_MODELS[api_backend]
         wire_api = OPENAI_BACKEND_WIRE_APIS[api_backend]
         key_env_var = OPENAI_BACKEND_KEY_ENV[api_backend]
     else:
         api_backend = "anthropic"
+        provider_model = PROVIDER_MODELS[provider]
         wire_api = "messages"
         key_env_var = "ANTHROPIC_API_KEY"
     key = str(env.get(key_env_var, "") or "").strip()
@@ -167,7 +181,7 @@ def load_llm_gen_config(
     return LLMGenConfig(
         mode="shadow",
         provider=provider,
-        provider_model=PROVIDER_MODELS[provider],
+        provider_model=provider_model,
         api_backend=api_backend,
         wire_api=wire_api,
         api_key=key,

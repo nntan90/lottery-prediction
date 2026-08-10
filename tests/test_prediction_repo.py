@@ -749,7 +749,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertFalse(save_shadow_prediction(db, incoming))
         self.assertNotIn("model_predictions", db.updated)
 
-    def test_llm_gen_identity_rejects_changed_backend_and_wire(self):
+    def test_llm_gen_identity_rejects_changed_backend_model_and_legacy_wire(self):
         from src.database.prediction_repo import _same_llm_gen_identity
 
         base = {
@@ -774,17 +774,33 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             **base,
             "run_metadata": {
                 **base["run_metadata"],
+                "provider_model": "gpt-5.6",
                 "api_backend": "agentrouter",
-                "wire_api": "chat_completions",
+                "wire_api": "responses",
                 "config": {
                     **base["run_metadata"]["config"],
+                    "provider_model": "gpt-5.6",
                     "api_backend": "agentrouter",
+                    "wire_api": "responses",
+                },
+            },
+        }
+        legacy_agentrouter = {
+            **agentrouter,
+            "run_metadata": {
+                **agentrouter["run_metadata"],
+                "provider_model": "gpt-5.6-sol",
+                "wire_api": "chat_completions",
+                "config": {
+                    **agentrouter["run_metadata"]["config"],
+                    "provider_model": "gpt-5.6-sol",
                     "wire_api": "chat_completions",
                 },
             },
         }
 
         self.assertFalse(_same_llm_gen_identity(base, agentrouter))
+        self.assertFalse(_same_llm_gen_identity(agentrouter, legacy_agentrouter))
 
     def test_llm_gen_unique_insert_race_never_overwrites_first_success(self):
         from src.database.prediction_repo import save_shadow_prediction

@@ -13,10 +13,8 @@ from .config import LLMGenConfig
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
-AGENTROUTER_CHAT_COMPLETIONS_URL = (
-    "https://co.agentrouter.org/v1/chat/completions"
-)
-AGENTROUTER_MODELS_URL = "https://co.agentrouter.org/v1/models"
+AGENTROUTER_RESPONSES_URL = "https://agentrouter.org/v1/responses"
+AGENTROUTER_MODELS_URL = "https://agentrouter.org/v1/models"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
 SYSTEM_PROMPT = """You rank only the supplied XSMN candidate pool.
@@ -120,30 +118,6 @@ def _usage(body: Mapping[str, object]) -> dict[str, int]:
     return result
 
 
-def _chat_usage(body: Mapping[str, object]) -> dict[str, int]:
-    """Normalize Chat Completions token names to the existing audit contract."""
-    raw = body.get("usage")
-    if not isinstance(raw, Mapping):
-        return {}
-    aliases = {
-        "prompt_tokens": "input_tokens",
-        "completion_tokens": "output_tokens",
-        "total_tokens": "total_tokens",
-    }
-    result: dict[str, int] = {}
-    for source, target in aliases.items():
-        value = raw.get(source)
-        if isinstance(value, bool):
-            continue
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-        if number >= 0:
-            result[target] = number
-    return result
-
-
 def _agentrouter_http_reason(status: int, response: object) -> str:
     """Map only known AgentRouter error signals without exposing its body."""
     if status in {401, 403}:
@@ -236,7 +210,7 @@ class _BaseAdapter:
         if self.provider == "openai":
             endpoint = {
                 "official": OPENAI_RESPONSES_URL,
-                "agentrouter": AGENTROUTER_CHAT_COMPLETIONS_URL,
+                "agentrouter": AGENTROUTER_RESPONSES_URL,
             }.get(self.config.api_backend)
             return frozenset({endpoint}) if endpoint else frozenset()
         if self.provider == "anthropic":
@@ -364,14 +338,14 @@ class OpenAIAdapter(_BaseAdapter):
         return ProviderResult(payload=parsed, usage=_usage(body))
 
     def _rank_agentrouter(self, packet: Mapping[str, object]) -> ProviderResult:
-        """Call AgentRouter with the exact Chat Completions wire contract."""
+        """Call only the fixed AgentRouter Responses endpoint and fail closed."""
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
         payload = {
             "model": self.config.provider_model,
-            "messages": [
+            "input": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
@@ -383,46 +357,61 @@ class OpenAIAdapter(_BaseAdapter):
                     ),
                 },
             ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
+            "text": {
+                "format": {
+                    "type": "json_schema",
                     "name": "llm_gen_response",
                     "strict": True,
                     "schema": RESPONSE_SCHEMA,
-                },
+                }
             },
-            "max_tokens": self.config.max_output_tokens,
-            "n": 1,
-            "temperature": 0,
+            "max_output_tokens": self.config.max_output_tokens,
+            "store": False,
         }
         body = self._post(
-            endpoint=AGENTROUTER_CHAT_COMPLETIONS_URL,
+            endpoint=AGENTROUTER_RESPONSES_URL,
             headers=headers,
             payload=payload,
         )
-        choices = body.get("choices")
-        if not isinstance(choices, list) or len(choices) != 1:
-            raise ProviderError("agentrouter_invalid_choice_count")
-        choice = choices[0]
-        if not isinstance(choice, Mapping):
-            raise ProviderError("agentrouter_invalid_choice")
-        finish_reason = str(choice.get("finish_reason") or "").strip().lower()
-        if finish_reason == "length":
-            raise ProviderError("agentrouter_truncated")
-        if finish_reason in {"content_filter", "safety", "blocked"}:
-            raise ProviderError("agentrouter_refusal")
-        if finish_reason != "stop":
-            raise ProviderError("agentrouter_invalid_finish_reason")
-        message = choice.get("message")
-        if not isinstance(message, Mapping):
-            raise ProviderError("agentrouter_invalid_choice")
-        if message.get("refusal"):
-            raise ProviderError("agentrouter_refusal")
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
+        status = str(body.get("status") or "").strip().lower()
+        if status == "incomplete":
+            details = body.get("incomplete_details")
+            reason = (
+                str(details.get("reason") or "").strip().lower()
+                if isinstance(details, Mapping)
+                else ""
+            )
+            if reason in {"length", "max_tokens", "max_output_tokens"}:
+                raise ProviderError("agentrouter_truncated")
+            raise ProviderError("agentrouter_incomplete")
+        if status in {"cancelled", "failed"}:
+            raise ProviderError("agentrouter_response_failed")
+        if status != "completed":
+            raise ProviderError("agentrouter_incomplete")
+
+        texts = []
+        outputs = body.get("output")
+        for output in outputs if isinstance(outputs, list) else []:
+            if not isinstance(output, Mapping):
+                continue
+            contents = output.get("content")
+            for content in contents if isinstance(contents, list) else []:
+                if not isinstance(content, Mapping):
+                    continue
+                if content.get("type") == "refusal":
+                    raise ProviderError("agentrouter_refusal")
+                if content.get("type") in {"output_text", "text"}:
+                    if isinstance(content.get("text"), str):
+                        texts.append(str(content["text"]))
+
+        output_text = body.get("output_text")
+        if not isinstance(output_text, str) or not output_text.strip():
+            output_text = "".join(texts)
+        if not output_text.strip():
             raise ProviderError("agentrouter_empty_content")
-        parsed = _validate_provider_payload(_parse_json_object(content))
-        return ProviderResult(payload=parsed, usage=_chat_usage(body))
+        parsed = _parse_json_object(output_text)
+        parsed = _validate_provider_payload(parsed)
+        return ProviderResult(payload=parsed, usage=_usage(body))
 
 
 def ensure_agentrouter_model_available(
@@ -440,7 +429,7 @@ def ensure_agentrouter_model_available(
         config.mode != "shadow"
         or config.provider != "openai"
         or config.api_backend != "agentrouter"
-        or config.wire_api != "chat_completions"
+        or config.wire_api != "responses"
     ):
         raise ProviderError("agentrouter_preflight_config_mismatch")
 

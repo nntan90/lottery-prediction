@@ -56,7 +56,11 @@ from src.xsmn_llm_gen import (
     load_llm_gen_config,
     run_llm_gen,
 )
-from src.xsmn_llm_gen.config import OPENAI_BACKEND_WIRE_APIS, PROVIDER_MODELS
+from src.xsmn_llm_gen.config import (
+    OPENAI_BACKEND_MODELS,
+    OPENAI_BACKEND_WIRE_APIS,
+    PROVIDER_MODELS,
+)
 
 # XSMN imports (v3.2 — backward compatible)
 from src.xsmn_ensemble.model_frequency import predict_frequency as xsmn_predict_frequency
@@ -311,15 +315,18 @@ def _llm_gen_public_env_identity() -> dict[str, Optional[str]]:
         candidate = os.getenv("LLM_GEN_OPENAI_BACKEND", "official") or "official"
         api_backend = candidate if candidate in OPENAI_BACKEND_WIRE_APIS else None
         wire_api = OPENAI_BACKEND_WIRE_APIS.get(candidate)
+        provider_model = OPENAI_BACKEND_MODELS.get(candidate)
     elif provider == "anthropic":
         api_backend = "anthropic"
         wire_api = "messages"
+        provider_model = PROVIDER_MODELS[provider]
     else:
         api_backend = None
         wire_api = None
+        provider_model = None
     return {
         "provider": provider or None,
-        "provider_model": PROVIDER_MODELS.get(provider),
+        "provider_model": provider_model,
         "api_backend": api_backend,
         "wire_api": wire_api,
     }
@@ -337,6 +344,7 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
     api_backend = str(metadata.get("api_backend") or "")
     provider_labels = {
         "gpt-5.6-sol": "GPT-5.6 Sol",
+        "gpt-5.6": "GPT-5.6",
         "claude-opus-4-8": "Claude Opus 4.8",
     }
     label = "LLM_Gen"
@@ -374,9 +382,11 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
         "agentrouter_http_401": "AgentRouter từ chối API key (401)",
         "agentrouter_http_403": "AgentRouter không cấp quyền model (403)",
         "agentrouter_http_429": "AgentRouter đang giới hạn tần suất (429)",
-        "agentrouter_model_unavailable": "AgentRouter chưa cấp GPT-5.6 Sol",
+        "agentrouter_model_unavailable": "AgentRouter chưa cấp GPT-5.6",
         "agentrouter_timeout": "AgentRouter hết thời gian chờ",
         "agentrouter_request_failed": "Không kết nối được AgentRouter",
+        "agentrouter_incomplete": "AgentRouter chưa hoàn tất Responses",
+        "agentrouter_response_failed": "AgentRouter Responses thất bại",
         "agentrouter_invalid_choice_count": "AgentRouter trả số choice không hợp lệ",
         "agentrouter_invalid_choice": "AgentRouter trả choice không hợp lệ",
         "agentrouter_empty_content": "AgentRouter trả nội dung rỗng",
