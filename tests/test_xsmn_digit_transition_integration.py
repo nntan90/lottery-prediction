@@ -14,6 +14,37 @@ from src.scripts import predict_xsmn_digit_transition as ddt_cli
 from src.scripts.predict_xsmn_digit_transition import _resolve_provinces
 
 
+def _manifest(watermark: str = "a" * 64, *, with_history: bool = True) -> dict:
+    manifest = {
+        "manifest_version": "ddt_input_v1",
+        "status": "certified",
+        "target_date": "2026-07-21",
+        "target_provinces": ["vung-tau", "ben-tre"],
+        "expected_anchors": {
+            "vung-tau": "2026-07-14",
+            "ben-tre": "2026-07-14",
+        },
+        "actual_anchors": {
+            "vung-tau": "2026-07-14",
+            "ben-tre": "2026-07-14",
+        },
+        "consumed_anchors": {
+            "vung-tau": "2026-07-14",
+            "ben-tre": "2026-07-14",
+        },
+        "regional_scheduled_provinces": ["tp-hcm", "dong-thap", "ca-mau"],
+        "regional_certified_provinces": ["tp-hcm", "dong-thap", "ca-mau"],
+        "required_draw_count": 5,
+        "certified_draw_count": 5,
+        "boundary_watermark": watermark,
+    }
+    if with_history:
+        manifest["full_history_hash"] = "f" * 64
+        manifest["full_history_draw_count"] = 200
+        manifest["full_history_tail_count"] = 3600
+    return manifest
+
+
 def test_ddt_persisted_read_cannot_mutate_or_replace_production_output(monkeypatch) -> None:
     production = {
         "top_pairs": [(12, 0.4), (34, 0.3), (56, 0.2)],
@@ -32,7 +63,16 @@ def test_ddt_persisted_read_cannot_mutate_or_replace_production_output(monkeypat
             "score_1": 0.3,
             "score_2": 0.2,
             "score_3": 0.1,
+            "run_metadata": {
+                "provinces": ["vung-tau", "ben-tre"],
+                "input_manifest": _manifest(),
+            },
         },
+    )
+    monkeypatch.setattr(
+        predict_ensemble,
+        "load_current_freshness_manifest",
+        lambda *_args: _manifest(with_history=False),
     )
     result = predict_ensemble._generate_ddt_shadow_safely(
         object(), ["vung-tau", "ben-tre"], date(2026, 7, 21)
@@ -40,6 +80,42 @@ def test_ddt_persisted_read_cannot_mutate_or_replace_production_output(monkeypat
 
     assert result["pair_1"] == 3
     assert production == expected
+
+
+def test_ddt_persisted_legacy_or_advanced_watermark_is_rendered_stale(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        predict_ensemble,
+        "get_shadow_prediction",
+        lambda *_args: {
+            "status": "success",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "score_1": 0.3,
+            "score_2": 0.2,
+            "score_3": 0.1,
+            "run_metadata": {"provinces": ["vung-tau", "ben-tre"]},
+        },
+    )
+    monkeypatch.setattr(
+        predict_ensemble,
+        "load_current_freshness_manifest",
+        lambda *_args: _manifest("b" * 64, with_history=False),
+    )
+
+    result = predict_ensemble._generate_ddt_shadow_safely(
+        object(), ["vung-tau", "ben-tre"], date(2026, 7, 21)
+    )
+
+    assert result == {
+        "status": "stale_local",
+        "reason": "persisted_ddt_watermark_stale",
+    }
+    assert predict_ensemble._ddt_shadow_row(result).status == (
+        "Dữ liệu cũ · chờ chạy lại local"
+    )
 
 
 def test_ddt_persisted_read_failure_is_nonblocking(monkeypatch) -> None:
@@ -54,6 +130,39 @@ def test_ddt_persisted_read_failure_is_nonblocking(monkeypatch) -> None:
 
     assert result["status"] == "error"
     assert "database unavailable" in result["reason"]
+
+
+def test_ddt_current_manifest_failure_is_redacted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        predict_ensemble,
+        "get_shadow_prediction",
+        lambda *_args: {
+            "status": "success",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": {
+                "provinces": ["vung-tau", "ben-tre"],
+                "input_manifest": _manifest(),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        predict_ensemble,
+        "load_current_freshness_manifest",
+        lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("https://private.invalid authorization=Bearer raw-secret")
+        ),
+    )
+
+    result = predict_ensemble._generate_ddt_shadow_safely(
+        object(), ["vung-tau", "ben-tre"], date(2026, 7, 21)
+    )
+
+    assert result["status"] == "error"
+    assert "private.invalid" not in result["reason"]
+    assert "raw-secret" not in result["reason"]
+    assert "[redacted" in result["reason"]
 
 
 def test_ddt_persisted_scope_mismatch_is_not_rendered(monkeypatch) -> None:

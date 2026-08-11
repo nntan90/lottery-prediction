@@ -11,6 +11,7 @@ from typing import Optional, Dict
 import time
 
 from src.utils.retry import retry_with_backoff
+from src.xsmn_ensemble.resolve_provinces import XSMN_FULL_SCHEDULE
 
 class XSMNCrawler:
     """Crawler for XSMN results with station-level completeness validation."""
@@ -64,15 +65,9 @@ class XSMNCrawler:
     }
     
     # Province Schedule (0=Monday, 6=Sunday)
-    PROVINCE_SCHEDULE = {
-        0: ['tp-hcm', 'dong-thap', 'ca-mau'],
-        1: ['ben-tre', 'vung-tau', 'bac-lieu'],
-        2: ['dong-nai', 'can-tho', 'soc-trang'],
-        3: ['tay-ninh', 'an-giang', 'binh-thuan'],
-        4: ['vinh-long', 'binh-duong', 'tra-vinh'],
-        5: ['tp-hcm', 'long-an', 'binh-phuoc', 'hau-giang'],
-        6: ['tien-giang', 'kien-giang', 'da-lat']
-    }
+    # Public constant retained for crawler callers; the schedule now has one
+    # canonical owner shared with DDT freshness certification.
+    PROVINCE_SCHEDULE = XSMN_FULL_SCHEDULE
 
     def __init__(self):
         self.headers = {

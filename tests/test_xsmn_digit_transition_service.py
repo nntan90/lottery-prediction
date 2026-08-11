@@ -19,6 +19,7 @@ from src.xsmn_digit_transition import service
 from src.xsmn_digit_transition.service import (
     _bounded_oof_anchor_dates,
     _oof_forecasts,
+    generate_shadow_prediction,
     predict_digit_transition,
 )
 from src.xsmn_digit_transition.state import build_state_sequences
@@ -197,6 +198,239 @@ def test_service_returns_insufficient_without_padding() -> None:
     assert result["status"] == "insufficient_evidence"
     assert result["reason"] == "not_enough_province_transitions"
     assert result["top_3"] == []
+
+
+def _boundary_manifest(watermark: str = "a" * 64) -> dict:
+    return {
+        "manifest_version": "ddt_input_v1",
+        "status": "certified",
+        "target_date": "2026-06-10",
+        "target_provinces": ["dong-nai", "can-tho"],
+        "expected_anchors": {
+            "dong-nai": "2026-06-03",
+            "can-tho": "2026-06-03",
+        },
+        "actual_anchors": {
+            "dong-nai": "2026-06-03",
+            "can-tho": "2026-06-03",
+        },
+        "regional_boundary_date": "2026-06-09",
+        "regional_scheduled_provinces": ["ben-tre", "vung-tau", "bac-lieu"],
+        "regional_certified_provinces": ["ben-tre", "vung-tau", "bac-lieu"],
+        "boundary_watermark": watermark,
+        "issues": [],
+    }
+
+
+def test_operational_service_fails_before_scoring_when_boundary_is_incomplete(
+    monkeypatch,
+) -> None:
+    manifest = {
+        **_boundary_manifest(),
+        "status": "input_not_fresh",
+        "boundary_watermark": None,
+        "issues": [
+            {
+                "code": "tails_incomplete",
+                "province": "bac-lieu",
+                "draw_date": "2026-06-09",
+            }
+        ],
+    }
+    monkeypatch.setattr(service, "load_current_freshness_manifest", lambda *_a: manifest)
+    monkeypatch.setattr(
+        service,
+        "load_regional_tail_history",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("history must not load")),
+    )
+
+    result = generate_shadow_prediction(
+        object(),
+        ("dong-nai", "can-tho"),
+        date(2026, 6, 10),
+    )
+
+    assert result["status"] == "insufficient_evidence"
+    assert result["reason"] == "input_not_fresh"
+    assert result["top_3"] == []
+    assert result["run_metadata"]["input_manifest"] == manifest
+
+
+def test_operational_service_attaches_history_hash_and_postchecks_boundary(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history()
+    manifest = _boundary_manifest()
+    calls = iter((manifest, manifest))
+    monkeypatch.setattr(
+        service,
+        "load_current_freshness_manifest",
+        lambda *_a: next(calls),
+    )
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: rows)
+    monkeypatch.setattr(
+        service,
+        "predict_digit_transition",
+        lambda *_a, **_k: {
+            "status": "success",
+            "top_3": [1, 32, 92],
+        },
+    )
+
+    result = generate_shadow_prediction(object(), provinces, target, _config())
+
+    audit = result["run_metadata"]
+    assert result["status"] == "success"
+    assert len(audit["input_manifest"]["full_history_hash"]) == 64
+    assert audit["input_manifest"]["full_history_draw_count"] == 36
+    assert audit["postcheck_boundary_watermark"] == "a" * 64
+
+
+def test_operational_service_discards_result_if_boundary_changes_during_run(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history()
+    before = _boundary_manifest("a" * 64)
+    after = _boundary_manifest("b" * 64)
+    calls = iter((before, after))
+    monkeypatch.setattr(
+        service,
+        "load_current_freshness_manifest",
+        lambda *_a: next(calls),
+    )
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: rows)
+    monkeypatch.setattr(
+        service,
+        "predict_digit_transition",
+        lambda *_a, **_k: {"status": "success", "top_3": [1, 32, 92]},
+    )
+
+    result = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert result["status"] == "insufficient_evidence"
+    assert result["reason"] == "input_changed_during_run"
+    assert result["top_3"] == []
+    assert result["run_metadata"]["postcheck_boundary_watermark"] == "b" * 64
+
+
+def test_operational_service_rejects_history_whose_consumed_anchor_is_older(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history()
+    stale_rows = [
+        row
+        for row in rows
+        if not (
+            row["province"] == provinces[0]
+            and row["draw_date"] == "2026-06-03"
+        )
+    ]
+    manifest = _boundary_manifest()
+    calls = iter((manifest, manifest))
+    monkeypatch.setattr(
+        service,
+        "load_current_freshness_manifest",
+        lambda *_a: next(calls),
+    )
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: stale_rows)
+    monkeypatch.setattr(
+        service,
+        "predict_digit_transition",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("stale anchor must not be scored")
+        ),
+    )
+
+    result = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert result["status"] == "insufficient_evidence"
+    assert result["reason"] == "consumed_anchor_mismatch"
+    assert result["consumed_anchors"][provinces[0]] == "2026-05-27"
+    assert result["run_metadata"]["input_manifest"]["consumed_anchors"] == (
+        result["consumed_anchors"]
+    )
+
+
+def test_operational_service_sanitizes_history_load_failure_with_precheck_audit(
+    monkeypatch,
+) -> None:
+    _rows, provinces, target = _history()
+    manifest = _boundary_manifest()
+    monkeypatch.setattr(service, "load_current_freshness_manifest", lambda *_a: manifest)
+    monkeypatch.setattr(
+        service,
+        "load_regional_tail_history",
+        lambda *_a: (_ for _ in ()).throw(
+            RuntimeError("https://secret.invalid?token=raw-secret")
+        ),
+    )
+
+    result = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert result["status"] == "error"
+    assert result["reason"] == "history_load_failed"
+    assert result["failure_stage"] == "history_load"
+    assert "secret" not in str(result)
+    assert result["run_metadata"]["input_manifest"] == manifest
+
+
+def test_operational_service_sanitizes_normalization_and_scoring_failures(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history()
+    manifest = _boundary_manifest()
+    monkeypatch.setattr(service, "load_current_freshness_manifest", lambda *_a: manifest)
+    invalid_rows = [dict(row) for row in rows]
+    invalid_rows[0]["tail_2d"] = "not-a-tail"
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: invalid_rows)
+
+    normalization = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert normalization["reason"] == "history_normalization_failed"
+    assert normalization["failure_stage"] == "history_normalization"
+    assert normalization["run_metadata"]["input_manifest"] == manifest
+
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: rows)
+    monkeypatch.setattr(
+        service,
+        "predict_digit_transition",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("token=raw-secret")),
+    )
+    scoring = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert scoring["reason"] == "scoring_failed"
+    assert scoring["failure_stage"] == "scoring"
+    assert "raw-secret" not in str(scoring)
+    assert len(scoring["run_metadata"]["input_manifest"]["full_history_hash"]) == 64
+
+
+def test_operational_service_sanitizes_postcheck_failure_with_audited_history(
+    monkeypatch,
+) -> None:
+    rows, provinces, target = _history()
+    manifest = _boundary_manifest()
+    calls = iter((manifest, RuntimeError("authorization=raw-secret")))
+
+    def freshness(*_args):
+        value = next(calls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(service, "load_current_freshness_manifest", freshness)
+    monkeypatch.setattr(service, "load_regional_tail_history", lambda *_a: rows)
+    monkeypatch.setattr(
+        service,
+        "predict_digit_transition",
+        lambda *_a, **_k: {"status": "success", "top_3": [1, 32, 92]},
+    )
+
+    result = generate_shadow_prediction(object(), provinces, target, _config())
+
+    assert result["reason"] == "freshness_postcheck_failed"
+    assert result["failure_stage"] == "freshness_postcheck"
+    assert "raw-secret" not in str(result)
+    assert len(result["run_metadata"]["input_manifest"]["full_history_hash"]) == 64
 
 
 def test_service_keeps_likelihood_semantics_until_merged_calibration_gate() -> None:

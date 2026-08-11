@@ -45,6 +45,49 @@ def _vn(
     )
 
 
+def _manifest(watermark: str = "a" * 64, *, with_history: bool = False) -> dict:
+    manifest = {
+        "manifest_version": "ddt_input_v1",
+        "status": "certified",
+        "target_date": "2026-07-26",
+        "target_provinces": ["tien-giang", "kien-giang"],
+        "expected_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "actual_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "consumed_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "regional_boundary_date": "2026-07-25",
+        "regional_scheduled_provinces": [
+            "tp-hcm",
+            "long-an",
+            "binh-phuoc",
+            "hau-giang",
+        ],
+        "regional_certified_provinces": [
+            "tp-hcm",
+            "long-an",
+            "binh-phuoc",
+            "hau-giang",
+        ],
+        "required_draw_count": 6,
+        "certified_draw_count": 6,
+        "boundary_watermark": watermark,
+        "issues": [],
+    }
+    if with_history:
+        manifest["full_history_hash"] = "f" * 64
+        manifest["full_history_draw_count"] = 200
+        manifest["full_history_tail_count"] = 3600
+    return manifest
+
+
 @pytest.mark.parametrize(
     ("now", "expected"),
     [
@@ -348,6 +391,7 @@ def test_execute_persists_once_and_keeps_lock_responsive(monkeypatch) -> None:
             "status": "uncalibrated",
             "model_name": "provincial_digit_transition_v1",
             "score_semantics": "merged_pair_hit_likelihood_uncalibrated",
+            "run_metadata": {"input_manifest": _manifest(with_history=True)},
             "selected_evidence": [
                 {"pair": 3, "estimated_likelihood_uncalibrated": 0.3},
                 {"pair": 12, "estimated_likelihood_uncalibrated": 0.2},
@@ -357,6 +401,11 @@ def test_execute_persists_once_and_keeps_lock_responsive(monkeypatch) -> None:
 
     monkeypatch.setattr(ddt_local_bot, "run_ddt_subprocess", run)
     monkeypatch.setattr(ddt_local_bot, "get_shadow_prediction", lambda *_a: None)
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: _manifest(),
+    )
     monkeypatch.setattr(
         ddt_local_bot,
         "save_shadow_prediction",
@@ -388,6 +437,188 @@ def test_execute_persists_once_and_keeps_lock_responsive(monkeypatch) -> None:
     assert saved[0]["model_name"] == "ddt_shadow"
     assert saved[0]["run_metadata"]["execution_source"] == "local_telegram"
     assert "03</code> | <code>12</code> | <code>25" in message
+
+
+def test_execute_downgrades_success_without_certified_manifest(monkeypatch) -> None:
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    request = controller.create_request(
+        date(2026, 7, 26),
+        chat_id=100,
+        requested_by=200,
+        now=_vn(2026, 7, 25, 21, 0),
+    )
+    saved: list[dict] = []
+
+    async def run(*_args, **_kwargs):
+        return {
+            "status": "success",
+            "selected_evidence": [
+                {"pair": 1, "estimated_likelihood_uncalibrated": 0.3},
+                {"pair": 32, "estimated_likelihood_uncalibrated": 0.2},
+                {"pair": 92, "estimated_likelihood_uncalibrated": 0.1},
+            ],
+        }, 100
+
+    monkeypatch.setattr(ddt_local_bot, "run_ddt_subprocess", run)
+    monkeypatch.setattr(ddt_local_bot, "get_shadow_prediction", lambda *_a: None)
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("must not recheck")),
+    )
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "save_shadow_prediction",
+        lambda _db, record: saved.append(record) or True,
+    )
+
+    message = asyncio.run(controller.execute_request(request))
+
+    assert saved[0]["status"] == "error"
+    assert saved[0]["error_message"] == "invalid_ddt_input_manifest"
+    assert "Top 3" not in message
+    assert "invalid_ddt_input_manifest" in message
+
+
+def test_execute_rechecks_watermark_immediately_before_save(monkeypatch) -> None:
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    request = controller.create_request(
+        date(2026, 7, 26),
+        chat_id=100,
+        requested_by=200,
+        now=_vn(2026, 7, 25, 21, 0),
+    )
+    saved: list[dict] = []
+    events: list[str] = []
+
+    async def run(*_args, **_kwargs):
+        return {
+            "status": "success",
+            "run_metadata": {"input_manifest": _manifest(with_history=True)},
+            "selected_evidence": [
+                {"pair": 1, "estimated_likelihood_uncalibrated": 0.3},
+                {"pair": 32, "estimated_likelihood_uncalibrated": 0.2},
+                {"pair": 92, "estimated_likelihood_uncalibrated": 0.1},
+            ],
+        }, 100
+
+    monkeypatch.setattr(ddt_local_bot, "run_ddt_subprocess", run)
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "get_shadow_prediction",
+        lambda *_a: events.append("existing_read") or None,
+    )
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: events.append("freshness_recheck") or _manifest("b" * 64),
+    )
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "save_shadow_prediction",
+        lambda _db, record: events.append("save") or saved.append(record) or True,
+    )
+
+    message = asyncio.run(controller.execute_request(request))
+
+    assert saved[0]["status"] == "error"
+    assert saved[0]["error_message"] == "input_changed_before_persistence"
+    assert "Top 3" not in message
+    assert "input_changed_before_persistence" in message
+    assert events == ["existing_read", "freshness_recheck", "save"]
+
+
+def test_persisted_success_dedupe_uses_certified_watermark(monkeypatch) -> None:
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    existing = {
+        "status": "success",
+        "run_metadata": {
+            "provinces": ["tien-giang", "kien-giang"],
+            "input_manifest": _manifest(with_history=True),
+        },
+        "verified_at": None,
+    }
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "get_shadow_prediction",
+        lambda *_a: existing,
+    )
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: _manifest(),
+    )
+
+    assert asyncio.run(
+        ddt_local_bot._has_persisted_success(controller, date(2026, 7, 26))
+    )
+
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: _manifest("b" * 64),
+    )
+    assert not asyncio.run(
+        ddt_local_bot._has_persisted_success(controller, date(2026, 7, 26))
+    )
+
+
+def test_verified_legacy_success_suppresses_rerun_without_boundary_read(
+    monkeypatch,
+) -> None:
+    controller = ddt_local_bot.DDTLocalController(object(), _settings())
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "get_shadow_prediction",
+        lambda *_a: {
+            "status": "success",
+            "verified_at": "2026-07-26T14:00:00+00:00",
+            "run_metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        ddt_local_bot,
+        "load_current_freshness_manifest",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("must not read")),
+    )
+
+    assert asyncio.run(
+        ddt_local_bot._has_persisted_success(controller, date(2026, 7, 26))
+    )
+
+
+def test_outcome_message_shows_certified_input_evidence() -> None:
+    message = ddt_local_bot.format_outcome_message(
+        {
+            "status": "success",
+            "score_semantics": "merged_pair_hit_likelihood_uncalibrated",
+            "selected_evidence": [{"pair": 1}, {"pair": 32}, {"pair": 92}],
+            "run_metadata": {"input_manifest": _manifest(with_history=True)},
+        },
+        date(2026, 7, 26),
+        ("tien-giang", "kien-giang"),
+        1200,
+    )
+
+    assert "tien-giang 19/07" in message
+    assert "25/07 · 4/4 đài" in message
+    assert "aaaaaaaaaa" in message
+
+
+def test_outcome_message_never_displays_success_without_valid_manifest() -> None:
+    message = ddt_local_bot.format_outcome_message(
+        {
+            "status": "success",
+            "selected_evidence": [{"pair": 1}, {"pair": 32}, {"pair": 92}],
+            "run_metadata": {},
+        },
+        date(2026, 7, 26),
+        ("tien-giang", "kien-giang"),
+        100,
+    )
+
+    assert "Top 3" not in message
+    assert "invalid_ddt_input_manifest" in message
 
 
 def test_timeout_kills_child_and_returns_persistable_error(monkeypatch) -> None:

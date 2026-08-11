@@ -102,6 +102,7 @@ from src.scoring.credibility_scorer import compute_credibility_scores
 from src.xsmb_combo.shadow import maybe_run_xsmb_combo_shadow
 
 from src.database.prediction_repo import (
+    ddt_record_matches_current_manifest,
     get_shadow_prediction,
     normalize_shadow_prediction,
     normalize_xsmb_combo_shadow,
@@ -111,6 +112,7 @@ from src.database.prediction_repo import (
     save_shadow_prediction,
     shadow_tracking_schema_ready,
 )
+from src.xsmn_digit_transition.service import load_current_freshness_manifest
 
 
 XSMB_ACTIVE_MODEL_NAMES = [
@@ -182,13 +184,30 @@ def _generate_ddt_shadow_safely(
                     "status": "error",
                     "reason": "persisted_ddt_scope_mismatch",
                 }
+            if result.get("status") in {"success", "uncalibrated"}:
+                current_manifest = load_current_freshness_manifest(
+                    db,
+                    provinces,
+                    target_date,
+                )
+                if not ddt_record_matches_current_manifest(result, current_manifest):
+                    return {
+                        "status": "stale_local",
+                        "reason": (
+                            "current_ddt_input_not_fresh"
+                            if current_manifest.get("status") != "certified"
+                            else "persisted_ddt_watermark_stale"
+                        ),
+                    }
             return result
         return {
             "status": "pending_local",
             "reason": "waiting_for_local_run",
         }
     except Exception as exc:
-        reason = (" ".join(str(exc).split()) or "persisted_ddt_read_failed")[:160]
+        reason = (
+            sanitize_prediction_reason(exc) or "persisted_ddt_read_failed"
+        )[:160]
         print(f"     ⚠️ DDT persisted row unavailable; production preserved: {reason}")
         return {"status": "error", "reason": reason}
 
@@ -231,7 +250,7 @@ def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
             )
         except (KeyError, TypeError, ValueError):
             return ShadowRow(label="DDT shadow", status="Tạm không khả dụng")
-    if result and result.get("status") == "insufficient_evidence":
+    if result and result.get("status") in {"insufficient", "insufficient_evidence"}:
         reason = str(result.get("error_message") or result.get("reason") or "").strip()
         status = "Chưa đủ dữ liệu"
         if reason:
@@ -239,6 +258,8 @@ def _ddt_shadow_row(result: Optional[dict]) -> ShadowRow:
         return ShadowRow(label="DDT shadow", status=status)
     if result and result.get("status") == "pending_local":
         return ShadowRow(label="DDT shadow", status="Chờ chạy local")
+    if result and result.get("status") == "stale_local":
+        return ShadowRow(label="DDT shadow", status="Dữ liệu cũ · chờ chạy lại local")
     if result and result.get("status") == "error":
         reason = str(result.get("error_message") or result.get("reason") or "").strip()
         status = "Lỗi local"

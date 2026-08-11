@@ -98,6 +98,52 @@ class MockDB:
         return False
 
 
+def _ddt_manifest(watermark="a" * 64):
+    return {
+        "manifest_version": "ddt_input_v1",
+        "status": "certified",
+        "target_date": "2026-07-26",
+        "target_provinces": ["tien-giang", "kien-giang"],
+        "expected_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "actual_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "consumed_anchors": {
+            "tien-giang": "2026-07-19",
+            "kien-giang": "2026-07-19",
+        },
+        "regional_scheduled_provinces": [
+            "tp-hcm",
+            "long-an",
+            "binh-phuoc",
+            "hau-giang",
+        ],
+        "regional_certified_provinces": [
+            "tp-hcm",
+            "long-an",
+            "binh-phuoc",
+            "hau-giang",
+        ],
+        "required_draw_count": 6,
+        "certified_draw_count": 6,
+        "boundary_watermark": watermark,
+        "full_history_hash": "f" * 64,
+        "full_history_draw_count": 200,
+        "full_history_tail_count": 3600,
+    }
+
+
+def _ddt_metadata(watermark="a" * 64):
+    return {
+        "provinces": ["tien-giang", "kien-giang"],
+        "input_manifest": _ddt_manifest(watermark),
+    }
+
+
 class TestSavePrediction(unittest.TestCase):
     """Tests for save_prediction function."""
 
@@ -618,7 +664,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             "prediction_date": "2026-07-26",
             "region": "XSMN",
             "province": "all",
-            "model_name": "ddt_shadow",
+            "model_name": "cmr_shadow",
             "model_type": "shadow",
             "pair_1": 3,
             "status": "success",
@@ -887,7 +933,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertFalse(save_shadow_prediction(db, incoming))
         self.assertFalse(db.update_attempted)
 
-    def test_same_success_retry_preserves_existing_verification(self):
+    def test_verified_ddt_same_retry_is_idempotent_without_overwrite(self):
         from src.database.prediction_repo import save_shadow_prediction
 
         existing = {
@@ -897,7 +943,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             "pair_1": 25,
             "pair_2": 3,
             "pair_3": 12,
-            "run_metadata": {"provinces": ["a", "b"]},
+            "run_metadata": _ddt_metadata(),
             "hit": True,
             "matched_pairs": [3, 12],
             "hit_count": 2,
@@ -914,7 +960,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             "pair_1": 3,
             "pair_2": 12,
             "pair_3": 25,
-            "run_metadata": {"provinces": ["a", "b"]},
+            "run_metadata": _ddt_metadata(),
             "hit": None,
             "matched_pairs": None,
             "hit_count": None,
@@ -923,15 +969,237 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         }
 
         self.assertTrue(save_shadow_prediction(db, incoming))
+        self.assertNotIn("model_predictions", db.updated)
+
+    def test_unverified_ddt_success_refreshes_when_watermark_advances(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "ddt_shadow",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": _ddt_metadata("a" * 64),
+            "verified_at": None,
+        }
+        incoming = {
+            **existing,
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "run_metadata": _ddt_metadata("b" * 64),
+        }
+        incoming.pop("id")
+        db = MockDB({"model_predictions": [existing]})
+
+        self.assertTrue(save_shadow_prediction(db, incoming))
         updated = db.updated["model_predictions"][0]
-        for field in (
-            "hit",
-            "matched_pairs",
-            "hit_count",
-            "combo_hit",
-            "verified_at",
-        ):
-            self.assertNotIn(field, updated)
+        self.assertEqual(
+            updated["run_metadata"]["input_manifest"]["boundary_watermark"],
+            "b" * 64,
+        )
+
+    def test_unverified_ddt_same_watermark_is_idempotent(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "ddt_shadow",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": _ddt_metadata(),
+            "verified_at": None,
+        }
+        incoming = {
+            **existing,
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+        }
+        incoming.pop("id")
+        db = MockDB({"model_predictions": [existing]})
+
+        self.assertTrue(save_shadow_prediction(db, incoming))
+        self.assertNotIn("model_predictions", db.updated)
+
+    def test_ddt_watermark_refresh_uses_verified_null_cas_and_loses_to_verify(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        existing = {
+            "id": 9,
+            "status": "success",
+            "model_name": "ddt_shadow",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": _ddt_metadata("a" * 64),
+            "verified_at": None,
+        }
+        verified = {
+            **existing,
+            "verified_at": "2026-07-26T14:00:00+00:00",
+        }
+        incoming = {
+            **existing,
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "run_metadata": _ddt_metadata("b" * 64),
+        }
+        incoming.pop("id")
+
+        class CASQuery:
+            def __init__(self, database):
+                self.database = database
+                self.action = "select"
+
+            def select(self, *_args, **_kwargs): return self
+            def eq(self, *_args, **_kwargs): return self
+            def neq(self, *_args, **_kwargs): return self
+            def limit(self, *_args, **_kwargs): return self
+
+            def is_(self, column, value):
+                if self.action == "update" and (column, value) == (
+                    "verified_at",
+                    "null",
+                ):
+                    self.database.cas_used = True
+                return self
+
+            def update(self, _payload, *_args, **_kwargs):
+                self.action = "update"
+                return self
+
+            def execute(self):
+                if self.action == "update":
+                    return type("Response", (), {"data": []})()
+                self.database.select_count += 1
+                data = [existing] if self.database.select_count == 1 else [verified]
+                return type("Response", (), {"data": data})()
+
+        class CASDB:
+            def __init__(self):
+                self.cas_used = False
+                self.select_count = 0
+                self.supabase = type(
+                    "Supabase",
+                    (),
+                    {"table": lambda _self, _name: CASQuery(self)},
+                )()
+
+        db = CASDB()
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertTrue(db.cas_used)
+        self.assertEqual(db.select_count, 2)
+
+    def test_ddt_unique_insert_race_reapplies_verified_immutability(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        raced = {
+            "id": 9,
+            "status": "success",
+            "model_name": "ddt_shadow",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": _ddt_metadata("a" * 64),
+            "verified_at": "2026-07-26T14:00:00+00:00",
+        }
+        incoming = {
+            **raced,
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "run_metadata": _ddt_metadata("b" * 64),
+            "verified_at": None,
+        }
+        incoming.pop("id")
+
+        class RaceQuery:
+            def __init__(self, database):
+                self.database = database
+                self.action = "select"
+
+            def select(self, *_args, **_kwargs): return self
+            def eq(self, *_args, **_kwargs): return self
+            def neq(self, *_args, **_kwargs): return self
+            def is_(self, *_args, **_kwargs): return self
+            def limit(self, *_args, **_kwargs): return self
+
+            def insert(self, _payload, *_args, **_kwargs):
+                self.action = "insert"
+                return self
+
+            def update(self, _payload, *_args, **_kwargs):
+                self.database.update_attempted = True
+                self.action = "update"
+                return self
+
+            def execute(self):
+                if self.action == "insert":
+                    raise Exception("duplicate key 23505")
+                if self.action == "update":
+                    raise AssertionError("verified DDT race must not update")
+                self.database.select_count += 1
+                data = [] if self.database.select_count == 1 else [raced]
+                return type("Response", (), {"data": data})()
+
+        class RaceDB:
+            def __init__(self):
+                self.select_count = 0
+                self.update_attempted = False
+                self.supabase = type(
+                    "Supabase",
+                    (),
+                    {"table": lambda _self, _name: RaceQuery(self)},
+                )()
+
+        db = RaceDB()
+
+        self.assertFalse(save_shadow_prediction(db, incoming))
+        self.assertFalse(db.update_attempted)
+
+    def test_ddt_success_without_certified_manifest_is_rejected(self):
+        from src.database.prediction_repo import save_shadow_prediction
+
+        db = MockDB({"model_predictions": []})
+        record = {
+            "prediction_date": "2026-07-26",
+            "region": "XSMN",
+            "province": "all",
+            "model_name": "ddt_shadow",
+            "status": "success",
+            "pair_1": 1,
+            "pair_2": 32,
+            "pair_3": 92,
+            "run_metadata": {"provinces": ["tien-giang", "kien-giang"]},
+        }
+
+        self.assertFalse(save_shadow_prediction(db, record))
+        self.assertNotIn("model_predictions", db.inserted)
+
+    def test_ddt_manifest_scope_requires_two_nonempty_strings_before_set(self):
+        from src.database.prediction_repo import get_certified_ddt_manifest
+
+        for invalid_scope in ([[], "kien-giang"], ["", "kien-giang"]):
+            manifest = _ddt_manifest()
+            manifest["target_provinces"] = invalid_scope
+            record = {"run_metadata": {"input_manifest": manifest}}
+
+            self.assertIsNone(get_certified_ddt_manifest(record))
+
+        missing_consumed = _ddt_manifest()
+        missing_consumed.pop("consumed_anchors")
+        self.assertIsNone(
+            get_certified_ddt_manifest(
+                {"run_metadata": {"input_manifest": missing_consumed}}
+            )
+        )
 
     def test_verified_shadow_rejects_retry_with_different_top_three(self):
         from src.database.prediction_repo import save_shadow_prediction

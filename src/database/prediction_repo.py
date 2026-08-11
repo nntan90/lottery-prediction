@@ -12,6 +12,7 @@ import os
 import re
 from typing import Any, Optional, TYPE_CHECKING
 from src.database.supabase_client import LotteryDB
+from src.xsmn_digit_transition.domain import FRESHNESS_MANIFEST_VERSION
 
 if TYPE_CHECKING:
     from src.xsmb_combo.domain import ComboSelectorResult
@@ -403,6 +404,88 @@ def _same_shadow_prediction(existing: dict, incoming: dict) -> bool:
     return not old_scope or not new_scope or list(old_scope) == list(new_scope)
 
 
+def get_certified_ddt_manifest(
+    record: Optional[dict],
+    *,
+    require_full_history: bool = True,
+) -> Optional[dict]:
+    """Return a structurally valid, credential-free DDT input manifest."""
+    if not isinstance(record, dict):
+        return None
+    metadata = record.get("run_metadata")
+    manifest = metadata.get("input_manifest") if isinstance(metadata, dict) else None
+    if not isinstance(manifest, dict):
+        return None
+    watermark = manifest.get("boundary_watermark")
+    full_history_hash = manifest.get("full_history_hash")
+    target_provinces = manifest.get("target_provinces")
+    expected_anchors = manifest.get("expected_anchors")
+    actual_anchors = manifest.get("actual_anchors")
+    consumed_anchors = manifest.get("consumed_anchors")
+    regional_scheduled = manifest.get("regional_scheduled_provinces")
+    regional_certified = manifest.get("regional_certified_provinces")
+    required_draw_count = manifest.get("required_draw_count")
+    certified_draw_count = manifest.get("certified_draw_count")
+    if (
+        manifest.get("manifest_version") != FRESHNESS_MANIFEST_VERSION
+        or manifest.get("status") != "certified"
+        or not isinstance(watermark, str)
+        or re.fullmatch(r"[0-9a-f]{64}", watermark) is None
+        or not isinstance(target_provinces, list)
+        or len(target_provinces) != 2
+        or any(
+            not isinstance(province, str) or not province.strip()
+            for province in target_provinces
+        )
+        or len(set(target_provinces)) != 2
+        or not isinstance(expected_anchors, dict)
+        or set(expected_anchors) != set(target_provinces)
+        or expected_anchors != actual_anchors
+        or not isinstance(regional_scheduled, list)
+        or not regional_scheduled
+        or regional_scheduled != regional_certified
+        or not isinstance(required_draw_count, int)
+        or required_draw_count < 1
+        or certified_draw_count != required_draw_count
+    ):
+        return None
+    if require_full_history and (
+        not isinstance(full_history_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", full_history_hash) is None
+        or expected_anchors != consumed_anchors
+        or not isinstance(manifest.get("full_history_draw_count"), int)
+        or manifest.get("full_history_draw_count", 0) < 1
+        or manifest.get("full_history_tail_count")
+        != manifest.get("full_history_draw_count", 0) * 18
+    ):
+        return None
+    return manifest
+
+
+def ddt_record_matches_current_manifest(record: Optional[dict], current: dict) -> bool:
+    """Compare a persisted DDT success with a freshly queried boundary."""
+    if not record or record.get("status") not in SHADOW_SUCCESS_STATUSES:
+        return False
+    stored = get_certified_ddt_manifest(record)
+    current_manifest = get_certified_ddt_manifest(
+        {"run_metadata": {"input_manifest": current}},
+        require_full_history=False,
+    )
+    if stored is None or current_manifest is None:
+        return False
+    metadata = record.get("run_metadata")
+    stored_scope = metadata.get("provinces") if isinstance(metadata, dict) else None
+    return (
+        stored.get("boundary_watermark")
+        == current_manifest.get("boundary_watermark")
+        and stored.get("target_date") == current_manifest.get("target_date")
+        and (
+            not stored_scope
+            or list(stored_scope) == list(current_manifest.get("target_provinces") or ())
+        )
+    )
+
+
 def _prepare_shadow_retry(existing: Optional[dict], incoming: dict) -> dict:
     """Preserve verification only when a successful retry predicts the same set."""
     prepared = incoming.copy()
@@ -480,6 +563,74 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
         province=province,
     )
     if (
+        record.get("model_name") == "ddt_shadow"
+        and record.get("status") in SHADOW_SUCCESS_STATUSES
+        and get_certified_ddt_manifest(record) is None
+    ):
+        return False
+
+    def same_ddt_identity(current: Optional[dict], value: dict) -> bool:
+        old_manifest = get_certified_ddt_manifest(current)
+        new_manifest = get_certified_ddt_manifest(value)
+        return bool(
+            old_manifest
+            and new_manifest
+            and old_manifest.get("boundary_watermark")
+            == new_manifest.get("boundary_watermark")
+            and current
+            and _same_shadow_prediction(current, value)
+        )
+
+    def ddt_existing_decision(
+        current: Optional[dict],
+        value: dict,
+    ) -> Optional[bool]:
+        """Return a terminal DDT decision, or None when a guarded update may run."""
+        if value.get("model_name") != "ddt_shadow" or not current:
+            return None
+        if current.get("verified_at"):
+            return same_ddt_identity(current, value)
+        if (
+            current.get("status") in SHADOW_SUCCESS_STATUSES
+            and value.get("status") not in SHADOW_SUCCESS_STATUSES
+        ):
+            return False
+        if (
+            current.get("status") in SHADOW_SUCCESS_STATUSES
+            and value.get("status") in SHADOW_SUCCESS_STATUSES
+        ):
+            old_manifest = get_certified_ddt_manifest(current)
+            new_manifest = get_certified_ddt_manifest(value)
+            if (
+                old_manifest
+                and new_manifest
+                and old_manifest.get("boundary_watermark")
+                == new_manifest.get("boundary_watermark")
+            ):
+                return _same_shadow_prediction(current, value)
+        return None
+
+    def ddt_watermark_changed(current: dict, value: dict) -> bool:
+        if (
+            value.get("model_name") != "ddt_shadow"
+            or value.get("status") not in SHADOW_SUCCESS_STATUSES
+        ):
+            return False
+        old_manifest = get_certified_ddt_manifest(current)
+        new_manifest = get_certified_ddt_manifest(value)
+        return bool(
+            new_manifest
+            and (
+                old_manifest is None
+                or old_manifest.get("boundary_watermark")
+                != new_manifest.get("boundary_watermark")
+            )
+        )
+
+    ddt_decision = ddt_existing_decision(existing, record)
+    if ddt_decision is not None:
+        return ddt_decision
+    if (
         record.get("model_name") == "llm_gen"
         and existing
         and existing.get("status") in SHADOW_SUCCESS_STATUSES
@@ -510,6 +661,7 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
         if current:
             update_value = value.copy()
             same_prediction = _same_shadow_prediction(current, value)
+            watermark_changed = ddt_watermark_changed(current, value)
             if current.get("verified_at") and not same_prediction:
                 return False
             if (
@@ -528,15 +680,16 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                     update_value.pop(field, None)
             query = db.supabase.table("model_predictions").update(update_value) \
                 .eq("id", current["id"])
-            if not same_prediction:
+            guarded_update = not same_prediction or watermark_changed
+            if guarded_update:
                 # Close the read/update race with verification.  Once
-                # verified_at is set, a retry with a different Top 3 cannot
-                # replace the settled ledger row.
+                # verified_at is set, neither a different Top 3 nor a refreshed
+                # DDT watermark can replace the settled ledger row.
                 query = query.is_("verified_at", "null")
             if value.get("status") not in SHADOW_SUCCESS_STATUSES:
                 query = query.neq("status", "success")
             response = query.execute()
-            if not same_prediction and not (getattr(response, "data", None) or []):
+            if guarded_update and not (getattr(response, "data", None) or []):
                 latest = get_shadow_prediction(
                     db,
                     str(value["model_name"]),
@@ -544,6 +697,8 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                     region=str(value.get("region") or region),
                     province=value.get("province", province),
                 )
+                if watermark_changed:
+                    return same_ddt_identity(latest, value)
                 return bool(latest and _same_shadow_prediction(latest, value))
             return True
         try:
@@ -567,6 +722,9 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                 return False
             if not raced:
                 raise
+            raced_ddt_decision = ddt_existing_decision(raced, value)
+            if raced_ddt_decision is not None:
+                return raced_ddt_decision
             if (
                 value.get("model_name") == "llm_gen"
                 and raced.get("status") in SHADOW_SUCCESS_STATUSES
@@ -588,10 +746,10 @@ def save_shadow_prediction(db: LotteryDB, record: dict) -> bool:
                 print("  ⚠️  model_predictions missing; shadow result was not saved")
                 return False
             raise
-        if record.get("model_name") == "llm_gen":
+        if record.get("model_name") in {"llm_gen", "ddt_shadow"}:
             print(
                 "  ⚠️  Shadow tracking migration pending; "
-                "LLM_Gen audit row was not saved"
+                f"{record.get('model_name')} audit row was not saved"
             )
             return False
         print("  ⚠️  Shadow tracking migration pending; saving legacy-compatible row")

@@ -18,7 +18,7 @@ Usage:
 """
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from typing import List
 
 
@@ -34,7 +34,28 @@ XSMN_ENSEMBLE_SCHEDULE: dict[int, List[str]] = {
     6: ["tien-giang", "kien-giang"],   # Chủ Nhật
 }
 
-DOW_NAMES_VN = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
+# Canonical schedule for source-integrity checks and crawling.  The ensemble
+# intentionally keeps its two-province focus above, while freshness checks must
+# certify every XSMN station that was scheduled on the regional D-1 boundary.
+XSMN_FULL_SCHEDULE: dict[int, List[str]] = {
+    0: ["tp-hcm", "dong-thap", "ca-mau"],
+    1: ["ben-tre", "vung-tau", "bac-lieu"],
+    2: ["dong-nai", "can-tho", "soc-trang"],
+    3: ["tay-ninh", "an-giang", "binh-thuan"],
+    4: ["vinh-long", "binh-duong", "tra-vinh"],
+    5: ["tp-hcm", "long-an", "binh-phuoc", "hau-giang"],
+    6: ["tien-giang", "kien-giang", "da-lat"],
+}
+
+DOW_NAMES_VN = [
+    "Thứ Hai",
+    "Thứ Ba",
+    "Thứ Tư",
+    "Thứ Năm",
+    "Thứ Sáu",
+    "Thứ Bảy",
+    "Chủ Nhật",
+]
 
 
 def get_target_provinces(target_date: date) -> List[str]:
@@ -63,6 +84,35 @@ def get_target_provinces(target_date: date) -> List[str]:
 def get_dow_label(target_date: date) -> str:
     """Trả về tên thứ tiếng Việt."""
     return DOW_NAMES_VN[target_date.weekday()]
+
+
+def get_scheduled_provinces(target_date: date) -> List[str]:
+    """Return every XSMN province scheduled for ``target_date``.
+
+    Unlike :func:`get_target_provinces`, this canonical source schedule never
+    reads ``TARGET_PROVINCES``.  It is used to prove crawler coverage and keeps
+    the existing two-province production scope unchanged.
+    """
+    return list(XSMN_FULL_SCHEDULE.get(target_date.weekday(), ()))
+
+
+def get_previous_scheduled_date(target_date: date, province: str) -> date:
+    """Resolve a province's latest scheduled occurrence strictly before D.
+
+    Searching the schedule instead of subtracting seven days correctly routes
+    TP.HCM from Monday to the preceding Saturday and from Saturday to Monday.
+    """
+    if not isinstance(target_date, date):
+        raise TypeError("target_date must be a date")
+    if not isinstance(province, str) or not province.strip():
+        raise ValueError("province must be a nonempty string")
+    if not any(province in values for values in XSMN_FULL_SCHEDULE.values()):
+        raise ValueError(f"unknown XSMN province: {province}")
+    for days_back in range(1, 8):
+        candidate = target_date - timedelta(days=days_back)
+        if province in XSMN_FULL_SCHEDULE.get(candidate.weekday(), ()):
+            return candidate
+    raise RuntimeError(f"no previous scheduled date found for {province}")
 
 
 if __name__ == "__main__":

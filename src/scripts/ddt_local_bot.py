@@ -30,12 +30,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from src.database.prediction_repo import (
     SHADOW_SUCCESS_STATUSES,
+    ddt_record_matches_current_manifest,
+    get_certified_ddt_manifest,
     get_shadow_prediction,
     normalize_shadow_prediction,
     save_shadow_prediction,
 )
 from src.database.supabase_client import LotteryDB
 from src.xsmn_digit_transition.config import DigitTransitionConfig
+from src.xsmn_digit_transition.service import load_current_freshness_manifest
 from src.xsmn_ensemble.resolve_provinces import XSMN_ENSEMBLE_SCHEDULE
 
 
@@ -623,6 +626,26 @@ class DDTLocalController:
                     "reason": _safe_reason(exc),
                 }
             config = DigitTransitionConfig()
+
+            def failure_record(current: dict, reason: str) -> dict:
+                metadata = current.get("run_metadata")
+                return normalize_shadow_prediction(
+                    {
+                        "status": "error",
+                        "reason": reason,
+                        "data_cutoff": request.target_date.isoformat(),
+                        "run_metadata": (
+                            dict(metadata) if isinstance(metadata, dict) else {}
+                        ),
+                    },
+                    model_name="ddt_shadow",
+                    target_date=request.target_date,
+                    provinces=request.provinces,
+                    execution_source="local_telegram",
+                    runtime_ms=runtime_ms,
+                    config_metadata=asdict(config),
+                )
+
             try:
                 record = normalize_shadow_prediction(
                     payload,
@@ -647,28 +670,54 @@ class DDTLocalController:
                     runtime_ms=runtime_ms,
                     config_metadata=asdict(config),
                 )
-            if record["status"] in SHADOW_SUCCESS_STATUSES:
-                outcome_payload = {
-                    "status": record["status"],
-                    "score_semantics": record.get("score_semantics"),
-                    "selected_evidence": [
-                        {"pair": record[f"pair_{index}"]}
-                        for index in range(1, 4)
-                    ],
-                }
-            else:
-                outcome_payload = {
-                    "status": record["status"],
-                    "reason": record.get("error_message") or "invalid_shadow_top_3",
-                }
+            if (
+                record["status"] in SHADOW_SUCCESS_STATUSES
+                and get_certified_ddt_manifest(record) is None
+            ):
+                record = failure_record(record, "invalid_ddt_input_manifest")
             preserved_success = False
             persistence_error: Optional[str] = None
+            existing: Optional[dict] = None
             try:
                 existing = get_shadow_prediction(
                     self.db,
                     "ddt_shadow",
                     request.target_date,
                 )
+            except Exception as exc:
+                persistence_error = _safe_reason(exc, 160)
+
+            if record["status"] in SHADOW_SUCCESS_STATUSES:
+                try:
+                    current_manifest = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            load_current_freshness_manifest,
+                            self.db,
+                            request.provinces,
+                            request.target_date,
+                        ),
+                        timeout=ASYNC_DB_TIMEOUT_SECONDS,
+                    )
+                    metadata = record.get("run_metadata")
+                    if isinstance(metadata, dict):
+                        metadata["persistence_recheck_status"] = (
+                            current_manifest.get("status")
+                        )
+                        metadata["persistence_recheck_boundary_watermark"] = (
+                            current_manifest.get("boundary_watermark")
+                        )
+                    if not ddt_record_matches_current_manifest(
+                        record,
+                        current_manifest,
+                    ):
+                        record = failure_record(
+                            record,
+                            "input_changed_before_persistence",
+                        )
+                except Exception:
+                    record = failure_record(record, "freshness_recheck_failed")
+
+            try:
                 saved = save_shadow_prediction(self.db, record)
                 preserved_success = bool(
                     not saved
@@ -680,6 +729,22 @@ class DDTLocalController:
                     persistence_error = "không lưu được model_predictions"
             except Exception as exc:
                 persistence_error = _safe_reason(exc, 160)
+            if record["status"] in SHADOW_SUCCESS_STATUSES:
+                outcome_payload = {
+                    "status": record["status"],
+                    "score_semantics": record.get("score_semantics"),
+                    "run_metadata": record.get("run_metadata"),
+                    "selected_evidence": [
+                        {"pair": record[f"pair_{index}"]}
+                        for index in range(1, 4)
+                    ],
+                }
+            else:
+                outcome_payload = {
+                    "status": record["status"],
+                    "reason": record.get("error_message") or "invalid_shadow_top_3",
+                    "run_metadata": record.get("run_metadata"),
+                }
             return format_outcome_message(
                 outcome_payload,
                 request.target_date,
@@ -694,20 +759,68 @@ async def _has_persisted_success(
     controller: DDTLocalController,
     target_date: date,
 ) -> bool:
-    """Read durable success without blocking Telegram's asyncio event loop."""
+    """Return true only for a verified or currently certified DDT success."""
+    def read_current_state() -> bool:
+        existing = get_shadow_prediction(
+            controller.db,
+            "ddt_shadow",
+            target_date,
+        )
+        if not existing or existing.get("status") not in SHADOW_SUCCESS_STATUSES:
+            return False
+        if existing.get("verified_at"):
+            return True
+        provinces = tuple(XSMN_ENSEMBLE_SCHEDULE.get(target_date.weekday(), ()))
+        if len(provinces) != 2:
+            return False
+        current_manifest = load_current_freshness_manifest(
+            controller.db,
+            provinces,
+            target_date,
+        )
+        return ddt_record_matches_current_manifest(existing, current_manifest)
+
     try:
-        existing = await asyncio.wait_for(
-            asyncio.to_thread(
-                get_shadow_prediction,
-                controller.db,
-                "ddt_shadow",
-                target_date,
-            ),
+        return await asyncio.wait_for(
+            asyncio.to_thread(read_current_state),
             timeout=ASYNC_DB_TIMEOUT_SECONDS,
         )
     except Exception:
         return False
-    return bool(existing and existing.get("status") in SHADOW_SUCCESS_STATUSES)
+
+
+def _input_manifest(payload: dict) -> Optional[dict]:
+    metadata = payload.get("run_metadata")
+    manifest = metadata.get("input_manifest") if isinstance(metadata, dict) else None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _append_input_evidence(lines: list[str], payload: dict) -> None:
+    """Render compact certified anchors and watermark for human audit."""
+    manifest = _input_manifest(payload)
+    if not manifest:
+        return
+    anchors = manifest.get("actual_anchors")
+    if isinstance(anchors, dict):
+        rendered = [
+            f"{province} {str(draw_date)[8:10]}/{str(draw_date)[5:7]}"
+            for province, draw_date in anchors.items()
+            if draw_date
+        ]
+        if rendered:
+            lines.append("📅 Anchor: " + " • ".join(escape(item) for item in rendered))
+    regional_date = manifest.get("regional_boundary_date")
+    scheduled = manifest.get("regional_scheduled_provinces")
+    certified = manifest.get("regional_certified_provinces")
+    if regional_date and isinstance(scheduled, list) and isinstance(certified, list):
+        date_text = str(regional_date)
+        lines.append(
+            f"📚 D-1: {escape(date_text[8:10] + '/' + date_text[5:7])} · "
+            f"{len(certified)}/{len(scheduled)} đài"
+        )
+    watermark = manifest.get("boundary_watermark")
+    if isinstance(watermark, str) and watermark:
+        lines.append(f"🔐 Input: <code>{escape(watermark[:10])}</code>")
 
 
 def format_outcome_message(
@@ -721,6 +834,22 @@ def format_outcome_message(
 ) -> str:
     """Build one compact outcome without raw traceback or credentials."""
     status = str(payload.get("status") or "error")
+    if (
+        status in SHADOW_SUCCESS_STATUSES
+        and get_certified_ddt_manifest(
+            {
+                "status": status,
+                "run_metadata": payload.get("run_metadata"),
+            }
+        )
+        is None
+    ):
+        status = "error"
+        payload = {
+            **payload,
+            "status": "error",
+            "reason": "invalid_ddt_input_manifest",
+        }
     lines = [
         f"🧪 <b>DDT local — {target_date:%d/%m/%Y}</b>",
         f"📍 <code>{escape(' + '.join(provinces))}</code>",
@@ -737,10 +866,32 @@ def format_outcome_message(
             "✅ Top 3: " + " | ".join(f"<code>{pair:02d}</code>" for pair in pairs)
         )
         lines.append(f"📐 {semantics}")
+        _append_input_evidence(lines, payload)
     elif status in {"insufficient", "insufficient_evidence"}:
-        lines.append(
-            f"⏳ Chưa đủ dữ liệu: {escape(_safe_reason(payload.get('reason')))}"
-        )
+        reason = _safe_reason(payload.get("reason"))
+        if reason == "input_not_fresh":
+            lines.append(
+                "⏳ Dữ liệu DDT chưa hoàn tất; hãy chạy lại sau khi crawler xong."
+            )
+        elif reason == "input_changed_during_run":
+            lines.append(
+                "⏳ Dữ liệu thay đổi trong lúc chạy; vui lòng xác nhận chạy lại."
+            )
+        else:
+            lines.append(f"⏳ Chưa đủ dữ liệu: {escape(reason)}")
+        manifest = _input_manifest(payload)
+        issues = manifest.get("issues") if isinstance(manifest, dict) else None
+        if isinstance(issues, list):
+            for issue in issues[:3]:
+                if not isinstance(issue, dict):
+                    continue
+                lines.append(
+                    "└ "
+                    + escape(
+                        f"{issue.get('province', '?')} {issue.get('draw_date', '?')}: "
+                        f"{issue.get('code', 'input_not_fresh')}"
+                    )
+                )
     else:
         lines.append(f"⚠️ Lỗi DDT: {escape(_safe_reason(payload.get('reason')))}")
     if preserved_success:

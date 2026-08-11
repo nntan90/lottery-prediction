@@ -16,6 +16,9 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.xsmn_ensemble.resolve_provinces import (
+    XSMN_FULL_SCHEDULE,
+    get_previous_scheduled_date,
+    get_scheduled_provinces,
     get_target_provinces,
     get_dow_label,
     XSMN_ENSEMBLE_SCHEDULE,
@@ -80,6 +83,30 @@ class TestProvinceSchedule(unittest.TestCase):
         """TP.HCM xổ cả Thứ Hai (DOW=0) lẫn Thứ Bảy (DOW=5)."""
         tphcm_days = [dow for dow, provs in XSMN_ENSEMBLE_SCHEDULE.items() if "tp-hcm" in provs]
         self.assertEqual(sorted(tphcm_days), [0, 5])
+
+    def test_full_schedule_is_shared_with_crawler_without_changing_scope(self):
+        from src.crawler.xsmn_crawler import XSMNCrawler
+
+        self.assertIs(XSMNCrawler.PROVINCE_SCHEDULE, XSMN_FULL_SCHEDULE)
+        self.assertEqual(
+            get_scheduled_provinces(date(2026, 8, 10)),
+            ["tp-hcm", "dong-thap", "ca-mau"],
+        )
+        self.assertEqual(len(get_target_provinces(date(2026, 8, 10))), 2)
+
+    def test_previous_occurrence_handles_both_tphcm_routes(self):
+        self.assertEqual(
+            get_previous_scheduled_date(date(2026, 8, 10), "tp-hcm"),
+            date(2026, 8, 8),
+        )
+        self.assertEqual(
+            get_previous_scheduled_date(date(2026, 8, 15), "tp-hcm"),
+            date(2026, 8, 10),
+        )
+        self.assertEqual(
+            get_previous_scheduled_date(date(2026, 8, 11), "vung-tau"),
+            date(2026, 8, 4),
+        )
 
     def test_province_slugs_use_dashes(self):
         """All slugs must use dashes, not underscores (match xsmn_crawler format)."""

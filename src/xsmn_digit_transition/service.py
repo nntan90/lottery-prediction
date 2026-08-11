@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from itertools import combinations
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .calibration import CalibrationObservation, ReliabilityModel, fit_reliability_model
 from .config import DigitTransitionConfig
-from .domain import DrawSnapshot, normalize_tail_rows, validate_provinces
+from .domain import (
+    DrawSnapshot,
+    build_freshness_manifest,
+    fingerprint_draw_history,
+    normalize_tail_rows,
+    validate_provinces,
+)
 from .estimator import (
     ProvinceTransitionForecast,
     TransitionEstimatorConfig,
@@ -21,9 +27,14 @@ from .merge import (
     MergedProvinceForecast,
     merge_province_forecasts,
 )
-from .repository import load_regional_tail_history
+from .repository import load_boundary_sources, load_regional_tail_history
 from .selector import select_from_merged_forecast
 from .state import DrawDigitState, build_state_sequences
+from src.xsmn_ensemble.resolve_provinces import (
+    XSMN_ENSEMBLE_SCHEDULE,
+    get_previous_scheduled_date,
+    get_scheduled_provinces,
+)
 
 
 @dataclass(frozen=True)
@@ -348,6 +359,126 @@ def _insufficient(
     }
 
 
+def _freshness_dimensions(
+    provinces: Sequence[str],
+    target_date: date,
+) -> tuple[tuple[str, str], dict[str, date], date, tuple[str, ...]]:
+    """Resolve the approved target anchors and full regional D-1 boundary."""
+    province_scope = validate_provinces(list(provinces))
+    if len(province_scope) != 2:
+        raise ValueError("PDA/DDT requires exactly two distinct XSMN provinces")
+    scheduled = tuple(XSMN_ENSEMBLE_SCHEDULE.get(target_date.weekday(), ()))
+    if province_scope != scheduled:
+        raise ValueError("PDA/DDT provinces must match the target-date schedule")
+    province_pair = (province_scope[0], province_scope[1])
+    expected_anchors = {
+        province: get_previous_scheduled_date(target_date, province)
+        for province in province_pair
+    }
+    regional_boundary_date = target_date - timedelta(days=1)
+    regional_provinces = tuple(get_scheduled_provinces(regional_boundary_date))
+    if not regional_provinces:
+        raise ValueError("XSMN regional boundary schedule is empty")
+    return (
+        province_pair,
+        expected_anchors,
+        regional_boundary_date,
+        regional_provinces,
+    )
+
+
+def load_current_freshness_manifest(
+    db: Any,
+    provinces: Sequence[str],
+    target_date: date,
+) -> dict:
+    """Query and certify the current leakage-safe DDT boundary input."""
+    (
+        province_pair,
+        expected_anchors,
+        regional_boundary_date,
+        regional_provinces,
+    ) = _freshness_dimensions(provinces, target_date)
+    required_draws = [
+        (province, expected_anchors[province])
+        for province in province_pair
+    ]
+    required_draws.extend(
+        (province, regional_boundary_date)
+        for province in regional_provinces
+    )
+    raw_rows, tail_rows = load_boundary_sources(db, required_draws)
+    return build_freshness_manifest(
+        target_date=target_date,
+        target_provinces=province_pair,
+        expected_anchors=expected_anchors,
+        regional_boundary_date=regional_boundary_date,
+        regional_provinces=regional_provinces,
+        raw_rows=raw_rows,
+        tail_rows=tail_rows,
+    )
+
+
+def _with_run_audit(
+    result: dict,
+    manifest: Mapping[str, object],
+    *,
+    checked_at: str,
+    postcheck_manifest: Optional[Mapping[str, object]] = None,
+) -> dict:
+    """Attach the certified input contract without changing model output."""
+    audited = dict(result)
+    existing = audited.get("run_metadata")
+    run_metadata = dict(existing) if isinstance(existing, dict) else {}
+    run_metadata.update(
+        {
+            "input_manifest": dict(manifest),
+            "input_checked_at": checked_at,
+            "postcheck_boundary_watermark": (
+                postcheck_manifest.get("boundary_watermark")
+                if isinstance(postcheck_manifest, Mapping)
+                else None
+            ),
+            "postcheck_status": (
+                postcheck_manifest.get("status")
+                if isinstance(postcheck_manifest, Mapping)
+                else None
+            ),
+        }
+    )
+    if postcheck_manifest is not None and postcheck_manifest.get("status") != "certified":
+        run_metadata["postcheck_manifest"] = dict(postcheck_manifest)
+    audited["run_metadata"] = run_metadata
+    return audited
+
+
+def _operational_failure(
+    target_date: date,
+    provinces: tuple[str, str],
+    reason: str,
+    manifest: Mapping[str, object],
+    *,
+    checked_at: str,
+    failure_stage: str,
+) -> dict:
+    """Return a stable, credential-free operational failure with input audit."""
+    return _with_run_audit(
+        {
+            "model_name": "provincial_digit_transition_v1",
+            "mode": "shadow",
+            "status": "error",
+            "reason": reason,
+            "failure_stage": failure_stage,
+            "target_date": target_date.isoformat(),
+            "data_cutoff": target_date.isoformat(),
+            "provinces": list(provinces),
+            "top_3": [],
+        },
+        manifest,
+        checked_at=checked_at,
+    )
+
+
 def predict_digit_transition(
     rows: Iterable[Mapping[str, object]],
     provinces: Sequence[str],
@@ -569,19 +700,155 @@ def generate_shadow_prediction(
     target_date: date,
     config: Optional[DigitTransitionConfig] = None,
 ) -> dict:
-    """Load pre-target data and run PDA/DDT without production persistence."""
+    """Load certified current data and run PDA/DDT without persistence.
+
+    Boundary input is queried before scoring and again afterwards.  A result is
+    never returned as successful when required source data is incomplete or
+    changes while the model is running.
+    """
     province_scope = validate_provinces(list(provinces))
     if len(province_scope) != 2:
         raise ValueError("PDA/DDT requires exactly two distinct XSMN provinces")
-    regional_rows = load_regional_tail_history(db, target_date)
-    province_set = set(province_scope)
-    rows = tuple(
-        row for row in regional_rows if str(row.get("province")) in province_set
-    )
-    return predict_digit_transition(
-        rows,
-        province_scope,
-        target_date,
-        config,
-        regional_rows=regional_rows,
+    province_pair = (province_scope[0], province_scope[1])
+    checked_at = datetime.now(timezone.utc).isoformat()
+    manifest = load_current_freshness_manifest(db, province_pair, target_date)
+    if manifest.get("status") != "certified":
+        return _with_run_audit(
+            _insufficient(
+                target_date,
+                province_pair,
+                "input_not_fresh",
+                input_issues=list(manifest.get("issues") or ()),
+            ),
+            manifest,
+            checked_at=checked_at,
+        )
+
+    try:
+        regional_rows = load_regional_tail_history(db, target_date)
+    except Exception:
+        return _operational_failure(
+            target_date,
+            province_pair,
+            "history_load_failed",
+            manifest,
+            checked_at=checked_at,
+            failure_stage="history_load",
+        )
+    try:
+        province_set = set(province_scope)
+        rows = tuple(
+            row
+            for row in regional_rows
+            if str(row.get("province")) in province_set
+        )
+        regional_provinces = tuple(
+            sorted(
+                {
+                    str(row.get("province"))
+                    for row in regional_rows
+                    if row.get("province")
+                }
+            )
+        )
+        regional_draws = (
+            normalize_tail_rows(
+                regional_rows,
+                list(regional_provinces),
+                before_date=target_date,
+            )
+            if regional_provinces
+            else {}
+        )
+        consumed_anchors = {
+            province: (
+                regional_draws[province][-1].draw_date.isoformat()
+                if regional_draws.get(province)
+                else None
+            )
+            for province in province_pair
+        }
+        audited_manifest = dict(manifest)
+        audited_manifest.update(
+            {
+                "consumed_anchors": consumed_anchors,
+                "full_history_hash": fingerprint_draw_history(
+                    regional_draws,
+                    target_date=target_date,
+                    target_provinces=province_pair,
+                ),
+                "full_history_draw_count": sum(
+                    len(draws) for draws in regional_draws.values()
+                ),
+                "full_history_tail_count": sum(
+                    len(draw.tails)
+                    for draws in regional_draws.values()
+                    for draw in draws
+                ),
+            }
+        )
+    except Exception:
+        return _operational_failure(
+            target_date,
+            province_pair,
+            "history_normalization_failed",
+            manifest,
+            checked_at=checked_at,
+            failure_stage="history_normalization",
+        )
+
+    expected_anchors = audited_manifest.get("expected_anchors")
+    if consumed_anchors != expected_anchors:
+        result = _insufficient(
+            target_date,
+            province_pair,
+            "consumed_anchor_mismatch",
+            expected_anchors=expected_anchors,
+            consumed_anchors=consumed_anchors,
+        )
+    else:
+        try:
+            result = predict_digit_transition(
+                rows,
+                province_scope,
+                target_date,
+                config,
+                regional_rows=regional_rows,
+            )
+        except Exception:
+            return _operational_failure(
+                target_date,
+                province_pair,
+                "scoring_failed",
+                audited_manifest,
+                checked_at=checked_at,
+                failure_stage="scoring",
+            )
+    try:
+        postcheck = load_current_freshness_manifest(db, province_pair, target_date)
+    except Exception:
+        return _operational_failure(
+            target_date,
+            province_pair,
+            "freshness_postcheck_failed",
+            audited_manifest,
+            checked_at=checked_at,
+            failure_stage="freshness_postcheck",
+        )
+    if (
+        postcheck.get("status") != "certified"
+        or postcheck.get("boundary_watermark")
+        != manifest.get("boundary_watermark")
+    ):
+        result = _insufficient(
+            target_date,
+            province_pair,
+            "input_changed_during_run",
+            input_issues=list(postcheck.get("issues") or ()),
+        )
+    return _with_run_audit(
+        result,
+        audited_manifest,
+        checked_at=checked_at,
+        postcheck_manifest=postcheck,
     )
