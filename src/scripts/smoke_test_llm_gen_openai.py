@@ -1,6 +1,6 @@
 """Run a manual, data-side-effect-free OpenAI smoke test for ``LLM_Gen``.
 
-The diagnostic uses the production provider adapter and structured-output
+The diagnostic uses the production provider adapter and validated output
 contract with a small synthetic evidence packet.  It never reads Supabase,
 writes a prediction, or sends Telegram messages.  Output is intentionally
 limited to non-secret status, latency, usage, and the validated Top 3.

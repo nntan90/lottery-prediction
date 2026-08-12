@@ -795,7 +795,7 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
         self.assertFalse(save_shadow_prediction(db, incoming))
         self.assertNotIn("model_predictions", db.updated)
 
-    def test_llm_gen_identity_rejects_changed_backend_model_and_legacy_wire(self):
+    def test_llm_gen_identity_rejects_changed_backend_model_and_old_wire(self):
         from src.database.prediction_repo import _same_llm_gen_identity
 
         base = {
@@ -820,33 +820,33 @@ class TestShadowPredictionLifecycle(unittest.TestCase):
             **base,
             "run_metadata": {
                 **base["run_metadata"],
-                "provider_model": "gpt-5.6",
+                "provider_model": "gpt-5.5",
                 "api_backend": "agentrouter",
-                "wire_api": "responses",
+                "wire_api": "chat_completions",
                 "config": {
                     **base["run_metadata"]["config"],
-                    "provider_model": "gpt-5.6",
+                    "provider_model": "gpt-5.5",
                     "api_backend": "agentrouter",
-                    "wire_api": "responses",
+                    "wire_api": "chat_completions",
                 },
             },
         }
-        legacy_agentrouter = {
+        old_agentrouter = {
             **agentrouter,
             "run_metadata": {
                 **agentrouter["run_metadata"],
-                "provider_model": "gpt-5.6-sol",
-                "wire_api": "chat_completions",
+                "provider_model": "gpt-5.6",
+                "wire_api": "responses",
                 "config": {
                     **agentrouter["run_metadata"]["config"],
-                    "provider_model": "gpt-5.6-sol",
-                    "wire_api": "chat_completions",
+                    "provider_model": "gpt-5.6",
+                    "wire_api": "responses",
                 },
             },
         }
 
         self.assertFalse(_same_llm_gen_identity(base, agentrouter))
-        self.assertFalse(_same_llm_gen_identity(agentrouter, legacy_agentrouter))
+        self.assertFalse(_same_llm_gen_identity(agentrouter, old_agentrouter))
 
     def test_llm_gen_unique_insert_race_never_overwrites_first_success(self):
         from src.database.prediction_repo import save_shadow_prediction

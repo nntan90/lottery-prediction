@@ -34,7 +34,7 @@ jobs:
       - name: Install minimal dependency
         run: pip install 'requests==2.32.5'
 
-      - name: Check GPT-5.6 and call AgentRouter Responses
+      - name: Check GPT-5.5 and call AgentRouter Chat Completions
         env:
           LLM_GEN_MODE: shadow
           LLM_GEN_PROVIDER: openai

@@ -156,12 +156,12 @@ def test_agentrouter_smoke_preflights_model_before_generation() -> None:
 
     assert exit_code == 0
     assert events == [
-        ("preflight", "agentrouter", "gpt-5.6"),
-        ("generation", "responses", "gpt-5.6"),
+        ("preflight", "agentrouter", "gpt-5.5"),
+        ("generation", "chat_completions", "gpt-5.5"),
     ]
-    assert summary["provider_model"] == "gpt-5.6"
+    assert summary["provider_model"] == "gpt-5.5"
     assert summary["api_backend"] == "agentrouter"
-    assert summary["wire_api"] == "responses"
+    assert summary["wire_api"] == "chat_completions"
     assert summary["model_available"] is True
     assert "router-key-must-not-appear" not in json.dumps(summary)
 
@@ -203,9 +203,9 @@ def test_agentrouter_smoke_requires_the_separate_selected_key() -> None:
 
     assert exit_code == 2
     assert summary["reason"] == "missing_api_key"
-    assert summary["provider_model"] == "gpt-5.6"
+    assert summary["provider_model"] == "gpt-5.5"
     assert summary["api_backend"] == "agentrouter"
-    assert summary["wire_api"] == "responses"
+    assert summary["wire_api"] == "chat_completions"
 
 
 def test_summary_allowlists_reason_and_usage_fields() -> None:
@@ -287,8 +287,8 @@ def test_workflow_is_manual_and_has_no_database_or_telegram_secrets() -> None:
     assert parsed["concurrency"]["cancel-in-progress"] == "true"
     assert "secrets.AGENTROUTER_API_KEY" in workflow
     assert "LLM_GEN_OPENAI_BACKEND: agentrouter" in workflow
-    assert "call AgentRouter Responses" in workflow
-    assert "Chat Completions" not in workflow
+    assert "Check GPT-5.5 and call AgentRouter Chat Completions" in workflow
+    assert "AgentRouter Responses" not in workflow
     assert "secrets.OPENAI_API_KEY" not in workflow
     assert "actions/checkout@v4" not in workflow
     assert "actions/setup-python@v5" not in workflow

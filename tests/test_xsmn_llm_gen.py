@@ -106,7 +106,7 @@ def _provider_payload() -> dict:
 
 def _config(provider: str, *, backend: str = "official") -> LLMGenConfig:
     if provider == "openai":
-        model = "gpt-5.6" if backend == "agentrouter" else "gpt-5.6-sol"
+        model = "gpt-5.5" if backend == "agentrouter" else "gpt-5.6-sol"
     else:
         model = "claude-opus-4-8"
     return LLMGenConfig(
@@ -200,14 +200,14 @@ def test_agentrouter_config_reads_only_its_key_and_audits_wire_identity() -> Non
     config = load_llm_gen_config(env)
 
     assert config.provider == "openai"
-    assert config.provider_model == "gpt-5.6"
+    assert config.provider_model == "gpt-5.5"
     assert config.api_backend == "agentrouter"
-    assert config.wire_api == "responses"
+    assert config.wire_api == "chat_completions"
     assert "AGENTROUTER_API_KEY" in env.reads
     assert "OPENAI_API_KEY" not in env.reads
     assert "ANTHROPIC_API_KEY" not in env.reads
     assert config.public_metadata()["api_backend"] == "agentrouter"
-    assert config.public_metadata()["wire_api"] == "responses"
+    assert config.public_metadata()["wire_api"] == "chat_completions"
     assert "router-secret" not in repr(config.public_metadata())
 
 
@@ -340,7 +340,7 @@ def test_evidence_rejects_fractional_pairs_dedupes_sources_and_preserves_zero_we
     }
 
 
-def test_validator_filters_hallucinations_duplicates_and_enforces_suffixes() -> None:
+def test_validator_rejects_hallucinated_candidate_instead_of_salvaging_top_three() -> None:
     payload = {
         "ranked_candidates": [
             {"pair": 99, "rank": 1, "ranking_score_uncalibrated": 1.0},
@@ -354,9 +354,27 @@ def test_validator_filters_hallucinations_duplicates_and_enforces_suffixes() -> 
 
     result = validate_ranked_candidates(payload, {11, 21, 25, 38})
 
+    assert result["status"] == "error"
+    assert result["reason"] == "candidate_outside_pool"
+    assert result["selected_evidence"] == []
+    assert result["validated_ranking"] == []
+
+
+def test_validator_collapses_duplicate_eligible_ranks_and_enforces_suffixes() -> None:
+    payload = {
+        "ranked_candidates": [
+            {"pair": 11, "rank": 1, "ranking_score_uncalibrated": 0.9},
+            {"pair": 11, "rank": 2, "ranking_score_uncalibrated": 0.8},
+            {"pair": 21, "rank": 3, "ranking_score_uncalibrated": 0.7},
+            {"pair": 25, "rank": 4, "ranking_score_uncalibrated": 0.6},
+            {"pair": 38, "rank": 5, "ranking_score_uncalibrated": 0.5},
+        ]
+    }
+
+    result = validate_ranked_candidates(payload, {11, 21, 25, 38})
+
     assert result["status"] == "success"
     assert [item["pair"] for item in result["selected_evidence"]] == [11, 25, 38]
-    assert len({item["pair"] % 10 for item in result["selected_evidence"]}) == 3
 
 
 def test_validator_abstains_instead_of_relaxing_diversity() -> None:
@@ -420,7 +438,7 @@ def test_openai_adapter_calls_only_responses_endpoint_and_fixed_model() -> None:
     assert result.usage["input_tokens"] == 100
 
 
-def test_agentrouter_adapter_uses_exact_responses_wire_and_usage() -> None:
+def test_agentrouter_adapter_uses_exact_chat_wire_and_normalized_usage() -> None:
     calls = []
 
     def transport(url, **kwargs):
@@ -428,22 +446,20 @@ def test_agentrouter_adapter_uses_exact_responses_wire_and_usage() -> None:
         return FakeResponse(
             200,
             {
-                "status": "completed",
-                "output": [
+                "choices": [
                     {
-                        "type": "message",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": json.dumps(_provider_payload()),
-                            }
-                        ],
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(_provider_payload()),
+                        },
                     }
                 ],
                 "usage": {
-                    "input_tokens": 101,
-                    "output_tokens": 21,
+                    "prompt_tokens": 101,
+                    "completion_tokens": 21,
                     "total_tokens": 122,
+                    "provider_internal_counter": 999,
                 },
             },
         )
@@ -455,19 +471,23 @@ def test_agentrouter_adapter_uses_exact_responses_wire_and_usage() -> None:
 
     assert len(calls) == 1
     url, kwargs = calls[0]
-    assert url == "https://agentrouter.org/v1/responses"
+    assert url == "https://co.agentrouter.org/v1/chat/completions"
     assert kwargs["allow_redirects"] is False
     assert kwargs["headers"]["Authorization"] == (
         "Bearer openai-agentrouter-secret"
     )
     payload = kwargs["json"]
-    assert payload["model"] == "gpt-5.6"
-    assert payload["input"][0]["role"] == "system"
-    assert payload["input"][1]["role"] == "user"
-    assert payload["max_output_tokens"] == 2000
-    assert payload["store"] is False
-    assert payload["text"]["format"]["type"] == "json_schema"
-    assert "messages" not in payload
+    assert payload["model"] == "gpt-5.5"
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][1]["role"] == "user"
+    user_payload = json.loads(payload["messages"][1]["content"])
+    assert user_payload["evidence_packet"] == {"candidate_pool": []}
+    assert user_payload["response_schema"]["required"] == ["ranked_candidates"]
+    assert payload["max_tokens"] == 2000
+    assert "input" not in payload
+    assert "text" not in payload
+    assert "max_output_tokens" not in payload
+    assert "store" not in payload
     assert "response_format" not in payload
     assert result.payload == _provider_payload()
     assert result.usage == {
@@ -480,70 +500,105 @@ def test_agentrouter_adapter_uses_exact_responses_wire_and_usage() -> None:
 @pytest.mark.parametrize(
     ("body", "reason"),
     [
-        ({}, "agentrouter_incomplete"),
-        (_provider_payload(), "agentrouter_incomplete"),
-        ({"status": "completed", "output": []}, "agentrouter_empty_content"),
+        ({}, "agentrouter_invalid_choice_count"),
+        ({"choices": []}, "agentrouter_invalid_choice_count"),
         (
             {
-                "status": "incomplete",
-                "incomplete_details": {"reason": "max_output_tokens"},
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{}"}},
+                    {"finish_reason": "stop", "message": {"content": "{}"}},
+                ]
+            },
+            "agentrouter_invalid_choice_count",
+        ),
+        ({"choices": [None]}, "agentrouter_invalid_choice"),
+        (
+            {"choices": [{"finish_reason": "stop"}]},
+            "agentrouter_invalid_choice",
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "{}"},
+                    }
+                ]
             },
             "agentrouter_truncated",
         ),
         (
-            {"status": "incomplete", "incomplete_details": {"reason": "other"}},
-            "agentrouter_incomplete",
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {"content": "{}"},
+                    }
+                ]
+            },
+            "agentrouter_invalid_finish_reason",
         ),
-        ({"status": "failed"}, "agentrouter_response_failed"),
-        ({"status": "queued"}, "agentrouter_incomplete"),
         (
             {
-                "status": "completed",
-                "output_text": json.dumps(_provider_payload()),
-                "output": [
+                "choices": [
                     {
-                        "content": [
-                            {"type": "refusal", "refusal": "blocked"},
-                        ]
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(_provider_payload()),
+                            "refusal": "blocked",
+                        },
                     }
-                ],
+                ]
             },
             "agentrouter_refusal",
         ),
         (
             {
-                "status": "completed",
-                "output": [
+                "choices": [
                     {
-                        "content": [
-                            {"type": "refusal", "refusal": "blocked"},
-                        ]
+                        "finish_reason": "content_filter",
+                        "message": {"content": "{}"},
                     }
-                ],
+                ]
             },
             "agentrouter_refusal",
         ),
         (
             {
-                "status": "completed",
-                "output": [
+                "choices": [
                     {
-                        "content": [{"type": "output_text", "text": ""}],
+                        "finish_reason": "stop",
+                        "message": {"content": ""},
                     }
-                ],
+                ]
             },
             "agentrouter_empty_content",
         ),
         (
             {
-                "status": "completed",
-                "output_text": "not-json",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "```json\n{}\n```"},
+                    }
+                ]
             },
             "invalid_provider_json",
         ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "{}"},
+                    }
+                ]
+            },
+            "invalid_provider_schema",
+        ),
     ],
 )
-def test_agentrouter_responses_output_fails_closed(body: dict, reason: str) -> None:
+def test_agentrouter_chat_output_fails_closed(body: dict, reason: str) -> None:
     adapter = OpenAIAdapter(
         _config("openai", backend="agentrouter"),
         transport=lambda *_a, **_k: FakeResponse(200, body),
@@ -551,29 +606,6 @@ def test_agentrouter_responses_output_fails_closed(body: dict, reason: str) -> N
 
     with pytest.raises(ProviderError, match=reason):
         adapter.rank({})
-
-
-def test_agentrouter_blank_output_text_falls_back_to_nested_output() -> None:
-    body = {
-        "status": "completed",
-        "output_text": "  ",
-        "output": [
-            {
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": json.dumps(_provider_payload()),
-                    }
-                ]
-            }
-        ],
-    }
-    result = OpenAIAdapter(
-        _config("openai", backend="agentrouter"),
-        transport=lambda *_a, **_k: FakeResponse(200, body),
-    ).rank({})
-
-    assert result.payload == _provider_payload()
 
 
 @pytest.mark.parametrize("status", [301, 401, 403])
@@ -607,7 +639,24 @@ def test_adapter_rejects_unmapped_endpoint_before_sending_credential() -> None:
 
     with pytest.raises(ProviderError, match="endpoint_not_allowed"):
         adapter._post(
-            endpoint="https://untrusted.example/v1/responses",
+            endpoint="https://untrusted.example/v1/chat/completions",
+            headers={"Authorization": "Bearer openai-agentrouter-secret"},
+            payload={},
+        )
+
+    assert calls == []
+
+
+def test_adapter_rejects_old_agentrouter_host_before_sending_credential() -> None:
+    calls = []
+    adapter = OpenAIAdapter(
+        _config("openai", backend="agentrouter"),
+        transport=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ProviderError, match="endpoint_not_allowed"):
+        adapter._post(
+            endpoint="https://agentrouter.org/v1/responses",
             headers={"Authorization": "Bearer openai-agentrouter-secret"},
             payload={},
         )
@@ -651,8 +700,12 @@ def test_agentrouter_retries_429_once_on_same_endpoint() -> None:
         FakeResponse(
             200,
             {
-                "status": "completed",
-                "output_text": json.dumps(_provider_payload()),
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": json.dumps(_provider_payload())},
+                    }
+                ],
             },
         ),
     ]
@@ -669,9 +722,29 @@ def test_agentrouter_retries_429_once_on_same_endpoint() -> None:
 
     assert result.payload == _provider_payload()
     assert [call[0] for call in calls] == [
-        "https://agentrouter.org/v1/responses",
-        "https://agentrouter.org/v1/responses",
+        "https://co.agentrouter.org/v1/chat/completions",
+        "https://co.agentrouter.org/v1/chat/completions",
     ]
+
+
+def test_agentrouter_timeout_retries_once_without_fallback() -> None:
+    calls = []
+
+    def timeout(url, **kwargs):
+        calls.append((url, kwargs))
+        raise requests.Timeout("credential-safe test timeout")
+
+    with pytest.raises(ProviderError, match="agentrouter_timeout"):
+        OpenAIAdapter(
+            _config("openai", backend="agentrouter"),
+            transport=timeout,
+        ).rank({})
+
+    assert [call[0] for call in calls] == [
+        "https://co.agentrouter.org/v1/chat/completions",
+        "https://co.agentrouter.org/v1/chat/completions",
+    ]
+    assert all(call[1]["allow_redirects"] is False for call in calls)
 
 
 def test_anthropic_adapter_calls_only_messages_endpoint_and_fixed_model() -> None:
@@ -767,7 +840,7 @@ def test_agentrouter_model_preflight_uses_exact_endpoint_without_exposing_list()
         calls.append((url, kwargs))
         return FakeResponse(
             200,
-            {"data": [{"id": "other-model"}, {"id": "gpt-5.6"}]},
+            {"data": [{"id": "other-model"}, {"id": "gpt-5.5"}]},
         )
 
     result = ensure_agentrouter_model_available(
@@ -777,7 +850,7 @@ def test_agentrouter_model_preflight_uses_exact_endpoint_without_exposing_list()
 
     assert result is None
     assert len(calls) == 1
-    assert calls[0][0] == "https://agentrouter.org/v1/models"
+    assert calls[0][0] == "https://co.agentrouter.org/v1/models"
     assert calls[0][1]["allow_redirects"] is False
     assert calls[0][1]["headers"]["Authorization"] == (
         "Bearer openai-agentrouter-secret"
@@ -795,10 +868,54 @@ def test_agentrouter_model_preflight_fails_closed_when_model_is_missing() -> Non
         )
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (401, {}, "agentrouter_http_401"),
+        (403, {}, "agentrouter_http_403"),
+        (200, {}, "agentrouter_invalid_models_response"),
+        (200, {"data": {}}, "agentrouter_invalid_models_response"),
+    ],
+)
+def test_agentrouter_model_preflight_fails_closed_without_retrying_permanent_errors(
+    status: int,
+    body: object,
+    reason: str,
+) -> None:
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(status, body)
+
+    with pytest.raises(ProviderError, match=reason):
+        ensure_agentrouter_model_available(
+            _config("openai", backend="agentrouter"),
+            transport=transport,
+        )
+
+    assert len(calls) == 1
+    assert calls[0][0] == "https://co.agentrouter.org/v1/models"
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_agentrouter_model_preflight_rejects_other_backend_config() -> None:
+    with pytest.raises(
+        ProviderError,
+        match="agentrouter_preflight_config_mismatch",
+    ):
+        ensure_agentrouter_model_available(
+            _config("openai", backend="official"),
+            transport=lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("preflight request must not run")
+            ),
+        )
+
+
 def test_agentrouter_model_preflight_retries_only_transient_failure() -> None:
     responses = [
         FakeResponse(500, {}),
-        FakeResponse(200, {"data": [{"id": "gpt-5.6"}]}),
+        FakeResponse(200, {"data": [{"id": "gpt-5.5"}]}),
     ]
     calls = []
 
@@ -812,8 +929,8 @@ def test_agentrouter_model_preflight_retries_only_transient_failure() -> None:
     )
 
     assert [call[0] for call in calls] == [
-        "https://agentrouter.org/v1/models",
-        "https://agentrouter.org/v1/models",
+        "https://co.agentrouter.org/v1/models",
+        "https://co.agentrouter.org/v1/models",
     ]
 
 
@@ -902,10 +1019,10 @@ def test_service_never_reuses_same_input_across_openai_backends() -> None:
     assert result["status"] == "canonical_conflict"
     assert result["reason"] == "canonical_conflict"
     assert result["run_metadata"]["api_backend"] == "agentrouter"
-    assert result["run_metadata"]["wire_api"] == "responses"
+    assert result["run_metadata"]["wire_api"] == "chat_completions"
 
 
-def test_service_rejects_legacy_agentrouter_chat_canonical() -> None:
+def test_service_rejects_legacy_agentrouter_responses_canonical() -> None:
     config = _config("openai", backend="agentrouter")
     packet = build_evidence_packet(_model_results(), ["a", "b"], date(2026, 8, 4))
     existing = {
@@ -919,9 +1036,9 @@ def test_service_rejects_legacy_agentrouter_chat_canonical() -> None:
         "score_3": 0.73,
         "run_metadata": {
             "provider": "openai",
-            "provider_model": "gpt-5.6-sol",
+            "provider_model": "gpt-5.6",
             "api_backend": "agentrouter",
-            "wire_api": "chat_completions",
+            "wire_api": "responses",
             "prompt_version": config.prompt_version,
             "schema_version": config.schema_version,
             "model_version": config.model_version,
@@ -929,8 +1046,8 @@ def test_service_rejects_legacy_agentrouter_chat_canonical() -> None:
             "provinces": ["a", "b"],
             "config": {
                 **config.public_metadata(),
-                "provider_model": "gpt-5.6-sol",
-                "wire_api": "chat_completions",
+                "provider_model": "gpt-5.6",
+                "wire_api": "responses",
             },
         },
     }
@@ -947,8 +1064,8 @@ def test_service_rejects_legacy_agentrouter_chat_canonical() -> None:
     )
 
     assert result["status"] == "canonical_conflict"
-    assert result["run_metadata"]["provider_model"] == "gpt-5.6"
-    assert result["run_metadata"]["wire_api"] == "responses"
+    assert result["run_metadata"]["provider_model"] == "gpt-5.5"
+    assert result["run_metadata"]["wire_api"] == "chat_completions"
 
 
 def test_existing_success_conflicts_before_insufficient_rerun_checks() -> None:
@@ -1056,6 +1173,91 @@ def test_service_calls_one_selected_provider_and_returns_auditable_top_three() -
     assert result["run_metadata"]["input_hash"]
     assert result["run_metadata"]["usage"]["input_tokens"] == 100
     assert calls == ["https://api.openai.com/v1/responses"]
+
+
+def test_service_agentrouter_success_has_current_canonical_identity() -> None:
+    calls = []
+
+    def transport(url, **kwargs):
+        calls.append(url)
+        return FakeResponse(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": json.dumps(_provider_payload())},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+            },
+        )
+
+    result = run_llm_gen(
+        _config("openai", backend="agentrouter"),
+        _model_results(),
+        ["a", "b"],
+        date(2026, 8, 12),
+        transport=transport,
+    )
+
+    assert result["status"] == "success"
+    assert result["top_3"] == ["11", "25", "38"]
+    assert result["score_semantics"] == "ranking_score_uncalibrated"
+    metadata = result["run_metadata"]
+    assert metadata["provider"] == "openai"
+    assert metadata["provider_model"] == "gpt-5.5"
+    assert metadata["api_backend"] == "agentrouter"
+    assert metadata["wire_api"] == "chat_completions"
+    assert metadata["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
+    assert calls == ["https://co.agentrouter.org/v1/chat/completions"]
+
+
+def test_service_agentrouter_fails_closed_when_provider_invents_candidate() -> None:
+    provider_payload = _provider_payload()
+    provider_payload["ranked_candidates"].insert(
+        0,
+        {
+            "pair": 99,
+            "rank": 1,
+            "ranking_score_uncalibrated": 0.99,
+            "evidence_codes": ["INVENTED"],
+            "risk_flags": [],
+        },
+    )
+    for rank, item in enumerate(provider_payload["ranked_candidates"], start=1):
+        item["rank"] = rank
+
+    result = run_llm_gen(
+        _config("openai", backend="agentrouter"),
+        _model_results(),
+        ["a", "b"],
+        date(2026, 8, 12),
+        transport=lambda *_a, **_k: FakeResponse(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": json.dumps(provider_payload)},
+                    }
+                ]
+            },
+        ),
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "candidate_outside_pool"
+    assert result["selected_evidence"] == []
+    assert "top_3" not in result
 
 
 def test_orchestration_off_mode_skips_schema_build_and_provider(monkeypatch) -> None:
@@ -1231,9 +1433,9 @@ def test_prediction_shadow_row_displays_selected_provider() -> None:
     [
         ("agentrouter_http_401", "AgentRouter từ chối API key (401)"),
         ("agentrouter_http_403", "AgentRouter không cấp quyền model (403)"),
-        ("agentrouter_model_unavailable", "AgentRouter chưa cấp GPT-5.6"),
+        ("agentrouter_model_unavailable", "AgentRouter chưa cấp GPT-5.5"),
         ("agentrouter_timeout", "AgentRouter hết thời gian chờ"),
-        ("agentrouter_incomplete", "AgentRouter chưa hoàn tất Responses"),
+        ("agentrouter_incomplete", "AgentRouter chưa hoàn tất kết quả"),
     ],
 )
 def test_prediction_shadow_row_shows_safe_agentrouter_reason(
@@ -1248,14 +1450,14 @@ def test_prediction_shadow_row_shows_safe_agentrouter_reason(
             "reason": reason,
             "run_metadata": {
                 "provider": "openai",
-                "provider_model": "gpt-5.6",
+                "provider_model": "gpt-5.5",
                 "api_backend": "agentrouter",
-                "wire_api": "responses",
+                "wire_api": "chat_completions",
             },
         }
     )
 
-    assert row.label == "LLM_Gen [AgentRouter · GPT-5.6]"
+    assert row.label == "LLM_Gen [AgentRouter · GPT-5.5]"
     assert row.status == expected
     assert "secret" not in row.status.lower()
 

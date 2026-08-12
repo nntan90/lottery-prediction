@@ -33,10 +33,11 @@ def validate_ranked_candidates(
     *,
     max_candidates: int = 10,
 ) -> dict[str, object]:
-    """Filter provider ranks and select three unique, distinct unit digits.
+    """Validate provider ranks and select three distinct unit digits.
 
-    Invalid candidates are ignored. The validator never fills from outside the
-    eligible pool and never relaxes the unit-digit guardrail.
+    A pair outside the eligible pool fails the complete response closed so a
+    provider cannot invent candidates while still earning a successful Top 3.
+    Duplicate eligible ranks remain harmless and are collapsed deterministically.
     """
     allowed: set[int] = set()
     for raw_pair in candidate_pool:
@@ -84,9 +85,15 @@ def validate_ranked_candidates(
         pair = raw_pair
         rank = raw_rank
         score = float(raw_score)
+        if pair not in allowed:
+            return {
+                "status": "error",
+                "reason": "candidate_outside_pool",
+                "selected_evidence": [],
+                "validated_ranking": [],
+            }
         if (
-            pair not in allowed
-            or rank < 1
+            rank < 1
             or rank > 100
             or not math.isfinite(score)
             or not 0.0 <= score <= 1.0

@@ -207,6 +207,29 @@ def test_llm_gen_shadow_names_the_selected_provider_without_probability_wording(
     assert "xác suất" not in message.casefold()
 
 
+def test_llm_gen_agentrouter_shadow_names_current_model_and_chat_backend() -> None:
+    message = format_compact_ensemble_message(
+        region="XSMN",
+        target_date=date(2026, 8, 12),
+        dow_label="Thứ Tư",
+        top_pairs=((1, 1.0), (2, 0.9), (3, 0.8)),
+        models_active=12,
+        models_total=12,
+        version="Ensemble v3.5",
+        additional_shadows=(
+            ShadowRow(
+                label="LLM_Gen [AgentRouter · GPT-5.5]",
+                top_pairs=((12, 0.91), (25, 0.72), (38, 0.68)),
+                status="điểm xếp hạng chưa calibration",
+            ),
+        ),
+    )
+
+    assert "LLM_Gen [AgentRouter · GPT-5.5]" in message
+    assert "<code>12</code> (0.910)" in message
+    assert "xác suất" not in message.casefold()
+
+
 def test_xsmn_friday_message_has_clear_production_shadow_and_health_sections() -> None:
     message = format_compact_ensemble_message(
         region="XSMN",

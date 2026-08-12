@@ -42,6 +42,7 @@ jobs:
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           LLM_GEN_MODE:        ${{ vars.LLM_GEN_MODE }}
           LLM_GEN_PROVIDER:    ${{ vars.LLM_GEN_PROVIDER }}
+          # AgentRouter is code-fixed to co.agentrouter.org, GPT-5.5 and Chat Completions.
           LLM_GEN_OPENAI_BACKEND: ${{ vars.LLM_GEN_OPENAI_BACKEND }}
           OPENAI_API_KEY: >-
             ${{ vars.LLM_GEN_MODE == 'shadow' && vars.LLM_GEN_PROVIDER == 'openai' &&

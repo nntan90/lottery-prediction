@@ -17,11 +17,11 @@ PROVIDER_MODELS = {
 }
 OPENAI_BACKEND_MODELS = {
     "official": PROVIDER_MODELS["openai"],
-    "agentrouter": "gpt-5.6",
+    "agentrouter": "gpt-5.5",
 }
 OPENAI_BACKEND_WIRE_APIS = {
     "official": "responses",
-    "agentrouter": "responses",
+    "agentrouter": "chat_completions",
 }
 OPENAI_BACKEND_KEY_ENV = {
     "official": "OPENAI_API_KEY",

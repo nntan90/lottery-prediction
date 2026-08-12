@@ -365,6 +365,7 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
     api_backend = str(metadata.get("api_backend") or "")
     provider_labels = {
         "gpt-5.6-sol": "GPT-5.6 Sol",
+        "gpt-5.5": "GPT-5.5",
         "gpt-5.6": "GPT-5.6",
         "claude-opus-4-8": "Claude Opus 4.8",
     }
@@ -403,11 +404,11 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
         "agentrouter_http_401": "AgentRouter từ chối API key (401)",
         "agentrouter_http_403": "AgentRouter không cấp quyền model (403)",
         "agentrouter_http_429": "AgentRouter đang giới hạn tần suất (429)",
-        "agentrouter_model_unavailable": "AgentRouter chưa cấp GPT-5.6",
+        "agentrouter_model_unavailable": "AgentRouter chưa cấp GPT-5.5",
         "agentrouter_timeout": "AgentRouter hết thời gian chờ",
         "agentrouter_request_failed": "Không kết nối được AgentRouter",
-        "agentrouter_incomplete": "AgentRouter chưa hoàn tất Responses",
-        "agentrouter_response_failed": "AgentRouter Responses thất bại",
+        "agentrouter_incomplete": "AgentRouter chưa hoàn tất kết quả",
+        "agentrouter_response_failed": "AgentRouter tạo kết quả thất bại",
         "agentrouter_invalid_choice_count": "AgentRouter trả số choice không hợp lệ",
         "agentrouter_invalid_choice": "AgentRouter trả choice không hợp lệ",
         "agentrouter_empty_content": "AgentRouter trả nội dung rỗng",
@@ -417,6 +418,7 @@ def _llm_gen_shadow_row(result: Optional[dict]) -> Optional[ShadowRow]:
         "agentrouter_invalid_models_response": "Không đọc được danh sách model AgentRouter",
         "invalid_provider_json": "Provider trả JSON không hợp lệ",
         "invalid_provider_schema": "Provider trả schema không hợp lệ",
+        "candidate_outside_pool": "Provider trả số ngoài candidate pool",
         "endpoint_not_allowed": "Endpoint provider không nằm trong allowlist",
     }
     status = status_map.get(reason)
